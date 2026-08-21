@@ -1,7 +1,7 @@
 {
   "name": "unfug-community-bot",
-  "version": "3.0.0",
-  "description": "Discord Community Bot mit Socials, Tickets, Verifizierung, Moderation, Logs und Community-Funktionen",
+  "version": "3.1.0",
+  "description": "Discord Community Bot mit Socials, Tickets, Verifizierung, Moderation, Vorschlägen und Giveaways",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
