@@ -1,30 +1,47 @@
-# Discord Socials Bot – iPhone / Railway
+# Unfug Community Bot – All-in-One
 
-Diese Version ist für Hosting über Railway vorbereitet.
+Diese Version enthält **alle bisherigen Funktionen in einer einzigen `index.js`**.
 
-## Bereits eingetragene IDs
-- Client ID: 1540161502856740914
-- Guild ID: 1531989453168578650
-- Panel Channel ID: 1540162074531856474
+## Enthalten
 
-## Railway Variable
-Lege im Railway-Service unter **Variables** an:
+- Socials-System inkl. mehreren Links, Rollen-Sortierung, Edit/Delete/MySocials
+- automatische Vorschlags-Panels aus normalen Nachrichten mit ✅ / ❌
+- Ticket-System
+- Verifizierung per Rechenaufgabe
+- Welcome / Leave
+- Moderation und Warnsystem
+- Logs
+- Ankündigungen und Abstimmungen
+- Giveaway-System mit Teilnahme-Button, automatischer Auslosung, End und Reroll
 
-`DISCORD_TOKEN=dein_token`
+## Giveaway Commands
 
-Der Token gehört **nicht** in GitHub.
+- `/giveaway start`
+- `/giveaway end`
+- `/giveaway reroll`
+- `/giveaway list`
 
-## Start
-Railway erkennt Node.js automatisch und startet mit:
+Die Dauer wird z. B. als `10m`, `2h`, `1d` angegeben.
 
-`npm start`
+## Giveaway-Channel
 
-Beim Start registriert der Bot `/socials` automatisch.
+Optional: `/setup channel` → `Giveaways` auswählen.
 
-## Daten dauerhaft speichern
-Ohne Volume kann `data.json` bei einem neuen Deployment verloren gehen.
-Erstelle in Railway ein Volume und verbinde es mit dem Bot-Service. Mount Path z. B.:
+## Railway
 
-`/data`
+Pflichtvariable:
 
-Der Bot erkennt `RAILWAY_VOLUME_MOUNT_PATH` automatisch und speichert dort `data.json`.
+- `DISCORD_TOKEN`
+
+Empfohlen: Railway Volume auf `/data`, damit Socials, Warnungen, Einstellungen und Giveaways Deployments überleben.
+
+## Discord Developer Portal
+
+Unter **Bot → Privileged Gateway Intents** aktivieren:
+
+- Server Members Intent
+- Message Content Intent
+
+## GitHub Update
+
+Die vorhandene `index.js` im Repo vollständig durch diese Version ersetzen und committen. Railway deployt danach neu.
