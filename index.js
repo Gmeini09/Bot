@@ -98,10 +98,30 @@ function canManageSocials(member) {
   return allowedRoleIds.some(roleId => member.roles.cache.has(roleId));
 }
 
+function getEntryUrls(entry) {
+  if (Array.isArray(entry.urls)) {
+    return entry.urls.filter(Boolean);
+  }
+
+  // Alte data.json-Versionen automatisch weiter unterstützen.
+  if (entry.url) {
+    return [entry.url];
+  }
+
+  return [];
+}
+
 function buildPanelEmbeds(members) {
   const lines = members.map((entry, index) => {
-    const platform = platformName(entry.url);
-    return `**${index + 1}.** <@${entry.userId}>\n└ [${platform}](${entry.url})`;
+    const urls = getEntryUrls(entry);
+
+    const socialLines = urls.map((url, urlIndex) => {
+      const platform = platformName(url);
+      const prefix = urlIndex === urls.length - 1 ? '└' : '├';
+      return `${prefix} [${platform}](${url})`;
+    });
+
+    return `**${index + 1}.** <@${entry.userId}>\n${socialLines.join('\n')}`;
   });
 
   const chunks = [];
@@ -177,7 +197,7 @@ client.once(Events.ClientReady, async readyClient => {
   const commands = [
     new SlashCommandBuilder()
       .setName('socials')
-      .setDescription('Fügt eine Person mit Social-Link zum Socials-Panel hinzu.')
+      .setDescription('Fügt Social-Links zu einer Discord-ID hinzu.')
       .toJSON(),
   ];
 
@@ -231,11 +251,11 @@ client.on(Events.InteractionCreate, async interaction => {
 
       const linkInput = new TextInputBuilder()
         .setCustomId('social_link')
-        .setLabel('YouTube / TikTok / anderer Link')
-        .setPlaceholder('https://youtube.com/@name')
-        .setStyle(TextInputStyle.Short)
+        .setLabel('Social-Links (einer pro Zeile)')
+        .setPlaceholder('https://youtube.com/@name\nhttps://tiktok.com/@name\nhttps://instagram.com/name')
+        .setStyle(TextInputStyle.Paragraph)
         .setRequired(true)
-        .setMaxLength(500);
+        .setMaxLength(3000);
 
       modal.addComponents(
         new ActionRowBuilder().addComponents(discordIdInput),
@@ -255,17 +275,42 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       const userId = interaction.fields.getTextInputValue('discord_id').trim();
-      const rawUrl = interaction.fields.getTextInputValue('social_link').trim();
+      const rawLinks = interaction.fields.getTextInputValue('social_link').trim();
 
       if (!isValidDiscordId(userId)) {
         await interaction.reply({ content: '❌ Die Discord-ID ist ungültig.', ephemeral: true });
         return;
       }
 
-      const url = normalizeUrl(rawUrl);
-      if (!url) {
-        await interaction.reply({ content: '❌ Bitte gib einen gültigen http:// oder https:// Link ein.', ephemeral: true });
+      const submittedLinks = rawLinks
+        .split(/\r?\n/)
+        .map(value => value.trim())
+        .filter(Boolean);
+
+      if (submittedLinks.length === 0) {
+        await interaction.reply({ content: '❌ Bitte gib mindestens einen Link ein.', ephemeral: true });
         return;
+      }
+
+      if (submittedLinks.length > 10) {
+        await interaction.reply({ content: '❌ Du kannst pro Vorgang maximal 10 Links hinzufügen.', ephemeral: true });
+        return;
+      }
+
+      const normalizedLinks = [];
+      for (const rawLink of submittedLinks) {
+        const normalized = normalizeUrl(rawLink);
+        if (!normalized) {
+          await interaction.reply({
+            content: `❌ Ungültiger Link: ${rawLink}\nJeder Link muss mit http:// oder https:// beginnen.`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        if (!normalizedLinks.includes(normalized)) {
+          normalizedLinks.push(normalized);
+        }
       }
 
       const targetMember = await interaction.guild.members.fetch(userId).catch(() => null);
@@ -276,29 +321,44 @@ client.on(Events.InteractionCreate, async interaction => {
 
       const data = loadData();
       const existingIndex = data.members.findIndex(entry => entry.userId === userId);
+      const isNewMember = existingIndex === -1;
 
-      if (existingIndex !== -1) {
-        await interaction.reply({
-          content: `❌ <@${userId}> ist bereits im Socials-Panel eingetragen.`,
-          allowedMentions: { parse: [] },
-          ephemeral: true,
+      // Snapshot für Rollback, falls das Panel nicht aktualisiert werden kann.
+      const previousMembers = JSON.parse(JSON.stringify(data.members));
+
+      let addedCount = 0;
+
+      if (isNewMember) {
+        data.members.push({
+          userId,
+          urls: normalizedLinks,
+          addedAt: new Date().toISOString(),
         });
-        return;
+        addedCount = normalizedLinks.length;
+      } else {
+        const entry = data.members[existingIndex];
+        const existingUrls = getEntryUrls(entry);
+        const linksToAdd = normalizedLinks.filter(url => !existingUrls.includes(url));
+
+        if (linksToAdd.length === 0) {
+          await interaction.reply({
+            content: `ℹ️ Alle angegebenen Links sind bei <@${userId}> bereits eingetragen.`,
+            allowedMentions: { parse: [] },
+            ephemeral: true,
+          });
+          return;
+        }
+
+        entry.urls = [...existingUrls, ...linksToAdd];
+        delete entry.url;
+        addedCount = linksToAdd.length;
       }
-
-      const newEntry = {
-        userId,
-        url,
-        addedAt: new Date().toISOString(),
-      };
-
-      data.members.push(newEntry);
 
       try {
         await updatePanel(interaction.guild, data);
         saveData(data);
       } catch (error) {
-        data.members = data.members.filter(entry => entry !== newEntry);
+        data.members = previousMembers;
         saveData(data);
 
         if (error.message === 'PANEL_CHANNEL_NOT_FOUND') {
@@ -314,22 +374,25 @@ client.on(Events.InteractionCreate, async interaction => {
         throw error;
       }
 
-      // Sichtbarer Eintrag im Panel + echte kurze Benachrichtigung im Panel-Channel.
-      // Dadurch wird die Person beim Hinzufügen tatsächlich @-gepingt.
-      const channel = await interaction.guild.channels.fetch(config.panelChannelId).catch(() => null);
-      if (channel && channel.isTextBased()) {
-        const pingMessage = await channel.send({
-          content: `📌 <@${userId}> wurde zu den Socials hinzugefügt.`,
-          allowedMentions: { users: [userId] },
-        }).catch(() => null);
+      // Nur bei einem komplett neuen Mitglied kurz pingen.
+      if (isNewMember) {
+        const channel = await interaction.guild.channels.fetch(config.panelChannelId).catch(() => null);
+        if (channel && channel.isTextBased()) {
+          const pingMessage = await channel.send({
+            content: `📌 <@${userId}> wurde zu den Socials hinzugefügt.`,
+            allowedMentions: { users: [userId] },
+          }).catch(() => null);
 
-        if (pingMessage) {
-          setTimeout(() => pingMessage.delete().catch(() => {}), 5000);
+          if (pingMessage) {
+            setTimeout(() => pingMessage.delete().catch(() => {}), 5000);
+          }
         }
       }
 
       await interaction.reply({
-        content: `✅ <@${userId}> wurde unten zum Socials-Panel hinzugefügt.`,
+        content: isNewMember
+          ? `✅ <@${userId}> wurde mit ${addedCount} Link${addedCount === 1 ? '' : 's'} unten zum Socials-Panel hinzugefügt.`
+          : `✅ ${addedCount} weitere${addedCount === 1 ? 'r Link' : ' Links'} wurden bei <@${userId}> hinzugefügt.`,
         allowedMentions: { parse: [] },
         ephemeral: true,
       });
