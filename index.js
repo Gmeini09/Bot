@@ -174,22 +174,32 @@ const client = new Client({
 client.once(Events.ClientReady, async readyClient => {
   console.log(`✅ Eingeloggt als ${readyClient.user.tag}`);
 
-  try {
-    const commands = [
-      new SlashCommandBuilder()
-        .setName('socials')
-        .setDescription('Fügt eine Person mit Social-Link zum Socials-Panel hinzu.')
-        .toJSON(),
-    ];
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('socials')
+      .setDescription('Fügt eine Person mit Social-Link zum Socials-Panel hinzu.')
+      .toJSON(),
+  ];
 
-    const rest = new REST({ version: '10' }).setToken(config.token);
-    await rest.put(
-      Routes.applicationGuildCommands(config.clientId, config.guildId),
-      { body: commands },
-    );
-    console.log('✅ /socials wurde automatisch registriert.');
-  } catch (error) {
-    console.error('❌ Slash-Command konnte nicht registriert werden:', error);
+  const rest = new REST({ version: '10' }).setToken(config.token);
+  const applicationId = readyClient.application.id;
+  const guilds = [...readyClient.guilds.cache.values()];
+
+  if (guilds.length === 0) {
+    console.error('❌ Der Bot ist auf keinem Discord-Server installiert. Lade ihn zuerst auf deinen Server ein.');
+    return;
+  }
+
+  for (const guild of guilds) {
+    try {
+      await rest.put(
+        Routes.applicationGuildCommands(applicationId, guild.id),
+        { body: commands },
+      );
+      console.log(`✅ /socials registriert auf ${guild.name} (${guild.id}).`);
+    } catch (error) {
+      console.error(`❌ /socials konnte auf ${guild.name} (${guild.id}) nicht registriert werden:`, error);
+    }
   }
 });
 
