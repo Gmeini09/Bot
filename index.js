@@ -58,6 +58,7 @@ const MAX_SOCIAL_LINKS = 5;
 const VERIFY_TTL_MS = 5 * 60 * 1000;
 const verifyChallenges = new Map();
 const refreshRunningGuilds = new Set();
+const suggestionSourceDeletes = new Set();
 
 function defaultData() {
   return {
@@ -617,6 +618,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
   ],
   partials: [Partials.Message, Partials.Channel, Partials.GuildMember],
 });
@@ -704,10 +706,69 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
 });
 
 // ============================================================
+// VORSCHLÄGE AUS NORMALEN NACHRICHTEN
+// ============================================================
+
+client.on(Events.MessageCreate, async message => {
+  if (!message.guild || message.author.bot) return;
+
+  const data = loadData();
+  const suggestionsChannelId = data.config.suggestionsChannelId;
+  if (!suggestionsChannelId || message.channel.id !== suggestionsChannelId) return;
+
+  const text = message.content?.trim();
+  const attachment = message.attachments.first();
+  if (!text && !attachment) return;
+
+  try {
+    const embed = new EmbedBuilder()
+      .setColor(0x111111)
+      .setTitle('💡 Vorschlag')
+      .setDescription(text || '*Kein Text – siehe Anhang.*')
+      .setAuthor({
+        name: message.member?.displayName || message.author.username,
+        iconURL: message.author.displayAvatarURL(),
+      })
+      .addFields({
+        name: 'Abstimmung',
+        value: '✅ **Dafür**\n❌ **Dagegen**',
+      })
+      .setFooter({ text: `Vorschlag von ${message.author.username}` })
+      .setTimestamp();
+
+    if (attachment?.contentType?.startsWith('image/')) {
+      embed.setImage(attachment.url);
+    } else if (attachment) {
+      embed.addFields({ name: 'Anhang', value: `[Datei öffnen](${attachment.url})` });
+    }
+
+    const panel = await message.channel.send({
+      embeds: [embed],
+      allowedMentions: { parse: [] },
+    });
+
+    await panel.react('✅');
+    await panel.react('❌');
+
+    if (message.deletable) {
+      suggestionSourceDeletes.add(message.id);
+      await message.delete().catch(() => suggestionSourceDeletes.delete(message.id));
+      setTimeout(() => suggestionSourceDeletes.delete(message.id), 10_000);
+    }
+  } catch (error) {
+    console.error('❌ Vorschlag konnte nicht in ein Panel umgewandelt werden:', error);
+  }
+});
+
+// ============================================================
 // MESSAGE LOGS
 // ============================================================
 
 client.on(Events.MessageDelete, async message => {
+  if (suggestionSourceDeletes.has(message.id)) {
+    suggestionSourceDeletes.delete(message.id);
+    return;
+  }
   if (!message.guild || message.author?.bot) return;
   const data = loadData();
   if (!data.config.logChannelId || message.channel.id === data.config.logChannelId) return;
@@ -1173,8 +1234,8 @@ client.on(Events.InteractionCreate, async interaction => {
       }
       const embed = new EmbedBuilder().setColor(0x111111).setTitle('💡 Community Vorschlag').setDescription(text).setAuthor({ name: interaction.user.username, iconURL: interaction.user.displayAvatarURL() }).setTimestamp();
       const msg = await channel.send({ embeds: [embed] });
-      await msg.react('👍');
-      await msg.react('👎');
+      await msg.react('✅');
+      await msg.react('❌');
       await interaction.reply({ content: `✅ Vorschlag gesendet${channel.id !== interaction.channel.id ? `: <#${channel.id}>` : '.'}`, ephemeral: true });
       return;
     }
