@@ -24,6 +24,11 @@ const config = {
     .split(',')
     .map(value => value.trim())
     .filter(Boolean),
+  socialRoleOrderIds: (process.env.SOCIAL_ROLE_ORDER_IDS ||
+    '1531994250839855234,1531994252249403572,1531994256107901150,1531994258691588177')
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean),
 };
 
 if (!config.token) {
@@ -98,6 +103,39 @@ function canManageSocials(member) {
   return allowedRoleIds.some(roleId => member.roles.cache.has(roleId));
 }
 
+function getRolePriority(member) {
+  if (!member) return config.socialRoleOrderIds.length;
+
+  for (let index = 0; index < config.socialRoleOrderIds.length; index++) {
+    if (member.roles.cache.has(config.socialRoleOrderIds[index])) {
+      return index;
+    }
+  }
+
+  // Mitglieder ohne eine der Sortier-Rollen kommen ganz nach unten.
+  return config.socialRoleOrderIds.length;
+}
+
+async function sortMembersByRolePriority(guild, members) {
+  const entriesWithPriority = await Promise.all(
+    members.map(async (entry, originalIndex) => {
+      const member = await guild.members.fetch(entry.userId).catch(() => null);
+
+      return {
+        entry,
+        originalIndex,
+        priority: getRolePriority(member),
+      };
+    })
+  );
+
+  // Erst nach der festgelegten Rollen-Hierarchie sortieren.
+  // Innerhalb derselben Rolle bleibt die bisherige Reihenfolge erhalten.
+  return entriesWithPriority
+    .sort((a, b) => a.priority - b.priority || a.originalIndex - b.originalIndex)
+    .map(item => item.entry);
+}
+
 function getEntryUrls(entry) {
   if (Array.isArray(entry.urls)) {
     return entry.urls.filter(Boolean);
@@ -169,7 +207,8 @@ async function updatePanel(guild, data) {
     throw new Error('PANEL_CHANNEL_NOT_FOUND');
   }
 
-  const embeds = buildPanelEmbeds(data.members);
+  const sortedMembers = await sortMembersByRolePriority(guild, data.members);
+  const embeds = buildPanelEmbeds(sortedMembers);
   let message = null;
 
   if (data.messageId) {
@@ -468,7 +507,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
       await interaction.reply({
         content: isNewMember
-          ? `✅ <@${userId}> wurde mit ${addedCount} Link${addedCount === 1 ? '' : 's'} unten zum Socials-Panel hinzugefügt.`
+          ? `✅ <@${userId}> wurde mit ${addedCount} Link${addedCount === 1 ? '' : 's'} zum Socials-Panel hinzugefügt und nach Rolle einsortiert.`
           : `✅ ${addedCount} weitere${addedCount === 1 ? 'r Link' : ' Links'} wurden bei <@${userId}> hinzugefügt.`,
         allowedMentions: { parse: [] },
         ephemeral: true,
