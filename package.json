@@ -1,15 +1,17 @@
 {
-  "name": "discord-socials-panel-bot",
-  "version": "1.1.0",
-  "description": "Discord socials panel bot - Railway/iPhone ready",
+  "name": "unfug-community-bot",
+  "version": "3.0.0",
+  "description": "Discord Community Bot mit Socials, Tickets, Verifizierung, Moderation, Logs und Community-Funktionen",
   "main": "index.js",
+  "type": "commonjs",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "check": "node --check index.js"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18"
   },
   "dependencies": {
-    "discord.js": "14.27.0"
+    "discord.js": "^14.22.1"
   }
 }
