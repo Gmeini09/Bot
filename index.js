@@ -173,12 +173,23 @@ async function updatePanel(guild, data) {
   let message = null;
 
   if (data.messageId) {
-    message = await channel.messages.fetch(data.messageId).catch(() => null);
+    // Immer direkt bei Discord prüfen. So wird keine bereits gelöschte
+    // Panel-Nachricht aus dem lokalen Cache verwendet.
+    message = await channel.messages
+      .fetch(data.messageId, { force: true })
+      .catch(() => null);
   }
 
   if (message) {
-    await message.edit({ embeds });
-    return message;
+    try {
+      await message.edit({ embeds });
+      return message;
+    } catch (error) {
+      // Discord 10008 = Unknown Message: Das alte Panel wurde gelöscht.
+      // In diesem Fall unten automatisch ein neues Panel erstellen.
+      if (error?.code !== 10008) throw error;
+      data.messageId = null;
+    }
   }
 
   message = await channel.send({ embeds });
