@@ -199,6 +199,16 @@ client.once(Events.ClientReady, async readyClient => {
       .setName('socials')
       .setDescription('Fügt Social-Links zu einer Discord-ID hinzu.')
       .toJSON(),
+    new SlashCommandBuilder()
+      .setName('deletesocials')
+      .setDescription('Entfernt eine Person komplett aus dem Socials-Panel.')
+      .addStringOption(option =>
+        option
+          .setName('discord_id')
+          .setDescription('Discord-ID der Person, die entfernt werden soll.')
+          .setRequired(true)
+      )
+      .toJSON(),
   ];
 
   const rest = new REST({ version: '10' }).setToken(config.token);
@@ -216,15 +226,71 @@ client.once(Events.ClientReady, async readyClient => {
         Routes.applicationGuildCommands(applicationId, guild.id),
         { body: commands },
       );
-      console.log(`✅ /socials registriert auf ${guild.name} (${guild.id}).`);
+      console.log(`✅ /socials und /deletesocials registriert auf ${guild.name} (${guild.id}).`);
     } catch (error) {
-      console.error(`❌ /socials konnte auf ${guild.name} (${guild.id}) nicht registriert werden:`, error);
+      console.error(`❌ Slash-Commands konnten auf ${guild.name} (${guild.id}) nicht registriert werden:`, error);
     }
   }
 });
 
 client.on(Events.InteractionCreate, async interaction => {
   try {
+    if (interaction.isChatInputCommand() && interaction.commandName === 'deletesocials') {
+      if (!interaction.inGuild()) {
+        await interaction.reply({ content: '❌ Dieser Befehl funktioniert nur auf einem Server.', ephemeral: true });
+        return;
+      }
+
+      if (!canManageSocials(interaction.member)) {
+        await interaction.reply({ content: '❌ Du darfst das Socials-Panel nicht bearbeiten.', ephemeral: true });
+        return;
+      }
+
+      const userId = interaction.options.getString('discord_id', true).trim();
+
+      if (!isValidDiscordId(userId)) {
+        await interaction.reply({ content: '❌ Die Discord-ID ist ungültig.', ephemeral: true });
+        return;
+      }
+
+      const data = loadData();
+      const existingIndex = data.members.findIndex(entry => entry.userId === userId);
+
+      if (existingIndex === -1) {
+        await interaction.reply({
+          content: `❌ <@${userId}> ist nicht im Socials-Panel eingetragen.`,
+          allowedMentions: { parse: [] },
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const previousMembers = JSON.parse(JSON.stringify(data.members));
+      data.members.splice(existingIndex, 1);
+
+      try {
+        await updatePanel(interaction.guild, data);
+        saveData(data);
+      } catch (error) {
+        data.members = previousMembers;
+        saveData(data);
+
+        if (error.message === 'PANEL_CHANNEL_NOT_FOUND') {
+          await interaction.reply({ content: '❌ Der konfigurierte Panel-Channel wurde nicht gefunden.', ephemeral: true });
+          return;
+        }
+
+        throw error;
+      }
+
+      await interaction.reply({
+        content: `✅ <@${userId}> wurde komplett aus dem Socials-Panel entfernt.`,
+        allowedMentions: { parse: [] },
+        ephemeral: true,
+      });
+      return;
+    }
+
     if (interaction.isChatInputCommand() && interaction.commandName === 'socials') {
       if (!interaction.inGuild()) {
         await interaction.reply({ content: '❌ Dieser Befehl funktioniert nur auf einem Server.', ephemeral: true });
