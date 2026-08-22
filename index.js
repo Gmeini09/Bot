@@ -1,5 +1,6 @@
 const {
   ActionRowBuilder,
+  AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
   ChannelType,
@@ -58,13 +59,18 @@ const MAX_SOCIAL_LINKS = 5;
 const SOCIALS_PER_PAGE = 5;
 const SOCIAL_PANEL_COLOR = 0x8b5cf6;
 const VERIFY_TTL_MS = 5 * 60 * 1000;
+const XP_COOLDOWN_MS = 60 * 1000;
+const EVENT_CHECK_INTERVAL_MS = 30 * 1000;
 const verifyChallenges = new Map();
 const refreshRunningGuilds = new Set();
 const suggestionSourceDeletes = new Set();
+const messageRateLimits = new Map();
+const joinBursts = new Map();
+const inviteCache = new Map();
 
 function defaultData() {
   return {
-    version: 4,
+    version: 5,
     config: {
       welcomeChannelId: null,
       leaveChannelId: null,
@@ -81,6 +87,15 @@ function defaultData() {
       announcementRoleId: null,
       socialAdminRoleId: null,
       socialDeleteRoleId: null,
+      applicationReviewChannelId: null,
+      applicationAcceptedRoleId: null,
+      ticketTranscriptChannelId: null,
+      automodLogChannelId: null,
+      tempVoiceLobbyId: null,
+      tempVoiceCategoryId: null,
+      tempVoiceUserLimit: 0,
+      levelSystemEnabled: true,
+      customCommandPrefix: '!',
     },
     socials: {
       messageIds: [],
@@ -88,6 +103,29 @@ function defaultData() {
     },
     warnings: {},
     giveaways: {},
+    applications: {},
+    automod: {
+      enabled: false,
+      blockInvites: true,
+      maxMentions: 5,
+      maxMessages: 6,
+      spamWindowMs: 8000,
+      minAccountAgeHours: 24,
+      raidJoinLimit: 8,
+      raidWindowMs: 20000,
+      raidModeUntil: 0,
+    },
+    tempVoices: {},
+    levels: {},
+    levelRoles: {},
+    inviteStats: {},
+    inviteMembers: {},
+    events: {},
+    duty: {
+      active: {},
+      totals: {},
+    },
+    customCommands: {},
   };
 }
 
@@ -130,7 +168,20 @@ function normalizeData(raw) {
   base.config = { ...base.config, ...(raw?.config || {}) };
   base.warnings = raw?.warnings && typeof raw.warnings === 'object' ? raw.warnings : {};
   base.giveaways = raw?.giveaways && typeof raw.giveaways === 'object' ? raw.giveaways : {};
-  base.version = 4;
+  base.applications = raw?.applications && typeof raw.applications === 'object' ? raw.applications : {};
+  base.automod = { ...base.automod, ...(raw?.automod && typeof raw.automod === 'object' ? raw.automod : {}) };
+  base.tempVoices = raw?.tempVoices && typeof raw.tempVoices === 'object' ? raw.tempVoices : {};
+  base.levels = raw?.levels && typeof raw.levels === 'object' ? raw.levels : {};
+  base.levelRoles = raw?.levelRoles && typeof raw.levelRoles === 'object' ? raw.levelRoles : {};
+  base.inviteStats = raw?.inviteStats && typeof raw.inviteStats === 'object' ? raw.inviteStats : {};
+  base.inviteMembers = raw?.inviteMembers && typeof raw.inviteMembers === 'object' ? raw.inviteMembers : {};
+  base.events = raw?.events && typeof raw.events === 'object' ? raw.events : {};
+  base.duty = {
+    active: raw?.duty?.active && typeof raw.duty.active === 'object' ? raw.duty.active : {},
+    totals: raw?.duty?.totals && typeof raw.duty.totals === 'object' ? raw.duty.totals : {},
+  };
+  base.customCommands = raw?.customCommands && typeof raw.customCommands === 'object' ? raw.customCommands : {};
+  base.version = 5;
   return base;
 }
 
@@ -624,6 +675,365 @@ function ticketOwnerId(channel) {
   return channel.topic.split('|')[0].replace('ticket-owner:', '').trim();
 }
 
+function canUseTeamTools(member, data) {
+  if (!member) return false;
+  if (isAdministrator(member) || member.permissions.has(PermissionFlagsBits.ManageGuild)) return true;
+  return hasAnyRole(member, [data.config.supportRoleId, data.config.moderatorRoleId].filter(Boolean));
+}
+
+function formatLongDuration(ms) {
+  const totalMinutes = Math.max(0, Math.floor(ms / 60000));
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  return [days ? `${days}d` : null, hours ? `${hours}h` : null, minutes || (!days && !hours) ? `${minutes}m` : null]
+    .filter(Boolean)
+    .join(' ');
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/'/g, '&#39;')
+    .replace(/\"/g, '&quot;');
+}
+
+async function fetchTicketMessages(channel, maximum = 1000) {
+  const messages = [];
+  let before;
+
+  while (messages.length < maximum) {
+    const batch = await channel.messages.fetch({
+      limit: Math.min(100, maximum - messages.length),
+      before,
+    });
+    if (!batch.size) break;
+    messages.push(...batch.values());
+    before = batch.last().id;
+    if (batch.size < 100) break;
+  }
+
+  return messages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+}
+
+async function buildTicketTranscript(channel, closedById) {
+  const messages = await fetchTicketMessages(channel);
+  const rows = messages.map(message => {
+    const attachments = [...message.attachments.values()]
+      .map(file => `<a href='${escapeHtml(file.url)}'>${escapeHtml(file.name || 'Anhang')}</a>`)
+      .join(' · ');
+    const body = escapeHtml(message.content || '').replace(/\n/g, '<br>') || '<em>Keine Textnachricht</em>';
+    return `<article><header><strong>${escapeHtml(message.author?.tag || 'Unbekannt')}</strong><span>${new Date(message.createdTimestamp).toLocaleString('de-DE')}</span></header><p>${body}</p>${attachments ? `<p class='attachments'>${attachments}</p>` : ''}</article>`;
+  }).join('\n');
+
+  const html = `<!doctype html><html lang='de'><head><meta charset='utf-8'><title>${escapeHtml(channel.name)} – Transcript</title><style>body{font-family:Arial,sans-serif;background:#111318;color:#e7e9ee;max-width:980px;margin:0 auto;padding:32px}h1{color:#8b5cf6}article{background:#1d2027;border-left:4px solid #8b5cf6;border-radius:8px;margin:12px 0;padding:14px 16px}header{display:flex;justify-content:space-between;gap:20px;color:#b8bdc7}p{line-height:1.5;word-break:break-word}.attachments a{color:#a78bfa}small{color:#8d93a0}</style></head><body><h1>Ticket-Transcript</h1><small>Channel: ${escapeHtml(channel.name)} · Geschlossen von ${escapeHtml(closedById)} · ${new Date().toLocaleString('de-DE')}</small>${rows || '<p>Keine Nachrichten gefunden.</p>'}</body></html>`;
+  return {
+    buffer: Buffer.from(html, 'utf8'),
+    fileName: `transcript-${sanitizeChannelName(channel.name)}-${Date.now()}.html`,
+    messageCount: messages.length,
+  };
+}
+
+async function deliverTicketTranscript(channel, data, closedById) {
+  const transcript = await buildTicketTranscript(channel, closedById);
+  const targetId = data.config.ticketTranscriptChannelId || data.config.logChannelId;
+  const target = targetId ? await channel.guild.channels.fetch(targetId).catch(() => null) : null;
+  if (!target?.isTextBased()) return transcript;
+
+  await target.send({
+    embeds: [new EmbedBuilder()
+      .setColor(0x8b5cf6)
+      .setTitle('📄 Ticket-Transcript')
+      .setDescription(`**Ticket:** ${channel.name}\n**Geschlossen von:** <@${closedById}>\n**Nachrichten:** ${transcript.messageCount}`)
+      .setTimestamp()],
+    files: [new AttachmentBuilder(transcript.buffer, { name: transcript.fileName })],
+    allowedMentions: { parse: [] },
+  });
+  return null;
+}
+
+const APPLICATION_TYPES = {
+  team: 'Team-Bewerbung',
+  partner: 'Partner-Bewerbung',
+  fraktion: 'Fraktionsbewerbung',
+  sonstiges: 'Allgemeine Bewerbung',
+};
+
+function applicationReviewPayload(application) {
+  const decided = application.status !== 'open';
+  const statusText = application.status === 'accepted'
+    ? `✅ Angenommen von <@${application.reviewedBy}>`
+    : application.status === 'rejected'
+      ? `❌ Abgelehnt von <@${application.reviewedBy}>`
+      : '⏳ Offen';
+  const embed = new EmbedBuilder()
+    .setColor(application.status === 'accepted' ? 0x2ecc71 : application.status === 'rejected' ? 0xe74c3c : 0x8b5cf6)
+    .setTitle(`📨 ${APPLICATION_TYPES[application.type] || 'Bewerbung'}`)
+    .setDescription(`**Bewerber:** <@${application.userId}>\n**Status:** ${statusText}`)
+    .addFields(
+      { name: 'Alter', value: application.age || '—', inline: true },
+      { name: 'Erfahrung', value: application.experience || '—' },
+      { name: 'Motivation', value: application.motivation || '—' },
+      { name: 'Über mich / Zusatz', value: application.about || '—' },
+    )
+    .setFooter({ text: `Bewerbungs-ID: ${application.id}` })
+    .setTimestamp(application.createdAt);
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`application_decide:accepted:${application.id}`).setLabel('Annehmen').setEmoji('✅').setStyle(ButtonStyle.Success).setDisabled(decided),
+    new ButtonBuilder().setCustomId(`application_decide:rejected:${application.id}`).setLabel('Ablehnen').setEmoji('❌').setStyle(ButtonStyle.Danger).setDisabled(decided),
+  );
+  return { embeds: [embed], components: [row], allowedMentions: { parse: [] } };
+}
+
+function createShortId(prefix = '') {
+  return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+async function sendAutomodAlert(guild, data, title, description) {
+  const channelId = data.config.automodLogChannelId || data.config.logChannelId;
+  if (!channelId) return;
+  const embed = new EmbedBuilder()
+    .setColor(0xe74c3c)
+    .setTitle(title)
+    .setDescription(description)
+    .setTimestamp();
+  await sendEmbedToChannel(guild, channelId, embed);
+}
+
+async function handleAutomodMessage(message, data) {
+  const settings = data.automod;
+  if (!settings.enabled || canModerate(message.member, data)) return false;
+
+  const now = Date.now();
+  const key = `${message.guild.id}:${message.author.id}`;
+  const previous = (messageRateLimits.get(key) || []).filter(timestamp => now - timestamp <= settings.spamWindowMs);
+  previous.push(now);
+  messageRateLimits.set(key, previous);
+
+  const mentionCount = message.mentions.users.size + message.mentions.roles.size;
+  const hasInvite = /(?:discord\.gg|discord(?:app)?\.com\/invite)\/[a-z0-9-]+/i.test(message.content || '');
+  let reason = null;
+  let timeout = false;
+
+  if (previous.length > settings.maxMessages) {
+    reason = `Spam erkannt: mehr als ${settings.maxMessages} Nachrichten in ${Math.round(settings.spamWindowMs / 1000)} Sekunden.`;
+    timeout = true;
+  } else if (mentionCount > settings.maxMentions) {
+    reason = `Mention-Spam erkannt: ${mentionCount} Erwähnungen.`;
+    timeout = true;
+  } else if (settings.blockInvites && hasInvite) {
+    reason = 'Nicht erlaubter Discord-Einladungslink.';
+  }
+
+  if (!reason) return false;
+  if (message.deletable) await message.delete().catch(() => {});
+  if (timeout && message.member?.moderatable) {
+    await message.member.timeout(5 * 60 * 1000, `AutoMod: ${reason}`).catch(() => {});
+  }
+  await sendAutomodAlert(
+    message.guild,
+    data,
+    '🛡️ AutoMod ausgelöst',
+    `**Nutzer:** <@${message.author.id}>\n**Channel:** <#${message.channel.id}>\n**Grund:** ${reason}`,
+  );
+  return true;
+}
+
+async function handleRaidJoin(member, data) {
+  if (!data.automod.enabled) return;
+  const now = Date.now();
+  const recent = (joinBursts.get(member.guild.id) || []).filter(timestamp => now - timestamp <= data.automod.raidWindowMs);
+  recent.push(now);
+  joinBursts.set(member.guild.id, recent);
+
+  const accountAgeHours = (now - member.user.createdTimestamp) / 3_600_000;
+  let changed = false;
+  if (recent.length >= data.automod.raidJoinLimit && data.automod.raidModeUntil < now) {
+    data.automod.raidModeUntil = now + 10 * 60 * 1000;
+    changed = true;
+    await sendAutomodAlert(
+      member.guild,
+      data,
+      '🚨 Möglicher Raid erkannt',
+      `**${recent.length} Beitritte** innerhalb von ${Math.round(data.automod.raidWindowMs / 1000)} Sekunden. Schutzmodus ist für 10 Minuten aktiv.`,
+    );
+  }
+
+  if (accountAgeHours < data.automod.minAccountAgeHours) {
+    await sendAutomodAlert(
+      member.guild,
+      data,
+      '⚠️ Sehr neuer Account',
+      `<@${member.id}> ist erst **${Math.max(0, Math.floor(accountAgeHours))} Stunden** alt.`,
+    );
+  }
+
+  if (data.automod.raidModeUntil > now && accountAgeHours < 7 * 24 && member.moderatable) {
+    await member.timeout(10 * 60 * 1000, 'AutoMod: Schutzmodus bei möglichem Raid').catch(() => {});
+    await sendAutomodAlert(
+      member.guild,
+      data,
+      '🔒 Raid-Schutz angewendet',
+      `<@${member.id}> wurde wegen eines jungen Accounts im aktiven Schutzmodus für 10 Minuten eingeschränkt.`,
+    );
+  }
+
+  if (changed) saveData(data);
+}
+
+function xpThresholdForLevel(level) {
+  return 100 * Math.pow(level + 1, 2);
+}
+
+function calculateLevel(xp) {
+  let level = 0;
+  while (level < 100 && xp >= xpThresholdForLevel(level)) level++;
+  return level;
+}
+
+function levelProgressBar(current, required) {
+  const filled = Math.max(0, Math.min(10, Math.floor((current / Math.max(1, required)) * 10)));
+  return `${'▰'.repeat(filled)}${'▱'.repeat(10 - filled)}`;
+}
+
+async function awardMessageXp(message, data) {
+  if (!data.config.levelSystemEnabled) return;
+  const record = data.levels[message.author.id] || { xp: 0, level: 0, lastXpAt: 0 };
+  if (Date.now() - (record.lastXpAt || 0) < XP_COOLDOWN_MS) return;
+
+  const oldLevel = calculateLevel(record.xp || 0);
+  record.xp = (record.xp || 0) + Math.floor(Math.random() * 11) + 15;
+  record.level = calculateLevel(record.xp);
+  record.lastXpAt = Date.now();
+  data.levels[message.author.id] = record;
+
+  if (record.level > oldLevel) {
+    const earnedRoleIds = Object.entries(data.levelRoles)
+      .filter(([level]) => Number(level) <= record.level)
+      .map(([, roleId]) => roleId)
+      .filter(Boolean);
+    for (const roleId of earnedRoleIds) {
+      if (!message.member.roles.cache.has(roleId)) await message.member.roles.add(roleId).catch(() => {});
+    }
+    await message.channel.send({
+      content: `🎉 <@${message.author.id}> hat **Level ${record.level}** erreicht!`,
+      allowedMentions: { users: [message.author.id] },
+    }).catch(() => {});
+  }
+  saveData(data);
+}
+
+function rankEmbed(user, data) {
+  const record = data.levels[user.id] || { xp: 0, level: 0 };
+  const level = calculateLevel(record.xp || 0);
+  const previousThreshold = level === 0 ? 0 : xpThresholdForLevel(level - 1);
+  const nextThreshold = xpThresholdForLevel(level);
+  const current = (record.xp || 0) - previousThreshold;
+  const required = nextThreshold - previousThreshold;
+  return new EmbedBuilder()
+    .setColor(0x8b5cf6)
+    .setTitle(`🏆 Rang • ${user.username}`)
+    .setThumbnail(user.displayAvatarURL({ size: 256 }))
+    .setDescription(`**Level ${level}**\n${levelProgressBar(current, required)}\n${current} / ${required} XP`)
+    .setFooter({ text: `Gesamt-XP: ${record.xp || 0}` });
+}
+
+async function cacheGuildInvites(guild) {
+  const invites = await guild.invites.fetch().catch(() => null);
+  if (!invites) return null;
+  inviteCache.set(guild.id, new Map(invites.map(invite => [invite.code, invite.uses || 0])));
+  return invites;
+}
+
+async function detectUsedInvite(guild) {
+  const previous = inviteCache.get(guild.id) || new Map();
+  const invites = await guild.invites.fetch().catch(() => null);
+  if (!invites) return null;
+  const used = invites.find(invite => (invite.uses || 0) > (previous.get(invite.code) || 0)) || null;
+  inviteCache.set(guild.id, new Map(invites.map(invite => [invite.code, invite.uses || 0])));
+  return used;
+}
+
+function communityEventPayload(event, disabled = false) {
+  const participants = Array.isArray(event.participants) ? event.participants : [];
+  const status = event.cancelled ? '❌ Abgesagt' : event.started ? '🟢 Gestartet' : '📅 Geplant';
+  const participantText = participants.length
+    ? participants.slice(0, 20).map(id => `<@${id}>`).join(', ') + (participants.length > 20 ? ` und ${participants.length - 20} weitere` : '')
+    : '*Noch keine Teilnehmer.*';
+  const embed = new EmbedBuilder()
+    .setColor(event.cancelled ? 0xe74c3c : event.started ? 0x2ecc71 : 0x8b5cf6)
+    .setTitle(`📅 ${event.name}`)
+    .setDescription(event.description || 'Kein zusätzlicher Text.')
+    .addFields(
+      { name: 'Start', value: `<t:${Math.floor(event.startAt / 1000)}:F>\n<t:${Math.floor(event.startAt / 1000)}:R>`, inline: true },
+      { name: 'Status', value: status, inline: true },
+      { name: `Teilnehmer (${participants.length})`, value: participantText },
+    )
+    .setFooter({ text: `Event-ID: ${event.id}` });
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`community_event_join:${event.id}`)
+      .setLabel(disabled || event.started || event.cancelled ? 'Teilnahme geschlossen' : 'Teilnehmen')
+      .setEmoji('🙋')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(disabled || event.started || event.cancelled),
+  );
+  return { embeds: [embed], components: [row], allowedMentions: { parse: [] } };
+}
+
+async function checkCommunityEvents(clientInstance) {
+  const data = loadData();
+  const now = Date.now();
+  let changed = false;
+
+  for (const event of Object.values(data.events || {})) {
+    if (event.cancelled || event.started) continue;
+    if (!event.reminders) event.reminders = {};
+    const guild = clientInstance.guilds.cache.get(event.guildId);
+    const channel = guild ? await guild.channels.fetch(event.channelId).catch(() => null) : null;
+    if (!channel?.isTextBased()) continue;
+    const remaining = event.startAt - now;
+
+    if (remaining <= 0) {
+      event.started = true;
+      changed = true;
+      const participantMentions = (event.participants || []).slice(0, 50);
+      await channel.send({
+        content: `🔔 **${event.name}** startet jetzt! ${participantMentions.map(id => `<@${id}>`).join(' ')}`,
+        allowedMentions: { users: participantMentions },
+      }).catch(() => {});
+      const message = await channel.messages.fetch(event.messageId).catch(() => null);
+      if (message) await message.edit(communityEventPayload(event, true)).catch(() => {});
+      continue;
+    }
+
+    if (remaining <= 60 * 60 * 1000 && remaining > 10 * 60 * 1000 && !event.reminders.hour) {
+      event.reminders.hour = true;
+      changed = true;
+      await channel.send(`⏰ **${event.name}** startet in weniger als einer Stunde.`).catch(() => {});
+    }
+    if (remaining <= 10 * 60 * 1000 && !event.reminders.tenMinutes) {
+      event.reminders.tenMinutes = true;
+      changed = true;
+      await channel.send(`⏰ **${event.name}** startet in weniger als 10 Minuten.`).catch(() => {});
+    }
+  }
+  if (changed) saveData(data);
+}
+
+function renderCustomCommand(text, messageOrInteraction) {
+  const user = messageOrInteraction.user || messageOrInteraction.author;
+  const guild = messageOrInteraction.guild;
+  return String(text || '')
+    .replace(/\{user\}/gi, `<@${user.id}>`)
+    .replace(/\{username\}/gi, user.username)
+    .replace(/\{server\}/gi, guild?.name || 'Server')
+    .replace(/\{membercount\}/gi, String(guild?.memberCount || 0));
+}
+
 // ============================================================
 // SLASH COMMANDS
 // ============================================================
@@ -656,6 +1066,9 @@ function buildCommands() {
           { name: 'Giveaways', value: 'giveaways' },
           { name: 'Socials', value: 'socials' },
           { name: 'Social Audit', value: 'socialaudit' },
+          { name: 'Bewerbungs-Auswertung', value: 'applications' },
+          { name: 'Ticket-Transkripte', value: 'transcripts' },
+          { name: 'AutoMod-Logs', value: 'automodlogs' },
         ))
         .addChannelOption(o => o.setName('channel').setDescription('Channel').setRequired(true).addChannelTypes(ChannelType.GuildText)))
       .addSubcommand(s => s
@@ -669,6 +1082,7 @@ function buildCommands() {
           { name: 'Announcements', value: 'announcement' },
           { name: 'Socials Admin', value: 'socialadmin' },
           { name: 'Socials Löschen', value: 'socialdelete' },
+          { name: 'Bewerbung angenommen', value: 'applicationaccepted' },
         ))
         .addRoleOption(o => o.setName('rolle').setDescription('Rolle').setRequired(true)))
       .addSubcommand(s => s
@@ -792,6 +1206,118 @@ function buildCommands() {
     new SlashCommandBuilder().setName('lock').setDescription('Sperrt den aktuellen Channel für @everyone.'),
     new SlashCommandBuilder().setName('unlock').setDescription('Entsperrt den aktuellen Channel.'),
 
+    // Bewerbungen
+    new SlashCommandBuilder()
+      .setName('applicationpanel')
+      .setDescription('Erstellt ein Bewerbungs-Panel.')
+      .addStringOption(o => o.setName('typ').setDescription('Bewerbungsart').setRequired(true).addChoices(
+        { name: 'Team', value: 'team' },
+        { name: 'Partner', value: 'partner' },
+        { name: 'Fraktion', value: 'fraktion' },
+        { name: 'Sonstiges', value: 'sonstiges' },
+      ))
+      .addChannelOption(o => o.setName('auswertung').setDescription('Channel für neue Bewerbungen').setRequired(true).addChannelTypes(ChannelType.GuildText)),
+    new SlashCommandBuilder().setName('applicationlist').setDescription('Zeigt die offenen Bewerbungen.'),
+
+    // Rollen-Panel
+    new SlashCommandBuilder()
+      .setName('rolepanel')
+      .setDescription('Erstellt ein Rollen-Panel mit bis zu fünf Rollen.')
+      .addStringOption(o => o.setName('titel').setDescription('Titel des Panels').setRequired(true).setMaxLength(100))
+      .addRoleOption(o => o.setName('rolle1').setDescription('Erste Rolle').setRequired(true))
+      .addRoleOption(o => o.setName('rolle2').setDescription('Zweite Rolle').setRequired(false))
+      .addRoleOption(o => o.setName('rolle3').setDescription('Dritte Rolle').setRequired(false))
+      .addRoleOption(o => o.setName('rolle4').setDescription('Vierte Rolle').setRequired(false))
+      .addRoleOption(o => o.setName('rolle5').setDescription('Fünfte Rolle').setRequired(false)),
+
+    // AutoMod / Anti-Raid
+    new SlashCommandBuilder()
+      .setName('automod')
+      .setDescription('Richtet Anti-Spam und Anti-Raid ein.')
+      .addSubcommand(s => s
+        .setName('enable')
+        .setDescription('Aktiviert den Schutz.')
+        .addChannelOption(o => o.setName('log_channel').setDescription('Channel für Warnungen').setRequired(false).addChannelTypes(ChannelType.GuildText))
+        .addBooleanOption(o => o.setName('block_invites').setDescription('Discord-Einladungen blockieren?').setRequired(false))
+        .addIntegerOption(o => o.setName('max_mentions').setDescription('Erlaubte Erwähnungen je Nachricht').setRequired(false).setMinValue(1).setMaxValue(20))
+        .addIntegerOption(o => o.setName('max_messages').setDescription('Nachrichten je 8 Sekunden').setRequired(false).setMinValue(3).setMaxValue(15))
+        .addIntegerOption(o => o.setName('account_age').setDescription('Warnung unter X Account-Stunden').setRequired(false).setMinValue(1).setMaxValue(720)))
+      .addSubcommand(s => s.setName('disable').setDescription('Deaktiviert den Schutz.'))
+      .addSubcommand(s => s.setName('status').setDescription('Zeigt die Schutz-Einstellungen.')),
+
+    // Temporäre Voice-Channels
+    new SlashCommandBuilder()
+      .setName('tempvoice')
+      .setDescription('Richtet temporäre Sprachkanäle ein.')
+      .addSubcommand(s => s
+        .setName('setup')
+        .setDescription('Legt Lobby und Kategorie fest.')
+        .addChannelOption(o => o.setName('lobby').setDescription('Beitreten, um einen Raum zu erstellen').setRequired(true).addChannelTypes(ChannelType.GuildVoice))
+        .addChannelOption(o => o.setName('kategorie').setDescription('Kategorie für die Räume').setRequired(true).addChannelTypes(ChannelType.GuildCategory))
+        .addIntegerOption(o => o.setName('limit').setDescription('Standard-Limit, 0 = unbegrenzt').setRequired(false).setMinValue(0).setMaxValue(99)))
+      .addSubcommand(s => s.setName('disable').setDescription('Deaktiviert temporäre Sprachkanäle.'))
+      .addSubcommand(s => s.setName('status').setDescription('Zeigt die aktuelle Einrichtung.')),
+    new SlashCommandBuilder()
+      .setName('voice')
+      .setDescription('Verwaltet deinen temporären Sprachkanal.')
+      .addSubcommand(s => s.setName('name').setDescription('Benennt deinen Raum um.').addStringOption(o => o.setName('name').setDescription('Neuer Name').setRequired(true).setMaxLength(80)))
+      .addSubcommand(s => s.setName('limit').setDescription('Ändert das Nutzerlimit.').addIntegerOption(o => o.setName('anzahl').setDescription('0 bis 99').setRequired(true).setMinValue(0).setMaxValue(99)))
+      .addSubcommand(s => s.setName('lock').setDescription('Sperrt deinen Raum.'))
+      .addSubcommand(s => s.setName('unlock').setDescription('Öffnet deinen Raum.'))
+      .addSubcommand(s => s.setName('permit').setDescription('Erlaubt einer Person den Zutritt.').addUserOption(o => o.setName('user').setDescription('Person').setRequired(true)))
+      .addSubcommand(s => s.setName('reject').setDescription('Entfernt und sperrt eine Person.').addUserOption(o => o.setName('user').setDescription('Person').setRequired(true))),
+
+    // Level und Einladungen
+    new SlashCommandBuilder().setName('rank').setDescription('Zeigt den Level-Rang.').addUserOption(o => o.setName('user').setDescription('Mitglied').setRequired(false)),
+    new SlashCommandBuilder().setName('leaderboard').setDescription('Zeigt die Level-Bestenliste.'),
+    new SlashCommandBuilder()
+      .setName('levelrole')
+      .setDescription('Verwaltet automatische Level-Rollen.')
+      .addSubcommand(s => s.setName('set').setDescription('Setzt eine Rolle für ein Level.').addIntegerOption(o => o.setName('level').setDescription('Level').setRequired(true).setMinValue(1).setMaxValue(100)).addRoleOption(o => o.setName('rolle').setDescription('Rolle').setRequired(true)))
+      .addSubcommand(s => s.setName('remove').setDescription('Entfernt eine Level-Rolle.').addIntegerOption(o => o.setName('level').setDescription('Level').setRequired(true).setMinValue(1).setMaxValue(100)))
+      .addSubcommand(s => s.setName('list').setDescription('Zeigt alle Level-Rollen.')),
+    new SlashCommandBuilder()
+      .setName('levelsystem')
+      .setDescription('Schaltet das Level-System.')
+      .addSubcommand(s => s.setName('enable').setDescription('Aktiviert das Level-System.'))
+      .addSubcommand(s => s.setName('disable').setDescription('Deaktiviert das Level-System.'))
+      .addSubcommand(s => s.setName('status').setDescription('Zeigt den Status.')),
+    new SlashCommandBuilder().setName('invites').setDescription('Zeigt die Einladungs-Statistik.').addUserOption(o => o.setName('user').setDescription('Mitglied').setRequired(false)),
+    new SlashCommandBuilder().setName('inviteleaderboard').setDescription('Zeigt die Invite-Bestenliste.'),
+
+    // Community-Events
+    new SlashCommandBuilder()
+      .setName('event')
+      .setDescription('Plant Community-Events mit Erinnerungen.')
+      .addSubcommand(s => s
+        .setName('create')
+        .setDescription('Erstellt ein Event.')
+        .addStringOption(o => o.setName('name').setDescription('Name des Events').setRequired(true).setMaxLength(100))
+        .addStringOption(o => o.setName('in').setDescription('Start in z. B. 30m, 2h oder 3d').setRequired(true).setMaxLength(20))
+        .addStringOption(o => o.setName('beschreibung').setDescription('Beschreibung').setRequired(false).setMaxLength(1000))
+        .addChannelOption(o => o.setName('channel').setDescription('Event-Channel').setRequired(false).addChannelTypes(ChannelType.GuildText)))
+      .addSubcommand(s => s.setName('list').setDescription('Zeigt geplante Events.'))
+      .addSubcommand(s => s.setName('cancel').setDescription('Sagt ein Event ab.').addStringOption(o => o.setName('event_id').setDescription('Event-ID').setRequired(true))),
+
+    // Team-Dienst
+    new SlashCommandBuilder()
+      .setName('duty')
+      .setDescription('Verwaltet den Team-Dienst.')
+      .addSubcommand(s => s.setName('start').setDescription('Startet deinen Dienst.'))
+      .addSubcommand(s => s.setName('stop').setDescription('Beendet deinen Dienst.'))
+      .addSubcommand(s => s.setName('status').setDescription('Zeigt deinen Dienststatus.')),
+    new SlashCommandBuilder().setName('dutystats').setDescription('Zeigt die Dienstzeit.').addUserOption(o => o.setName('user').setDescription('Teammitglied').setRequired(false)),
+    new SlashCommandBuilder().setName('dutyleaderboard').setDescription('Zeigt die längsten Dienstzeiten.'),
+
+    // Eigene Commands
+    new SlashCommandBuilder()
+      .setName('customcommand')
+      .setDescription('Verwaltet eigene Text-Commands.')
+      .addSubcommand(s => s.setName('add').setDescription('Erstellt oder ändert einen Command.').addStringOption(o => o.setName('name').setDescription('Name ohne !').setRequired(true).setMaxLength(32)).addStringOption(o => o.setName('antwort').setDescription('Antworttext').setRequired(true).setMaxLength(1800)))
+      .addSubcommand(s => s.setName('remove').setDescription('Löscht einen Command.').addStringOption(o => o.setName('name').setDescription('Name ohne !').setRequired(true).setMaxLength(32)))
+      .addSubcommand(s => s.setName('list').setDescription('Zeigt alle eigenen Commands.'))
+      .addSubcommand(s => s.setName('run').setDescription('Führt einen eigenen Command aus.').addStringOption(o => o.setName('name').setDescription('Command-Name').setRequired(true).setMaxLength(32))),
+
     // Socials
     new SlashCommandBuilder().setName('socials').setDescription('Fügt Socials über Discord-ID hinzu.'),
     new SlashCommandBuilder().setName('editsocials').setDescription('Ersetzt die Socials einer Discord-ID.'),
@@ -843,6 +1369,8 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildInvites,
   ],
   partials: [Partials.Message, Partials.Channel, Partials.GuildMember],
 });
@@ -873,6 +1401,15 @@ client.once(Events.ClientReady, async readyClient => {
   // Laufende Giveaways nach Neustarts weiterführen und automatisch beenden.
   await checkExpiredGiveaways(readyClient);
   setInterval(() => checkExpiredGiveaways(readyClient).catch(() => {}), 10_000);
+
+  // Invite-Zähler vorbereiten.
+  for (const guild of readyClient.guilds.cache.values()) {
+    await cacheGuildInvites(guild).catch(() => {});
+  }
+
+  // Geplante Community-Events und Erinnerungen fortsetzen.
+  await checkCommunityEvents(readyClient);
+  setInterval(() => checkCommunityEvents(readyClient).catch(() => {}), EVENT_CHECK_INTERVAL_MS);
 });
 
 // ============================================================
@@ -881,6 +1418,19 @@ client.once(Events.ClientReady, async readyClient => {
 
 client.on(Events.GuildMemberAdd, async member => {
   const data = loadData();
+
+  const usedInvite = await detectUsedInvite(member.guild).catch(() => null);
+  if (usedInvite?.inviter?.id) {
+    const inviterId = usedInvite.inviter.id;
+    const stats = data.inviteStats[inviterId] || { total: 0, active: 0, leaves: 0 };
+    stats.total++;
+    stats.active++;
+    data.inviteStats[inviterId] = stats;
+    data.inviteMembers[member.id] = inviterId;
+    saveData(data);
+  }
+
+  await handleRaidJoin(member, data).catch(error => console.error('❌ Raid-Schutz Fehler:', error));
 
   if (data.config.unverifiedRoleId) {
     await member.roles.add(data.config.unverifiedRoleId).catch(() => {});
@@ -902,6 +1452,16 @@ client.on(Events.GuildMemberAdd, async member => {
 
 client.on(Events.GuildMemberRemove, async member => {
   const data = loadData();
+
+  const inviterId = data.inviteMembers[member.id];
+  if (inviterId) {
+    const stats = data.inviteStats[inviterId] || { total: 0, active: 0, leaves: 0 };
+    stats.active = Math.max(0, (stats.active || 0) - 1);
+    stats.leaves = (stats.leaves || 0) + 1;
+    data.inviteStats[inviterId] = stats;
+    delete data.inviteMembers[member.id];
+    saveData(data);
+  }
 
   if (data.config.leaveChannelId) {
     const embed = new EmbedBuilder()
@@ -933,6 +1493,62 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   await updateSocialPanel(newMember.guild, data).catch(() => {});
 });
 
+client.on(Events.InviteCreate, async invite => {
+  if (invite.guild) await cacheGuildInvites(invite.guild).catch(() => {});
+});
+
+client.on(Events.InviteDelete, async invite => {
+  if (invite.guild) await cacheGuildInvites(invite.guild).catch(() => {});
+});
+
+client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
+  const data = loadData();
+  const lobbyId = data.config.tempVoiceLobbyId;
+
+  if (lobbyId && newState.channelId === lobbyId && oldState.channelId !== lobbyId) {
+    const member = newState.member;
+    const channel = await newState.guild.channels.create({
+      name: `🎧 ${member.displayName}`.slice(0, 90),
+      type: ChannelType.GuildVoice,
+      parent: data.config.tempVoiceCategoryId || newState.channel?.parentId || undefined,
+      userLimit: Number(data.config.tempVoiceUserLimit) || 0,
+      permissionOverwrites: [
+        {
+          id: member.id,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.Connect,
+            PermissionFlagsBits.Speak,
+            PermissionFlagsBits.ManageChannels,
+            PermissionFlagsBits.MoveMembers,
+          ],
+        },
+      ],
+      reason: `Temporärer Raum für ${member.user.tag}`,
+    }).catch(() => null);
+
+    if (channel) {
+      data.tempVoices[channel.id] = { ownerId: member.id, createdAt: Date.now() };
+      saveData(data);
+      const moved = await member.voice.setChannel(channel).then(() => true).catch(() => false);
+      if (!moved) {
+        delete data.tempVoices[channel.id];
+        saveData(data);
+        await channel.delete('Mitglied konnte nicht verschoben werden').catch(() => {});
+      }
+    }
+  }
+
+  if (oldState.channelId && data.tempVoices[oldState.channelId]) {
+    const oldChannel = oldState.channel || await oldState.guild.channels.fetch(oldState.channelId).catch(() => null);
+    if (oldChannel?.isVoiceBased() && oldChannel.members.size === 0) {
+      delete data.tempVoices[oldState.channelId];
+      saveData(data);
+      await oldChannel.delete('Temporärer Raum ist leer').catch(() => {});
+    }
+  }
+});
+
 // ============================================================
 // VORSCHLÄGE AUS NORMALEN NACHRICHTEN
 // ============================================================
@@ -941,6 +1557,23 @@ client.on(Events.MessageCreate, async message => {
   if (!message.guild || message.author.bot) return;
 
   const data = loadData();
+  if (await handleAutomodMessage(message, data)) return;
+
+  await awardMessageXp(message, data).catch(error => console.error('❌ Level-System Fehler:', error));
+
+  const prefix = data.config.customCommandPrefix || '!';
+  if (message.content?.startsWith(prefix)) {
+    const name = message.content.slice(prefix.length).trim().split(/\s+/)[0]?.toLowerCase();
+    const custom = name ? data.customCommands[name] : null;
+    if (custom?.response) {
+      await message.reply({
+        content: renderCustomCommand(custom.response, message).slice(0, 2000),
+        allowedMentions: { users: [message.author.id], roles: [], parse: [] },
+      });
+      return;
+    }
+  }
+
   const suggestionsChannelId = data.config.suggestionsChannelId;
   if (!suggestionsChannelId || message.channel.id !== suggestionsChannelId) return;
 
@@ -1126,6 +1759,17 @@ client.on(Events.InteractionCreate, async interaction => {
           return;
         }
         await interaction.update({ content: '🔒 Ticket wird in 5 Sekunden geschlossen.', components: [] });
+        const fallbackTranscript = await deliverTicketTranscript(interaction.channel, data, interaction.user.id).catch(error => {
+          console.error('❌ Ticket-Transcript Fehler:', error);
+          return null;
+        });
+        if (fallbackTranscript) {
+          await interaction.followUp({
+            content: '📄 Es ist kein Transcript-Channel eingerichtet. Hier ist das Transcript:',
+            files: [new AttachmentBuilder(fallbackTranscript.buffer, { name: fallbackTranscript.fileName })],
+            ephemeral: true,
+          }).catch(() => {});
+        }
         await logEvent(interaction.guild, data, '🔒 Ticket geschlossen', `<#${interaction.channel.id}> wurde von <@${interaction.user.id}> geschlossen.`);
         setTimeout(() => interaction.channel.delete(`Ticket geschlossen von ${interaction.user.tag}`).catch(() => {}), 5000);
         return;
@@ -1206,6 +1850,99 @@ client.on(Events.InteractionCreate, async interaction => {
         saveData(data);
         await interaction.update(giveawayPayload(giveaway));
         await interaction.followUp({ content: already ? '✅ Du nimmst nicht mehr am Giveaway teil.' : '🎉 Du nimmst jetzt am Giveaway teil!', ephemeral: true });
+        return;
+      }
+
+      if (interaction.customId.startsWith('application_open:')) {
+        const type = interaction.customId.split(':')[1];
+        if (!APPLICATION_TYPES[type]) {
+          await interaction.reply({ content: '❌ Unbekannte Bewerbungsart.', ephemeral: true });
+          return;
+        }
+        const duplicate = Object.values(data.applications).find(application => application.userId === interaction.user.id && application.type === type && application.status === 'open');
+        if (duplicate) {
+          await interaction.reply({ content: `❌ Du hast bereits eine offene Bewerbung dieser Art. ID: \`${duplicate.id}\``, ephemeral: true });
+          return;
+        }
+
+        const modal = new ModalBuilder()
+          .setCustomId(`application_submit:${type}`)
+          .setTitle(APPLICATION_TYPES[type].slice(0, 45));
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('application_age').setLabel('Dein Alter').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(3)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('application_experience').setLabel('Deine Erfahrung').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1000)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('application_motivation').setLabel('Warum möchtest du dich bewerben?').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1000)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('application_about').setLabel('Über dich / zusätzliche Informationen').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1000)),
+        );
+        await interaction.showModal(modal);
+        return;
+      }
+
+      if (interaction.customId.startsWith('application_decide:')) {
+        if (!canUseTeamTools(interaction.member, data)) {
+          await interaction.reply({ content: '❌ Du darfst Bewerbungen nicht auswerten.', ephemeral: true });
+          return;
+        }
+        const [, decision, applicationId] = interaction.customId.split(':');
+        const application = data.applications[applicationId];
+        if (!application || !['accepted', 'rejected'].includes(decision)) {
+          await interaction.reply({ content: '❌ Bewerbung nicht gefunden.', ephemeral: true });
+          return;
+        }
+        if (application.status !== 'open') {
+          await interaction.reply({ content: '❌ Diese Bewerbung wurde bereits ausgewertet.', ephemeral: true });
+          return;
+        }
+
+        application.status = decision;
+        application.reviewedBy = interaction.user.id;
+        application.reviewedAt = Date.now();
+        saveData(data);
+
+        if (decision === 'accepted' && data.config.applicationAcceptedRoleId) {
+          const applicantMember = await interaction.guild.members.fetch(application.userId).catch(() => null);
+          if (applicantMember) await applicantMember.roles.add(data.config.applicationAcceptedRoleId).catch(() => {});
+        }
+
+        await interaction.update(applicationReviewPayload(application));
+        const applicant = await client.users.fetch(application.userId).catch(() => null);
+        if (applicant) {
+          await applicant.send(`Deine **${APPLICATION_TYPES[application.type]}** auf **${interaction.guild.name}** wurde ${decision === 'accepted' ? '✅ angenommen' : '❌ abgelehnt'}.`).catch(() => {});
+        }
+        await logEvent(interaction.guild, data, '📨 Bewerbung ausgewertet', `<@${interaction.user.id}> hat die Bewerbung von <@${application.userId}> ${decision === 'accepted' ? 'angenommen' : 'abgelehnt'}.`);
+        return;
+      }
+
+      if (interaction.customId.startsWith('selfrole:')) {
+        const roleId = interaction.customId.split(':')[1];
+        const role = await interaction.guild.roles.fetch(roleId).catch(() => null);
+        const botMember = interaction.guild.members.me;
+        if (!role || role.id === interaction.guild.id || role.managed || !botMember || botMember.roles.highest.comparePositionTo(role) <= 0) {
+          await interaction.reply({ content: '❌ Diese Rolle kann der Bot nicht vergeben. Prüfe die Rollen-Reihenfolge.', ephemeral: true });
+          return;
+        }
+        const hasRole = interaction.member.roles.cache.has(role.id);
+        if (hasRole) await interaction.member.roles.remove(role);
+        else await interaction.member.roles.add(role);
+        await interaction.reply({ content: hasRole ? `➖ <@&${role.id}> wurde entfernt.` : `✅ <@&${role.id}> wurde hinzugefügt.`, ephemeral: true, allowedMentions: { parse: [] } });
+        return;
+      }
+
+      if (interaction.customId.startsWith('community_event_join:')) {
+        const eventId = interaction.customId.split(':')[1];
+        const event = data.events[eventId];
+        if (!event || event.cancelled || event.started || event.startAt <= Date.now()) {
+          await interaction.reply({ content: '❌ Die Teilnahme an diesem Event ist geschlossen.', ephemeral: true });
+          return;
+        }
+        if (!Array.isArray(event.participants)) event.participants = [];
+        const joined = event.participants.includes(interaction.user.id);
+        event.participants = joined
+          ? event.participants.filter(id => id !== interaction.user.id)
+          : [...event.participants, interaction.user.id];
+        saveData(data);
+        await interaction.update(communityEventPayload(event));
+        await interaction.followUp({ content: joined ? '✅ Du nimmst nicht mehr teil.' : '🙋 Du nimmst am Event teil!', ephemeral: true });
         return;
       }
 
@@ -1323,6 +2060,42 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
+      if (interaction.customId.startsWith('application_submit:')) {
+        const type = interaction.customId.split(':')[1];
+        if (!APPLICATION_TYPES[type]) {
+          await interaction.reply({ content: '❌ Unbekannte Bewerbungsart.', ephemeral: true });
+          return;
+        }
+        const reviewChannel = data.config.applicationReviewChannelId
+          ? await interaction.guild.channels.fetch(data.config.applicationReviewChannelId).catch(() => null)
+          : null;
+        if (!reviewChannel?.isTextBased()) {
+          await interaction.reply({ content: '❌ Der Auswertungs-Channel wurde nicht gefunden. Bitte das Bewerbungs-Panel neu erstellen.', ephemeral: true });
+          return;
+        }
+
+        const application = {
+          id: createShortId('a'),
+          guildId: interaction.guild.id,
+          userId: interaction.user.id,
+          type,
+          age: interaction.fields.getTextInputValue('application_age').trim(),
+          experience: interaction.fields.getTextInputValue('application_experience').trim(),
+          motivation: interaction.fields.getTextInputValue('application_motivation').trim(),
+          about: interaction.fields.getTextInputValue('application_about').trim(),
+          status: 'open',
+          createdAt: Date.now(),
+        };
+        const reviewMessage = await reviewChannel.send(applicationReviewPayload(application));
+        application.channelId = reviewChannel.id;
+        application.messageId = reviewMessage.id;
+        data.applications[application.id] = application;
+        saveData(data);
+        await interaction.reply({ content: `✅ Deine Bewerbung wurde gesendet. **ID:** \`${application.id}\``, ephemeral: true });
+        await logEvent(interaction.guild, data, '📨 Neue Bewerbung', `<@${interaction.user.id}> hat eine **${APPLICATION_TYPES[type]}** eingereicht.`);
+        return;
+      }
+
       if (interaction.customId === 'socials_add_modal' || interaction.customId === 'socials_edit_modal') {
         if (!canManageSocials(interaction.member, data)) {
           await interaction.reply({ content: '❌ Du darfst die Socials nicht verwalten.', ephemeral: true });
@@ -1385,6 +2158,11 @@ client.on(Events.InteractionCreate, async interaction => {
           { name: '🛡️ Moderation', value: '`/warn` `/warnings` `/clearwarnings` `/timeout` `/untimeout` `/kick` `/ban` `/unban` `/unbanall` `/purge` `/slowmode` `/lock` `/unlock`' },
           { name: '📣 Community', value: '`/announce` `/embed` `/poll` `/suggest` `/giveaway`' },
           { name: 'ℹ️ Info', value: '`/serverinfo` `/userinfo` `/avatar` `/ping`' },
+          { name: '📨 Bewerbungen & Rollen', value: '`/applicationpanel` `/applicationlist` `/rolepanel`' },
+          { name: '🛡️ Schutz & Voice', value: '`/automod` `/tempvoice` `/voice`' },
+          { name: '🏆 Level & Invites', value: '`/rank` `/leaderboard` `/levelrole` `/levelsystem` `/invites` `/inviteleaderboard`' },
+          { name: '📅 Events & Team', value: '`/event` `/duty` `/dutystats` `/dutyleaderboard`' },
+          { name: '🧩 Eigene Commands', value: '`/customcommand` oder gespeicherte Befehle mit `!name`' },
           { name: '⚙️ Einrichtung', value: '`/setup channel` `/setup role` `/setup tickets` `/setup show`' },
         );
       await interaction.reply({ embeds: [embed], ephemeral: true });
@@ -1456,6 +2234,9 @@ client.on(Events.InteractionCreate, async interaction => {
           giveaways: 'giveawayChannelId',
           socials: 'socialsChannelId',
           socialaudit: 'socialAuditChannelId',
+          applications: 'applicationReviewChannelId',
+          transcripts: 'ticketTranscriptChannelId',
+          automodlogs: 'automodLogChannelId',
         };
         data.config[map[type]] = channel.id;
         saveData(data);
@@ -1474,6 +2255,7 @@ client.on(Events.InteractionCreate, async interaction => {
           announcement: 'announcementRoleId',
           socialadmin: 'socialAdminRoleId',
           socialdelete: 'socialDeleteRoleId',
+          applicationaccepted: 'applicationAcceptedRoleId',
         };
         data.config[map[type]] = role.id;
         saveData(data);
@@ -1494,9 +2276,9 @@ client.on(Events.InteractionCreate, async interaction => {
         const fmtCh = id => id ? `<#${id}>` : 'Nicht gesetzt';
         const fmtRole = id => id ? `<@&${id}>` : 'Nicht gesetzt';
         const embed = new EmbedBuilder().setColor(0x111111).setTitle('⚙️ Bot-Konfiguration').addFields(
-          { name: 'Channels', value: `Welcome: ${fmtCh(c.welcomeChannelId)}\nLeave: ${fmtCh(c.leaveChannelId)}\nLogs: ${fmtCh(c.logChannelId)}\nSuggestions: ${fmtCh(c.suggestionsChannelId)}\nGiveaways: ${fmtCh(c.giveawayChannelId)}\nSocials: ${fmtCh(c.socialsChannelId)}\nSocial Audit: ${fmtCh(c.socialAuditChannelId)}` },
-          { name: 'Rollen', value: `Verified: ${fmtRole(c.verifiedRoleId)}\nUnverified: ${fmtRole(c.unverifiedRoleId)}\nSupport: ${fmtRole(c.supportRoleId)}\nModerator: ${fmtRole(c.moderatorRoleId)}\nAnnouncements: ${fmtRole(c.announcementRoleId)}\nSocial Admin: ${fmtRole(c.socialAdminRoleId)}\nSocial Delete: ${fmtRole(c.socialDeleteRoleId)}` },
-          { name: 'Tickets', value: `Kategorie: ${c.ticketCategoryId ? `<#${c.ticketCategoryId}>` : 'Nicht gesetzt'}` },
+          { name: 'Channels', value: `Welcome: ${fmtCh(c.welcomeChannelId)}\nLeave: ${fmtCh(c.leaveChannelId)}\nLogs: ${fmtCh(c.logChannelId)}\nSuggestions: ${fmtCh(c.suggestionsChannelId)}\nGiveaways: ${fmtCh(c.giveawayChannelId)}\nSocials: ${fmtCh(c.socialsChannelId)}\nSocial Audit: ${fmtCh(c.socialAuditChannelId)}\nBewerbungen: ${fmtCh(c.applicationReviewChannelId)}\nTranskripte: ${fmtCh(c.ticketTranscriptChannelId)}\nAutoMod: ${fmtCh(c.automodLogChannelId)}` },
+          { name: 'Rollen', value: `Verified: ${fmtRole(c.verifiedRoleId)}\nUnverified: ${fmtRole(c.unverifiedRoleId)}\nSupport: ${fmtRole(c.supportRoleId)}\nModerator: ${fmtRole(c.moderatorRoleId)}\nAnnouncements: ${fmtRole(c.announcementRoleId)}\nSocial Admin: ${fmtRole(c.socialAdminRoleId)}\nSocial Delete: ${fmtRole(c.socialDeleteRoleId)}\nBewerbung angenommen: ${fmtRole(c.applicationAcceptedRoleId)}` },
+          { name: 'Tickets & Temp Voice', value: `Ticket-Kategorie: ${c.ticketCategoryId ? `<#${c.ticketCategoryId}>` : 'Nicht gesetzt'}\nVoice-Lobby: ${fmtCh(c.tempVoiceLobbyId)}\nVoice-Kategorie: ${fmtCh(c.tempVoiceCategoryId)}` },
         );
         await interaction.reply({ embeds: [embed], ephemeral: true, allowedMentions: { parse: [] } });
         return;
@@ -1526,6 +2308,71 @@ client.on(Events.InteractionCreate, async interaction => {
       const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('ticket_create').setLabel('Ticket erstellen').setEmoji('🎫').setStyle(ButtonStyle.Primary));
       await interaction.channel.send({ embeds: [new EmbedBuilder().setColor(0x111111).setTitle('🎫 Support').setDescription('Benötigst du Hilfe? Drücke unten auf **Ticket erstellen**.')], components: [row] });
       await interaction.reply({ content: '✅ Ticket-Panel erstellt.', ephemeral: true });
+      return;
+    }
+
+    if (command === 'applicationpanel') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+        return;
+      }
+      const type = interaction.options.getString('typ');
+      const reviewChannel = interaction.options.getChannel('auswertung');
+      data.config.applicationReviewChannelId = reviewChannel.id;
+      saveData(data);
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`application_open:${type}`).setLabel('Jetzt bewerben').setEmoji('📨').setStyle(ButtonStyle.Primary),
+      );
+      const embed = new EmbedBuilder()
+        .setColor(0x8b5cf6)
+        .setTitle(`📨 ${APPLICATION_TYPES[type]}`)
+        .setDescription('Drücke unten auf **Jetzt bewerben** und fülle das Formular vollständig aus. Das Team erhält deine Bewerbung anschließend automatisch.')
+        .setFooter({ text: interaction.guild.name });
+      await interaction.channel.send({ embeds: [embed], components: [row] });
+      await interaction.reply({ content: `✅ Bewerbungs-Panel erstellt. Auswertung in <#${reviewChannel.id}>.`, ephemeral: true });
+      return;
+    }
+
+    if (command === 'applicationlist') {
+      if (!canUseTeamTools(interaction.member, data)) {
+        await interaction.reply({ content: '❌ Du darfst Bewerbungen nicht sehen.', ephemeral: true });
+        return;
+      }
+      const open = Object.values(data.applications)
+        .filter(application => application.guildId === interaction.guild.id && application.status === 'open')
+        .sort((a, b) => a.createdAt - b.createdAt);
+      const text = open.length
+        ? open.slice(0, 25).map(application => `• \`${application.id}\` • <@${application.userId}> • **${APPLICATION_TYPES[application.type]}** • <t:${Math.floor(application.createdAt / 1000)}:R>`).join('\n')
+        : '*Keine offenen Bewerbungen.*';
+      await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle('📨 Offene Bewerbungen').setDescription(text)], ephemeral: true, allowedMentions: { parse: [] } });
+      return;
+    }
+
+    if (command === 'rolepanel') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+        return;
+      }
+      const roles = ['rolle1', 'rolle2', 'rolle3', 'rolle4', 'rolle5']
+        .map(name => interaction.options.getRole(name))
+        .filter(Boolean);
+      const botMember = interaction.guild.members.me;
+      const invalid = roles.find(role => role.id === interaction.guild.id || role.managed || !botMember || botMember.roles.highest.comparePositionTo(role) <= 0);
+      if (invalid) {
+        await interaction.reply({ content: `❌ Die Rolle **${invalid.name}** kann der Bot nicht vergeben. Schiebe die Bot-Rolle weiter nach oben.`, ephemeral: true });
+        return;
+      }
+      const row = new ActionRowBuilder();
+      for (const role of roles) {
+        row.addComponents(new ButtonBuilder().setCustomId(`selfrole:${role.id}`).setLabel(role.name.slice(0, 80)).setEmoji('🏷️').setStyle(ButtonStyle.Secondary));
+      }
+      const title = interaction.options.getString('titel');
+      await interaction.channel.send({
+        embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle(`🏷️ ${title}`).setDescription('Klicke auf eine Rolle, um sie hinzuzufügen oder wieder zu entfernen.')],
+        components: [row],
+      });
+      await interaction.reply({ content: '✅ Rollen-Panel erstellt.', ephemeral: true });
       return;
     }
 
@@ -1559,6 +2406,401 @@ client.on(Events.InteractionCreate, async interaction => {
         await interaction.reply({ content: 'Ticket wirklich schließen?', components: [row], ephemeral: true });
         return;
       }
+    }
+
+    if (command === 'automod') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Du brauchst **Server verwalten** oder Administrator.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'enable') {
+        const logChannel = interaction.options.getChannel('log_channel');
+        const blockInvites = interaction.options.getBoolean('block_invites');
+        const maxMentions = interaction.options.getInteger('max_mentions');
+        const maxMessages = interaction.options.getInteger('max_messages');
+        const accountAge = interaction.options.getInteger('account_age');
+        data.automod.enabled = true;
+        if (logChannel) data.config.automodLogChannelId = logChannel.id;
+        if (blockInvites !== null) data.automod.blockInvites = blockInvites;
+        if (maxMentions !== null) data.automod.maxMentions = maxMentions;
+        if (maxMessages !== null) data.automod.maxMessages = maxMessages;
+        if (accountAge !== null) data.automod.minAccountAgeHours = accountAge;
+        saveData(data);
+        await interaction.reply({ content: '✅ Anti-Spam und Anti-Raid wurden aktiviert.', ephemeral: true });
+        return;
+      }
+      if (sub === 'disable') {
+        data.automod.enabled = false;
+        data.automod.raidModeUntil = 0;
+        saveData(data);
+        await interaction.reply({ content: '✅ AutoMod wurde deaktiviert.', ephemeral: true });
+        return;
+      }
+      const settings = data.automod;
+      const embed = new EmbedBuilder().setColor(settings.enabled ? 0x2ecc71 : 0xe74c3c).setTitle('🛡️ AutoMod-Status').addFields(
+        { name: 'Status', value: settings.enabled ? '✅ Aktiv' : '❌ Inaktiv', inline: true },
+        { name: 'Invite-Filter', value: settings.blockInvites ? 'Aktiv' : 'Inaktiv', inline: true },
+        { name: 'Mention-Limit', value: String(settings.maxMentions), inline: true },
+        { name: 'Spam-Limit', value: `${settings.maxMessages} Nachrichten / ${Math.round(settings.spamWindowMs / 1000)}s`, inline: true },
+        { name: 'Account-Warnung', value: `Unter ${settings.minAccountAgeHours} Stunden`, inline: true },
+        { name: 'Log-Channel', value: data.config.automodLogChannelId ? `<#${data.config.automodLogChannelId}>` : 'Normaler Log-Channel', inline: true },
+      );
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+      return;
+    }
+
+    if (command === 'tempvoice') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'setup') {
+        const lobby = interaction.options.getChannel('lobby');
+        const category = interaction.options.getChannel('kategorie');
+        data.config.tempVoiceLobbyId = lobby.id;
+        data.config.tempVoiceCategoryId = category.id;
+        data.config.tempVoiceUserLimit = interaction.options.getInteger('limit') || 0;
+        saveData(data);
+        await interaction.reply({ content: `✅ Temp Voice eingerichtet: <#${lobby.id}> → **${category.name}**.`, ephemeral: true });
+        return;
+      }
+      if (sub === 'disable') {
+        data.config.tempVoiceLobbyId = null;
+        data.config.tempVoiceCategoryId = null;
+        saveData(data);
+        await interaction.reply({ content: '✅ Temp Voice wurde deaktiviert. Bestehende Räume bleiben bis sie leer sind.', ephemeral: true });
+        return;
+      }
+      await interaction.reply({
+        embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle('🎧 Temp-Voice-Status').setDescription(
+          `**Lobby:** ${data.config.tempVoiceLobbyId ? `<#${data.config.tempVoiceLobbyId}>` : 'Nicht gesetzt'}\n**Kategorie:** ${data.config.tempVoiceCategoryId ? `<#${data.config.tempVoiceCategoryId}>` : 'Nicht gesetzt'}\n**Standard-Limit:** ${data.config.tempVoiceUserLimit || 'Unbegrenzt'}`,
+        )],
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (command === 'voice') {
+      const voiceChannel = interaction.member.voice.channel;
+      const tempEntry = voiceChannel ? data.tempVoices[voiceChannel.id] : null;
+      if (!voiceChannel || !tempEntry || tempEntry.ownerId !== interaction.user.id) {
+        await interaction.reply({ content: '❌ Du musst Besitzer eines temporären Sprachkanals sein.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'name') {
+        const name = interaction.options.getString('name').trim();
+        await voiceChannel.setName(name, `Temp Voice geändert von ${interaction.user.tag}`);
+        await interaction.reply({ content: `✅ Raum umbenannt in **${name}**.`, ephemeral: true });
+        return;
+      }
+      if (sub === 'limit') {
+        const limit = interaction.options.getInteger('anzahl');
+        await voiceChannel.setUserLimit(limit, `Temp Voice geändert von ${interaction.user.tag}`);
+        await interaction.reply({ content: `✅ Nutzerlimit: **${limit || 'Unbegrenzt'}**.`, ephemeral: true });
+        return;
+      }
+      if (sub === 'lock' || sub === 'unlock') {
+        await voiceChannel.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: sub === 'lock' ? false : null });
+        await interaction.reply({ content: sub === 'lock' ? '🔒 Dein Raum wurde gesperrt.' : '🔓 Dein Raum wurde geöffnet.', ephemeral: true });
+        return;
+      }
+      const user = interaction.options.getUser('user');
+      if (sub === 'permit') {
+        await voiceChannel.permissionOverwrites.edit(user.id, { ViewChannel: true, Connect: true });
+        await interaction.reply({ content: `✅ <@${user.id}> darf deinen Raum betreten.`, ephemeral: true });
+        return;
+      }
+      if (sub === 'reject') {
+        await voiceChannel.permissionOverwrites.edit(user.id, { Connect: false });
+        const targetMember = await interaction.guild.members.fetch(user.id).catch(() => null);
+        if (targetMember?.voice.channelId === voiceChannel.id) await targetMember.voice.setChannel(null).catch(() => {});
+        await interaction.reply({ content: `✅ <@${user.id}> wurde aus deinem Raum entfernt und gesperrt.`, ephemeral: true });
+        return;
+      }
+    }
+
+    if (command === 'rank') {
+      const user = interaction.options.getUser('user') || interaction.user;
+      await interaction.reply({ embeds: [rankEmbed(user, data)] });
+      return;
+    }
+
+    if (command === 'leaderboard') {
+      const top = Object.entries(data.levels)
+        .sort(([, a], [, b]) => (b.xp || 0) - (a.xp || 0))
+        .slice(0, 10);
+      const text = top.length
+        ? top.map(([userId, record], index) => `**${index + 1}.** <@${userId}> • Level **${calculateLevel(record.xp || 0)}** • ${record.xp || 0} XP`).join('\n')
+        : '*Noch keine XP gesammelt.*';
+      await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle('🏆 Level-Bestenliste').setDescription(text)], allowedMentions: { parse: [] } });
+      return;
+    }
+
+    if (command === 'levelrole') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'set') {
+        const level = interaction.options.getInteger('level');
+        const role = interaction.options.getRole('rolle');
+        const botMember = interaction.guild.members.me;
+        if (role.managed || role.id === interaction.guild.id || !botMember || botMember.roles.highest.comparePositionTo(role) <= 0) {
+          await interaction.reply({ content: '❌ Diese Rolle kann der Bot nicht vergeben. Prüfe die Rollen-Reihenfolge.', ephemeral: true });
+          return;
+        }
+        data.levelRoles[String(level)] = role.id;
+        saveData(data);
+        await interaction.reply({ content: `✅ Auf Level **${level}** wird <@&${role.id}> vergeben.`, ephemeral: true, allowedMentions: { parse: [] } });
+        return;
+      }
+      if (sub === 'remove') {
+        const level = interaction.options.getInteger('level');
+        delete data.levelRoles[String(level)];
+        saveData(data);
+        await interaction.reply({ content: `✅ Level-Rolle für Level **${level}** entfernt.`, ephemeral: true });
+        return;
+      }
+      const entries = Object.entries(data.levelRoles).sort((a, b) => Number(a[0]) - Number(b[0]));
+      await interaction.reply({
+        embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle('🏷️ Level-Rollen').setDescription(entries.length ? entries.map(([level, roleId]) => `Level **${level}** → <@&${roleId}>`).join('\n') : '*Keine Level-Rollen eingerichtet.*')],
+        ephemeral: true,
+        allowedMentions: { parse: [] },
+      });
+      return;
+    }
+
+    if (command === 'levelsystem') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'enable' || sub === 'disable') {
+        data.config.levelSystemEnabled = sub === 'enable';
+        saveData(data);
+      }
+      await interaction.reply({ content: `🏆 Level-System ist **${data.config.levelSystemEnabled ? 'aktiv' : 'inaktiv'}**.`, ephemeral: true });
+      return;
+    }
+
+    if (command === 'invites') {
+      const user = interaction.options.getUser('user') || interaction.user;
+      const stats = data.inviteStats[user.id] || { total: 0, active: 0, leaves: 0 };
+      const embed = new EmbedBuilder()
+        .setColor(0x8b5cf6)
+        .setTitle(`🔗 Einladungen • ${user.username}`)
+        .setThumbnail(user.displayAvatarURL({ size: 256 }))
+        .addFields(
+          { name: 'Gesamt', value: String(stats.total || 0), inline: true },
+          { name: 'Aktiv', value: String(stats.active || 0), inline: true },
+          { name: 'Verlassen', value: String(stats.leaves || 0), inline: true },
+        );
+      await interaction.reply({ embeds: [embed] });
+      return;
+    }
+
+    if (command === 'inviteleaderboard') {
+      const top = Object.entries(data.inviteStats)
+        .sort(([, a], [, b]) => (b.active || 0) - (a.active || 0))
+        .slice(0, 10);
+      const text = top.length
+        ? top.map(([userId, stats], index) => `**${index + 1}.** <@${userId}> • **${stats.active || 0} aktiv** • ${stats.total || 0} gesamt`).join('\n')
+        : '*Noch keine Einladungen erfasst.*';
+      await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle('🔗 Invite-Bestenliste').setDescription(text)], allowedMentions: { parse: [] } });
+      return;
+    }
+
+    if (command === 'event') {
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'create') {
+        if (!canAnnounce(interaction.member, data)) {
+          await interaction.reply({ content: '❌ Du darfst keine Events erstellen.', ephemeral: true });
+          return;
+        }
+        const duration = parseDuration(interaction.options.getString('in'));
+        if (!duration) {
+          await interaction.reply({ content: '❌ Ungültige Zeit. Nutze zum Beispiel `30m`, `2h` oder `3d`.', ephemeral: true });
+          return;
+        }
+        const channel = interaction.options.getChannel('channel') || interaction.channel;
+        const event = {
+          id: createShortId('e'),
+          guildId: interaction.guild.id,
+          channelId: channel.id,
+          name: interaction.options.getString('name').trim(),
+          description: interaction.options.getString('beschreibung') || null,
+          creatorId: interaction.user.id,
+          createdAt: Date.now(),
+          startAt: Date.now() + duration,
+          participants: [interaction.user.id],
+          reminders: {},
+          started: false,
+          cancelled: false,
+        };
+        const message = await channel.send({ embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle('📅 Event wird erstellt …')] });
+        event.messageId = message.id;
+        data.events[event.id] = event;
+        saveData(data);
+        await message.edit(communityEventPayload(event));
+        await interaction.reply({ content: `✅ Event erstellt: ${message.url}\n**Event-ID:** \`${event.id}\``, ephemeral: true });
+        return;
+      }
+      if (sub === 'list') {
+        const events = Object.values(data.events)
+          .filter(event => event.guildId === interaction.guild.id && !event.cancelled && !event.started)
+          .sort((a, b) => a.startAt - b.startAt);
+        const text = events.length
+          ? events.slice(0, 20).map(event => `• \`${event.id}\` • **${event.name}** • <t:${Math.floor(event.startAt / 1000)}:R> • ${event.participants?.length || 0} Teilnehmer`).join('\n')
+          : '*Keine geplanten Events.*';
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle('📅 Geplante Events').setDescription(text)] });
+        return;
+      }
+      if (sub === 'cancel') {
+        const eventId = interaction.options.getString('event_id').trim();
+        const event = data.events[eventId];
+        if (!event || event.guildId !== interaction.guild.id) {
+          await interaction.reply({ content: '❌ Event nicht gefunden.', ephemeral: true });
+          return;
+        }
+        if (event.creatorId !== interaction.user.id && !canAnnounce(interaction.member, data)) {
+          await interaction.reply({ content: '❌ Du darfst dieses Event nicht absagen.', ephemeral: true });
+          return;
+        }
+        event.cancelled = true;
+        event.cancelledBy = interaction.user.id;
+        saveData(data);
+        const channel = await interaction.guild.channels.fetch(event.channelId).catch(() => null);
+        const message = channel?.isTextBased() ? await channel.messages.fetch(event.messageId).catch(() => null) : null;
+        if (message) await message.edit(communityEventPayload(event, true)).catch(() => {});
+        if (channel?.isTextBased()) await channel.send(`❌ Das Event **${event.name}** wurde abgesagt.`).catch(() => {});
+        await interaction.reply({ content: '✅ Event wurde abgesagt.', ephemeral: true });
+        return;
+      }
+    }
+
+    if (command === 'duty') {
+      if (!canUseTeamTools(interaction.member, data)) {
+        await interaction.reply({ content: '❌ Dieser Befehl ist nur für das Team.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      const active = data.duty.active[interaction.user.id];
+      if (sub === 'start') {
+        if (active) {
+          await interaction.reply({ content: `❌ Du bist bereits seit <t:${Math.floor(active.startedAt / 1000)}:R> im Dienst.`, ephemeral: true });
+          return;
+        }
+        data.duty.active[interaction.user.id] = { startedAt: Date.now() };
+        saveData(data);
+        await interaction.reply({ content: '🟢 Dein Team-Dienst wurde gestartet.', ephemeral: true });
+        return;
+      }
+      if (sub === 'stop') {
+        if (!active) {
+          await interaction.reply({ content: '❌ Du bist aktuell nicht im Dienst.', ephemeral: true });
+          return;
+        }
+        const session = Date.now() - active.startedAt;
+        data.duty.totals[interaction.user.id] = (data.duty.totals[interaction.user.id] || 0) + session;
+        delete data.duty.active[interaction.user.id];
+        saveData(data);
+        await interaction.reply({ content: `🔴 Dienst beendet. Diese Sitzung: **${formatLongDuration(session)}**.`, ephemeral: true });
+        return;
+      }
+      await interaction.reply({
+        content: active
+          ? `🟢 Du bist seit <t:${Math.floor(active.startedAt / 1000)}:R> im Dienst. Gesamt: **${formatLongDuration((data.duty.totals[interaction.user.id] || 0) + Date.now() - active.startedAt)}**.`
+          : `🔴 Du bist nicht im Dienst. Gesamt: **${formatLongDuration(data.duty.totals[interaction.user.id] || 0)}**.`,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (command === 'dutystats') {
+      const user = interaction.options.getUser('user') || interaction.user;
+      if (user.id !== interaction.user.id && !canUseTeamTools(interaction.member, data)) {
+        await interaction.reply({ content: '❌ Du darfst fremde Dienstzeiten nicht sehen.', ephemeral: true });
+        return;
+      }
+      const active = data.duty.active[user.id];
+      const total = (data.duty.totals[user.id] || 0) + (active ? Date.now() - active.startedAt : 0);
+      await interaction.reply({
+        embeds: [new EmbedBuilder().setColor(active ? 0x2ecc71 : 0x8b5cf6).setTitle(`⏱️ Dienstzeit • ${user.username}`).addFields(
+          { name: 'Gesamtzeit', value: formatLongDuration(total), inline: true },
+          { name: 'Status', value: active ? `🟢 Seit <t:${Math.floor(active.startedAt / 1000)}:R>` : '🔴 Nicht im Dienst', inline: true },
+        )],
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (command === 'dutyleaderboard') {
+      if (!canUseTeamTools(interaction.member, data)) {
+        await interaction.reply({ content: '❌ Dieser Befehl ist nur für das Team.', ephemeral: true });
+        return;
+      }
+      const userIds = new Set([...Object.keys(data.duty.totals), ...Object.keys(data.duty.active)]);
+      const top = [...userIds]
+        .map(userId => [userId, (data.duty.totals[userId] || 0) + (data.duty.active[userId] ? Date.now() - data.duty.active[userId].startedAt : 0)])
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10);
+      const text = top.length ? top.map(([userId, duration], index) => `**${index + 1}.** <@${userId}> • **${formatLongDuration(duration)}**`).join('\n') : '*Noch keine Dienstzeiten.*';
+      await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle('⏱️ Team-Dienst Bestenliste').setDescription(text)], ephemeral: true, allowedMentions: { parse: [] } });
+      return;
+    }
+
+    if (command === 'customcommand') {
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'add' || sub === 'remove') {
+        if (!canSetup(interaction.member)) {
+          await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+          return;
+        }
+        const name = interaction.options.getString('name').trim().toLowerCase();
+        if (!/^[a-z0-9_-]{1,32}$/.test(name)) {
+          await interaction.reply({ content: '❌ Der Name darf nur Buchstaben, Zahlen, `_` und `-` enthalten.', ephemeral: true });
+          return;
+        }
+        if (sub === 'add') {
+          data.customCommands[name] = {
+            response: interaction.options.getString('antwort'),
+            updatedBy: interaction.user.id,
+            updatedAt: Date.now(),
+          };
+          saveData(data);
+          await interaction.reply({ content: `✅ Eigener Command **!${name}** gespeichert.`, ephemeral: true });
+          return;
+        }
+        if (!data.customCommands[name]) {
+          await interaction.reply({ content: '❌ Dieser Command existiert nicht.', ephemeral: true });
+          return;
+        }
+        delete data.customCommands[name];
+        saveData(data);
+        await interaction.reply({ content: `✅ **!${name}** wurde gelöscht.`, ephemeral: true });
+        return;
+      }
+      if (sub === 'list') {
+        const names = Object.keys(data.customCommands).sort();
+        await interaction.reply({
+          embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle('🧩 Eigene Commands').setDescription(names.length ? names.map(name => `\`!${name}\``).join(' ') : '*Keine eigenen Commands gespeichert.*')],
+          ephemeral: true,
+        });
+        return;
+      }
+      const name = interaction.options.getString('name').trim().toLowerCase();
+      const custom = data.customCommands[name];
+      if (!custom) {
+        await interaction.reply({ content: '❌ Dieser Command existiert nicht.', ephemeral: true });
+        return;
+      }
+      await interaction.reply({ content: renderCustomCommand(custom.response, interaction).slice(0, 2000), allowedMentions: { parse: [] } });
+      return;
     }
 
     if (command === 'embed') {

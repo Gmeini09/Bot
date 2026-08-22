@@ -1,17 +1,16 @@
 {
-  "name": "unfug-community-bot",
-  "version": "4.0.0",
-  "description": "Unfug Discord Community Bot: Socials, Tickets, Verify, Moderation, Vorschläge und Giveaways",
+  "name": "community-allround-bot",
+  "version": "2.0.0",
+  "description": "Discord community allround bot with socials, moderation, tickets, applications, levels, events and automation",
   "main": "index.js",
-  "type": "commonjs",
   "scripts": {
     "start": "node index.js",
-    "check": "node --check index.js"
+    "deploy": "node deploy-commands.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18.0.0"
   },
   "dependencies": {
-    "discord.js": "^14.22.1"
+    "discord.js": "14.27.0"
   }
 }
