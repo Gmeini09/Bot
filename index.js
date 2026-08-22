@@ -166,6 +166,38 @@ function normalizeUrl(value) {
   }
 }
 
+function parseEmbedColor(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return 0x111111;
+
+  const named = {
+    schwarz: 0x111111,
+    black: 0x111111,
+    rot: 0xe74c3c,
+    red: 0xe74c3c,
+    gruen: 0x2ecc71,
+    'grün': 0x2ecc71,
+    green: 0x2ecc71,
+    blau: 0x3498db,
+    blue: 0x3498db,
+    lila: 0x9b59b6,
+    purple: 0x9b59b6,
+    gelb: 0xf1c40f,
+    yellow: 0xf1c40f,
+    orange: 0xe67e22,
+    weiss: 0xffffff,
+    'weiß': 0xffffff,
+    white: 0xffffff,
+  };
+
+  const lower = raw.toLowerCase();
+  if (named[lower] !== undefined) return named[lower];
+
+  const hex = lower.replace(/^#/, '').replace(/^0x/, '');
+  if (/^[0-9a-f]{6}$/.test(hex)) return parseInt(hex, 16);
+  return null;
+}
+
 function parseLinks(raw) {
   const items = String(raw || '')
     .split(/\s+/)
@@ -624,6 +656,12 @@ function buildCommands() {
       .addStringOption(o => o.setName('titel').setDescription('Titel').setRequired(true).setMaxLength(100))
       .addStringOption(o => o.setName('text').setDescription('Text').setRequired(true).setMaxLength(1800))
       .addChannelOption(o => o.setName('channel').setDescription('Ziel-Channel').setRequired(false).addChannelTypes(ChannelType.GuildText))
+      .addBooleanOption(o => o.setName('everyone').setDescription('@everyone erwähnen?').setRequired(false)),
+
+    new SlashCommandBuilder()
+      .setName('embed')
+      .setDescription('Erstellt eine eigene Embed-Nachricht über ein Formular.')
+      .addChannelOption(o => o.setName('channel').setDescription('Ziel-Channel (sonst aktueller Channel)').setRequired(false).addChannelTypes(ChannelType.GuildText))
       .addBooleanOption(o => o.setName('everyone').setDescription('@everyone erwähnen?').setRequired(false)),
 
     new SlashCommandBuilder()
@@ -1131,6 +1169,65 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
+      if (interaction.customId.startsWith('custom_embed_modal:')) {
+        if (!canAnnounce(interaction.member, data)) {
+          await interaction.reply({ content: '❌ Du darfst keine Embed-Nachrichten erstellen.', ephemeral: true });
+          return;
+        }
+
+        const [, channelId, everyoneFlag, requesterId] = interaction.customId.split(':');
+        if (interaction.user.id !== requesterId) {
+          await interaction.reply({ content: '❌ Dieses Formular gehört nicht dir.', ephemeral: true });
+          return;
+        }
+
+        const channel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+        if (!channel?.isTextBased()) {
+          await interaction.reply({ content: '❌ Der Ziel-Channel wurde nicht gefunden.', ephemeral: true });
+          return;
+        }
+
+        const title = interaction.fields.getTextInputValue('embed_title').trim();
+        const text = interaction.fields.getTextInputValue('embed_text').trim();
+        const colorRaw = interaction.fields.getTextInputValue('embed_color').trim();
+        const footer = interaction.fields.getTextInputValue('embed_footer').trim();
+        const imageRaw = interaction.fields.getTextInputValue('embed_image').trim();
+
+        const color = parseEmbedColor(colorRaw);
+        if (color === null) {
+          await interaction.reply({ content: '❌ Ungültige Farbe. Nutze z. B. `schwarz`, `rot`, `lila` oder `#5865F2`.', ephemeral: true });
+          return;
+        }
+
+        let imageUrl = null;
+        if (imageRaw) {
+          imageUrl = normalizeUrl(imageRaw);
+          if (!imageUrl) {
+            await interaction.reply({ content: '❌ Die Bild-URL ist ungültig.', ephemeral: true });
+            return;
+          }
+        }
+
+        const embed = new EmbedBuilder()
+          .setColor(color)
+          .setTitle(title)
+          .setDescription(text)
+          .setTimestamp();
+        if (footer) embed.setFooter({ text: footer });
+        if (imageUrl) embed.setImage(imageUrl);
+
+        const everyone = everyoneFlag === '1';
+        await channel.send({
+          content: everyone ? '@everyone' : undefined,
+          embeds: [embed],
+          allowedMentions: everyone ? { parse: ['everyone'] } : { parse: [] },
+        });
+
+        await interaction.reply({ content: `✅ Embed wurde in <#${channel.id}> gesendet.`, ephemeral: true });
+        await logEvent(interaction.guild, data, '📝 Embed gesendet', `<@${interaction.user.id}> hat ein Embed in <#${channel.id}> gesendet.`);
+        return;
+      }
+
       if (interaction.customId === 'socials_add_modal' || interaction.customId === 'socials_edit_modal') {
         if (!canManageSocials(interaction.member, data)) {
           await interaction.reply({ content: '❌ Du darfst die Socials nicht verwalten.', ephemeral: true });
@@ -1191,7 +1288,7 @@ client.on(Events.InteractionCreate, async interaction => {
           { name: '🌐 Socials', value: '`/socials` `/editsocials` `/removesocial` `/deletesocials` `/socialinfo` `/sociallist` `/mysocials` `/refreshsocials`' },
           { name: '🎫 Tickets & Verify', value: '`/ticketpanel` `/ticket` `/verificationpanel`' },
           { name: '🛡️ Moderation', value: '`/warn` `/warnings` `/clearwarnings` `/timeout` `/untimeout` `/kick` `/ban` `/unban` `/purge` `/slowmode` `/lock` `/unlock`' },
-          { name: '📣 Community', value: '`/announce` `/poll` `/suggest` `/giveaway`' },
+          { name: '📣 Community', value: '`/announce` `/embed` `/poll` `/suggest` `/giveaway`' },
           { name: 'ℹ️ Info', value: '`/serverinfo` `/userinfo` `/avatar` `/ping`' },
           { name: '⚙️ Einrichtung', value: '`/setup channel` `/setup role` `/setup tickets` `/setup show`' },
         );
@@ -1367,6 +1464,71 @@ client.on(Events.InteractionCreate, async interaction => {
         await interaction.reply({ content: 'Ticket wirklich schließen?', components: [row], ephemeral: true });
         return;
       }
+    }
+
+    if (command === 'embed') {
+      if (!canAnnounce(interaction.member, data)) {
+        await interaction.reply({ content: '❌ Du darfst keine Embed-Nachrichten erstellen.', ephemeral: true });
+        return;
+      }
+
+      const channel = interaction.options.getChannel('channel') || interaction.channel;
+      const everyone = interaction.options.getBoolean('everyone') || false;
+
+      const modal = new ModalBuilder()
+        .setCustomId(`custom_embed_modal:${channel.id}:${everyone ? '1' : '0'}:${interaction.user.id}`)
+        .setTitle('Embed erstellen');
+
+      const titleInput = new TextInputBuilder()
+        .setCustomId('embed_title')
+        .setLabel('Titel')
+        .setPlaceholder('z. B. 📢 Information')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(256);
+
+      const textInput = new TextInputBuilder()
+        .setCustomId('embed_text')
+        .setLabel('Nachricht')
+        .setPlaceholder('Schreibe hier deine Nachricht ...')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+        .setMaxLength(4000);
+
+      const colorInput = new TextInputBuilder()
+        .setCustomId('embed_color')
+        .setLabel('Farbe (optional)')
+        .setPlaceholder('schwarz, rot, lila oder #5865F2')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(20);
+
+      const footerInput = new TextInputBuilder()
+        .setCustomId('embed_footer')
+        .setLabel('Footer (optional)')
+        .setPlaceholder('z. B. Unfug Community')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(200);
+
+      const imageInput = new TextInputBuilder()
+        .setCustomId('embed_image')
+        .setLabel('Bild-URL (optional)')
+        .setPlaceholder('https://.../bild.png')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(1000);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(titleInput),
+        new ActionRowBuilder().addComponents(textInput),
+        new ActionRowBuilder().addComponents(colorInput),
+        new ActionRowBuilder().addComponents(footerInput),
+        new ActionRowBuilder().addComponents(imageInput),
+      );
+
+      await interaction.showModal(modal);
+      return;
     }
 
     if (command === 'announce') {

@@ -45,3 +45,20 @@ Unter **Bot → Privileged Gateway Intents** aktivieren:
 ## GitHub Update
 
 Die vorhandene `index.js` im Repo vollständig durch diese Version ersetzen und committen. Railway deployt danach neu.
+
+## Eigene Embeds
+
+`/embed` öffnet ein Formular für eigene Discord-Embed-Nachrichten.
+
+Optionen beim Command:
+- `channel` – Ziel-Channel (optional)
+- `everyone` – optional @everyone
+
+Im Formular:
+- Titel
+- Nachricht
+- Farbe (z. B. `schwarz`, `rot`, `lila` oder `#5865F2`)
+- Footer (optional)
+- Bild-URL (optional)
+
+Berechtigung: dieselbe Berechtigung wie `/announce` (Announcement-Rolle bzw. Server verwalten/Admin).
