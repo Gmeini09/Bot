@@ -61,16 +61,77 @@ const SOCIAL_PANEL_COLOR = 0x8b5cf6;
 const VERIFY_TTL_MS = 5 * 60 * 1000;
 const XP_COOLDOWN_MS = 60 * 1000;
 const EVENT_CHECK_INTERVAL_MS = 30 * 1000;
+const COMMUNITY_CHECK_INTERVAL_MS = 60 * 1000;
+const REP_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const COMMUNITY_TIMEZONE = process.env.COMMUNITY_TIMEZONE || 'Europe/Vienna';
 const verifyChallenges = new Map();
 const refreshRunningGuilds = new Set();
 const suggestionSourceDeletes = new Set();
 const messageRateLimits = new Map();
 const joinBursts = new Map();
 const inviteCache = new Map();
+const challengeRateLimits = new Map();
+
+const DEFAULT_DAILY_QUESTIONS = [
+  'Was war heute dein lustigster Moment?',
+  'Welches Spiel könntest du immer wieder spielen?',
+  'Welche Funktion wünschst du dir für unsere Community?',
+  'Was ist dein bisher schönster Moment auf dem Server?',
+  'Mit welchem Community-Mitglied würdest du gerne einmal zocken?',
+  'Welche Musik hörst du aktuell am häufigsten?',
+  'Was darf bei einem perfekten Spieleabend nicht fehlen?',
+  'Welche Stadt oder welches Land möchtest du einmal besuchen?',
+  'Was ist dein Lieblingsfahrzeug in GTA oder FiveM?',
+  'Welche drei Dinge würdest du auf eine einsame Insel mitnehmen?',
+  'Welchen Beruf würdest du gerne einmal ausprobieren?',
+  'Was war dein erstes richtiges Lieblingsspiel?',
+  'Welche Superkraft hättest du gerne?',
+  'Was motiviert dich momentan am meisten?',
+  'Welches Community-Event sollen wir als Nächstes veranstalten?',
+  'Bist du eher Team Tag oder Team Nacht?',
+  'Welche Serie oder welchen Film kannst du empfehlen?',
+  'Was ist dein größtes Talent?',
+  'Welche kleine Sache macht deinen Tag sofort besser?',
+  'Wie bist du auf unsere Community aufmerksam geworden?',
+];
+
+const DEFAULT_COMMUNITY_POLLS = [
+  { question: 'Welches Community-Event wollt ihr als Nächstes?', options: ['Gamenight', 'Quiz', 'Turnier', 'Talkrunde'] },
+  { question: 'Wann habt ihr am meisten Zeit?', options: ['Unter der Woche', 'Freitag', 'Samstag', 'Sonntag'] },
+  { question: 'Was nutzt ihr auf dem Discord am häufigsten?', options: ['Textchat', 'Voice', 'Events', 'FiveM'] },
+  { question: 'Welche Event-Dauer findet ihr am besten?', options: ['30 Minuten', '1 Stunde', '2 Stunden', 'Offenes Ende'] },
+  { question: 'Wie möchtet ihr über Neuigkeiten informiert werden?', options: ['Ankündigungen', 'Ping-Rolle', 'Event-Erinnerung', 'Alles davon'] },
+];
+
+const QUIZ_QUESTIONS = [
+  { question: 'Wie viele Minuten hat eine Stunde?', options: ['30', '45', '60', '90'], answer: 2 },
+  { question: 'Welche Farbe entsteht aus Blau und Gelb?', options: ['Rot', 'Grün', 'Lila', 'Orange'], answer: 1 },
+  { question: 'Wie heißt die Hauptstadt von Österreich?', options: ['Graz', 'Salzburg', 'Wien', 'Linz'], answer: 2 },
+  { question: 'Welcher Planet ist der Sonne am nächsten?', options: ['Erde', 'Mars', 'Merkur', 'Venus'], answer: 2 },
+  { question: 'Wie viele Seiten hat ein Würfel?', options: ['4', '6', '8', '12'], answer: 1 },
+  { question: 'Wofür steht die Abkürzung CPU?', options: ['Central Processing Unit', 'Computer Personal User', 'Core Power Utility', 'Control Program Unit'], answer: 0 },
+  { question: 'Welches Tier ist das größte an Land?', options: ['Giraffe', 'Elefant', 'Nashorn', 'Bär'], answer: 1 },
+  { question: 'Wie viele Tage hat ein Schaltjahr?', options: ['364', '365', '366', '367'], answer: 2 },
+  { question: 'Welche Zahl ist eine Primzahl?', options: ['9', '15', '17', '21'], answer: 2 },
+  { question: 'Welche Sprache wird hauptsächlich für Discord-Bots mit discord.js genutzt?', options: ['Java', 'JavaScript', 'C', 'Swift'], answer: 1 },
+];
+
+const BADGES = {
+  first_message: { emoji: '👋', name: 'Erste Schritte', description: 'Erste Community-Nachricht geschrieben' },
+  chat_100: { emoji: '💬', name: 'Chatfreund', description: '100 Community-Nachrichten geschrieben' },
+  chat_1000: { emoji: '🗣️', name: 'Stammgast', description: '1.000 Community-Nachrichten geschrieben' },
+  voice_5h: { emoji: '🎧', name: 'Voice-Fan', description: '5 Stunden im Voice verbracht' },
+  voice_50h: { emoji: '🎙️', name: 'Voice-Legende', description: '50 Stunden im Voice verbracht' },
+  rep_10: { emoji: '💜', name: 'Beliebt', description: '10 Reputationspunkte erhalten' },
+  invites_5: { emoji: '🔗', name: 'Community-Werber', description: '5 aktive Mitglieder eingeladen' },
+  quiz_10: { emoji: '🧠', name: 'Quiz-Profi', description: '10 Quizfragen richtig beantwortet' },
+  clip_winner: { emoji: '🎬', name: 'Clip-Champion', description: 'Clip der Woche gewonnen' },
+  challenge_100: { emoji: '🤝', name: 'Community-Helfer', description: '100 Punkte zu Challenges beigetragen' },
+};
 
 function defaultData() {
   return {
-    version: 5,
+    version: 6,
     config: {
       welcomeChannelId: null,
       leaveChannelId: null,
@@ -96,6 +157,15 @@ function defaultData() {
       tempVoiceUserLimit: 0,
       levelSystemEnabled: true,
       customCommandPrefix: '!',
+      questionChannelId: null,
+      communityPollChannelId: null,
+      memberOfMonthChannelId: null,
+      memberOfMonthRoleId: null,
+      clipChannelId: null,
+      lfgChannelId: null,
+      challengeChannelId: null,
+      anonymousInboxChannelId: null,
+      interestsChannelId: null,
     },
     socials: {
       messageIds: [],
@@ -126,6 +196,61 @@ function defaultData() {
       totals: {},
     },
     customCommands: {},
+    dailyQuestions: {
+      enabled: false,
+      hour: 12,
+      questions: [],
+      nextIndex: 0,
+      lastPostedDate: null,
+    },
+    communityPolls: {
+      enabled: false,
+      cadence: 'weekly',
+      hour: 18,
+      weekday: 5,
+      templates: [],
+      nextIndex: 0,
+      lastPostedKey: null,
+      active: {},
+    },
+    memberOfMonth: {
+      enabled: false,
+      lastAwardedMonth: null,
+      currentWinnerId: null,
+      history: {},
+    },
+    activity: {
+      months: {},
+      totals: {},
+      voiceActive: {},
+    },
+    reputation: {
+      users: {},
+      givers: {},
+    },
+    clips: {
+      enabled: false,
+      activeWeek: null,
+      lastFinishedWeek: null,
+      submissions: {},
+      winners: {},
+    },
+    lfg: {},
+    challenges: {},
+    games: {
+      channels: {},
+      quizzes: {},
+      quizScores: {},
+    },
+    achievements: {},
+    anonymous: {
+      submissions: {},
+    },
+    profiles: {},
+    interests: {
+      options: [],
+      panelMessageId: null,
+    },
   };
 }
 
@@ -181,7 +306,54 @@ function normalizeData(raw) {
     totals: raw?.duty?.totals && typeof raw.duty.totals === 'object' ? raw.duty.totals : {},
   };
   base.customCommands = raw?.customCommands && typeof raw.customCommands === 'object' ? raw.customCommands : {};
-  base.version = 5;
+  base.dailyQuestions = {
+    ...base.dailyQuestions,
+    ...(raw?.dailyQuestions && typeof raw.dailyQuestions === 'object' ? raw.dailyQuestions : {}),
+    questions: Array.isArray(raw?.dailyQuestions?.questions) ? raw.dailyQuestions.questions : [],
+  };
+  base.communityPolls = {
+    ...base.communityPolls,
+    ...(raw?.communityPolls && typeof raw.communityPolls === 'object' ? raw.communityPolls : {}),
+    templates: Array.isArray(raw?.communityPolls?.templates) ? raw.communityPolls.templates : [],
+    active: raw?.communityPolls?.active && typeof raw.communityPolls.active === 'object' ? raw.communityPolls.active : {},
+  };
+  base.memberOfMonth = {
+    ...base.memberOfMonth,
+    ...(raw?.memberOfMonth && typeof raw.memberOfMonth === 'object' ? raw.memberOfMonth : {}),
+    history: raw?.memberOfMonth?.history && typeof raw.memberOfMonth.history === 'object' ? raw.memberOfMonth.history : {},
+  };
+  base.activity = {
+    months: raw?.activity?.months && typeof raw.activity.months === 'object' ? raw.activity.months : {},
+    totals: raw?.activity?.totals && typeof raw.activity.totals === 'object' ? raw.activity.totals : {},
+    voiceActive: raw?.activity?.voiceActive && typeof raw.activity.voiceActive === 'object' ? raw.activity.voiceActive : {},
+  };
+  base.reputation = {
+    users: raw?.reputation?.users && typeof raw.reputation.users === 'object' ? raw.reputation.users : {},
+    givers: raw?.reputation?.givers && typeof raw.reputation.givers === 'object' ? raw.reputation.givers : {},
+  };
+  base.clips = {
+    ...base.clips,
+    ...(raw?.clips && typeof raw.clips === 'object' ? raw.clips : {}),
+    submissions: raw?.clips?.submissions && typeof raw.clips.submissions === 'object' ? raw.clips.submissions : {},
+    winners: raw?.clips?.winners && typeof raw.clips.winners === 'object' ? raw.clips.winners : {},
+  };
+  base.lfg = raw?.lfg && typeof raw.lfg === 'object' ? raw.lfg : {};
+  base.challenges = raw?.challenges && typeof raw.challenges === 'object' ? raw.challenges : {};
+  base.games = {
+    channels: raw?.games?.channels && typeof raw.games.channels === 'object' ? raw.games.channels : {},
+    quizzes: raw?.games?.quizzes && typeof raw.games.quizzes === 'object' ? raw.games.quizzes : {},
+    quizScores: raw?.games?.quizScores && typeof raw.games.quizScores === 'object' ? raw.games.quizScores : {},
+  };
+  base.achievements = raw?.achievements && typeof raw.achievements === 'object' ? raw.achievements : {};
+  base.anonymous = {
+    submissions: raw?.anonymous?.submissions && typeof raw.anonymous.submissions === 'object' ? raw.anonymous.submissions : {},
+  };
+  base.profiles = raw?.profiles && typeof raw.profiles === 'object' ? raw.profiles : {};
+  base.interests = {
+    options: Array.isArray(raw?.interests?.options) ? raw.interests.options : [],
+    panelMessageId: raw?.interests?.panelMessageId || null,
+  };
+  base.version = 6;
   return base;
 }
 
@@ -1034,6 +1206,617 @@ function renderCustomCommand(text, messageOrInteraction) {
     .replace(/\{membercount\}/gi, String(guild?.memberCount || 0));
 }
 
+function localDateInfo(timestamp = Date.now()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: COMMUNITY_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(timestamp));
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  const date = `${values.year}-${values.month}-${values.day}`;
+  return {
+    date,
+    month: `${values.year}-${values.month}`,
+    hour: Number(values.hour),
+    weekday: new Date(`${date}T12:00:00Z`).getUTCDay(),
+  };
+}
+
+function previousMonthKey(timestamp = Date.now()) {
+  const current = localDateInfo(timestamp).month;
+  const [year, month] = current.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 2, 1));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+function isoWeekKey(timestamp = Date.now()) {
+  const localDate = localDateInfo(timestamp).date;
+  const date = new Date(`${localDate}T12:00:00Z`);
+  const day = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - day);
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  const week = Math.ceil((((date - yearStart) / 86_400_000) + 1) / 7);
+  return `${date.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+}
+
+function ensureActivityRecord(container, userId) {
+  if (!container[userId]) container[userId] = { messages: 0, voiceMs: 0 };
+  return container[userId];
+}
+
+function activityFor(data, userId, scope = 'month') {
+  const month = localDateInfo().month;
+  const stored = scope === 'total'
+    ? data.activity.totals[userId] || { messages: 0, voiceMs: 0 }
+    : data.activity.months[month]?.[userId] || { messages: 0, voiceMs: 0 };
+  const result = { messages: stored.messages || 0, voiceMs: stored.voiceMs || 0 };
+  const session = data.activity.voiceActive[userId];
+  if (session && (scope === 'total' || localDateInfo(session.startedAt).month === month)) {
+    result.voiceMs += Math.max(0, Date.now() - session.startedAt);
+  }
+  return result;
+}
+
+function communityScore(record) {
+  return (record.messages || 0) + Math.floor((record.voiceMs || 0) / (5 * 60 * 1000));
+}
+
+function challengeContributionTotal(data, userId) {
+  return Object.values(data.challenges || {}).reduce(
+    (sum, challenge) => sum + Number(challenge.contributions?.[userId] || 0),
+    0,
+  );
+}
+
+function clipWinCount(data, userId) {
+  return Object.values(data.clips?.winners || {}).filter(winner => winner?.userId === userId).length;
+}
+
+function earnedBadgeIds(data, userId) {
+  const activity = data.activity.totals[userId] || { messages: 0, voiceMs: 0 };
+  const rep = data.reputation.users[userId]?.points || 0;
+  const invites = data.inviteStats[userId]?.active || 0;
+  const quizCorrect = data.games.quizScores[userId]?.correct || 0;
+  const earned = [];
+  if ((activity.messages || 0) >= 1) earned.push('first_message');
+  if ((activity.messages || 0) >= 100) earned.push('chat_100');
+  if ((activity.messages || 0) >= 1000) earned.push('chat_1000');
+  if ((activity.voiceMs || 0) >= 5 * 60 * 60 * 1000) earned.push('voice_5h');
+  if ((activity.voiceMs || 0) >= 50 * 60 * 60 * 1000) earned.push('voice_50h');
+  if (rep >= 10) earned.push('rep_10');
+  if (invites >= 5) earned.push('invites_5');
+  if (quizCorrect >= 10) earned.push('quiz_10');
+  if (clipWinCount(data, userId) >= 1) earned.push('clip_winner');
+  if (challengeContributionTotal(data, userId) >= 100) earned.push('challenge_100');
+  return earned;
+}
+
+async function checkAndAwardBadges(data, userId, channel = null) {
+  const existing = Array.isArray(data.achievements[userId]) ? data.achievements[userId] : [];
+  const unlocked = earnedBadgeIds(data, userId).filter(id => !existing.includes(id));
+  if (!unlocked.length) return [];
+  data.achievements[userId] = [...existing, ...unlocked];
+
+  if (channel?.isTextBased()) {
+    const text = unlocked.map(id => `${BADGES[id].emoji} **${BADGES[id].name}**`).join('\n');
+    await channel.send({
+      content: `🏅 <@${userId}> hat ${unlocked.length === 1 ? 'ein neues Abzeichen' : 'neue Abzeichen'} erhalten!\n${text}`,
+      allowedMentions: { users: [userId] },
+    }).catch(() => {});
+  }
+  return unlocked;
+}
+
+async function recordCommunityMessage(message, data) {
+  const month = localDateInfo(message.createdTimestamp).month;
+  if (!data.activity.months[month]) data.activity.months[month] = {};
+  const monthly = ensureActivityRecord(data.activity.months[month], message.author.id);
+  const total = ensureActivityRecord(data.activity.totals, message.author.id);
+  monthly.messages++;
+  total.messages++;
+  await checkAndAwardBadges(data, message.author.id, message.channel);
+  saveData(data);
+}
+
+function finishVoiceSession(data, userId, endedAt = Date.now()) {
+  const session = data.activity.voiceActive[userId];
+  if (!session) return 0;
+  const duration = Math.max(0, Math.min(7 * 24 * 60 * 60 * 1000, endedAt - session.startedAt));
+  delete data.activity.voiceActive[userId];
+  if (!duration) return 0;
+  const month = localDateInfo(endedAt).month;
+  if (!data.activity.months[month]) data.activity.months[month] = {};
+  ensureActivityRecord(data.activity.months[month], userId).voiceMs += duration;
+  ensureActivityRecord(data.activity.totals, userId).voiceMs += duration;
+  return duration;
+}
+
+function startVoiceSession(data, member, channelId) {
+  if (!member || member.user.bot || !channelId || member.guild.afkChannelId === channelId) return;
+  data.activity.voiceActive[member.id] = { channelId, startedAt: Date.now() };
+}
+
+function activityLeaderboard(data, scope = 'month') {
+  const source = scope === 'total'
+    ? data.activity.totals
+    : data.activity.months[localDateInfo().month] || {};
+  const userIds = new Set([...Object.keys(source), ...Object.keys(data.activity.voiceActive || {})]);
+  return [...userIds]
+    .map(userId => {
+      const record = activityFor(data, userId, scope);
+      return { userId, record, score: communityScore(record) };
+    })
+    .filter(entry => entry.score > 0)
+    .sort((a, b) => b.score - a.score);
+}
+
+async function awardMemberOfMonth(guild, data, monthKey, force = false) {
+  if (!force && data.memberOfMonth.lastAwardedMonth === monthKey) return null;
+  const source = data.activity.months[monthKey] || {};
+  const candidates = Object.entries(source)
+    .map(([userId, record]) => ({ userId, record, score: communityScore(record) }))
+    .filter(entry => entry.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  let winner = null;
+  for (const candidate of candidates) {
+    const member = await guild.members.fetch(candidate.userId).catch(() => null);
+    if (member && !member.user.bot) {
+      winner = { ...candidate, member };
+      break;
+    }
+  }
+
+  data.memberOfMonth.lastAwardedMonth = monthKey;
+  if (!winner) return null;
+
+  const roleId = data.config.memberOfMonthRoleId;
+  if (roleId) {
+    const oldWinnerId = data.memberOfMonth.currentWinnerId;
+    if (oldWinnerId && oldWinnerId !== winner.userId) {
+      const oldMember = await guild.members.fetch(oldWinnerId).catch(() => null);
+      if (oldMember) await oldMember.roles.remove(roleId).catch(() => {});
+    }
+    await winner.member.roles.add(roleId).catch(() => {});
+  }
+
+  data.memberOfMonth.currentWinnerId = winner.userId;
+  data.memberOfMonth.history[monthKey] = {
+    userId: winner.userId,
+    score: winner.score,
+    messages: winner.record.messages || 0,
+    voiceMs: winner.record.voiceMs || 0,
+    awardedAt: Date.now(),
+  };
+
+  const channel = data.config.memberOfMonthChannelId
+    ? await guild.channels.fetch(data.config.memberOfMonthChannelId).catch(() => null)
+    : null;
+  if (channel?.isTextBased()) {
+    await channel.send({
+      content: `<@${winner.userId}>`,
+      embeds: [new EmbedBuilder()
+        .setColor(0xf1c40f)
+        .setTitle('👑 Mitglied des Monats')
+        .setThumbnail(winner.member.user.displayAvatarURL({ size: 256 }))
+        .setDescription(`Herzlichen Glückwunsch <@${winner.userId}>! Du warst im Monat **${monthKey}** besonders aktiv.`)
+        .addFields(
+          { name: 'Nachrichten', value: String(winner.record.messages || 0), inline: true },
+          { name: 'Voice-Zeit', value: formatLongDuration(winner.record.voiceMs || 0), inline: true },
+          { name: 'Community-Punkte', value: String(winner.score), inline: true },
+        )
+        .setTimestamp()],
+      allowedMentions: { users: [winner.userId] },
+    }).catch(() => {});
+  }
+  return winner;
+}
+
+function nextDailyQuestion(data) {
+  const source = data.dailyQuestions.questions.length ? data.dailyQuestions.questions : DEFAULT_DAILY_QUESTIONS;
+  const index = Number(data.dailyQuestions.nextIndex || 0) % source.length;
+  data.dailyQuestions.nextIndex = (index + 1) % source.length;
+  return source[index];
+}
+
+async function postDailyQuestion(guild, data, channelOverride = null) {
+  const channel = channelOverride || (data.config.questionChannelId
+    ? await guild.channels.fetch(data.config.questionChannelId).catch(() => null)
+    : null);
+  if (!channel?.isTextBased()) return null;
+  const question = nextDailyQuestion(data);
+  const message = await channel.send({
+    embeds: [new EmbedBuilder()
+      .setColor(0x8b5cf6)
+      .setTitle('💭 Frage des Tages')
+      .setDescription(`## ${question}\n\nSchreibt eure Antwort in den Chat und lernt euch besser kennen!`)
+      .setFooter({ text: guild.name })
+      .setTimestamp()],
+  });
+  await message.react('💬').catch(() => {});
+  return message;
+}
+
+function pollVoteCounts(poll) {
+  const counts = poll.options.map(() => 0);
+  for (const index of Object.values(poll.votes || {})) {
+    if (Number.isInteger(index) && counts[index] !== undefined) counts[index]++;
+  }
+  return counts;
+}
+
+function communityPollPayload(poll) {
+  const counts = pollVoteCounts(poll);
+  const total = counts.reduce((sum, count) => sum + count, 0);
+  const lines = poll.options.map((option, index) => {
+    const percent = total ? Math.round((counts[index] / total) * 100) : 0;
+    return `**${index + 1}. ${option}**\n${'▰'.repeat(Math.round(percent / 10))}${'▱'.repeat(10 - Math.round(percent / 10))} ${counts[index]} Stimme${counts[index] === 1 ? '' : 'n'} • ${percent}%`;
+  });
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle('📊 Community-Umfrage')
+    .setDescription(`## ${poll.question}\n\n${lines.join('\n\n')}`)
+    .setFooter({ text: `${total} abgegebene Stimme${total === 1 ? '' : 'n'} • Auswahl kann geändert werden` })
+    .setTimestamp(poll.createdAt);
+  const row = new ActionRowBuilder();
+  poll.options.forEach((option, index) => {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`community_poll_vote:${poll.id}:${index}`)
+        .setLabel(`${index + 1}. ${option}`.slice(0, 80))
+        .setStyle(ButtonStyle.Primary),
+    );
+  });
+  return { embeds: [embed], components: [row], allowedMentions: { parse: [] } };
+}
+
+function parsePollOptions(raw) {
+  return [...new Set(String(raw || '').split('|').map(value => value.trim()).filter(Boolean))].slice(0, 5);
+}
+
+function nextPollTemplate(data) {
+  const source = data.communityPolls.templates.length ? data.communityPolls.templates : DEFAULT_COMMUNITY_POLLS;
+  const index = Number(data.communityPolls.nextIndex || 0) % source.length;
+  data.communityPolls.nextIndex = (index + 1) % source.length;
+  return source[index];
+}
+
+async function postCommunityPoll(guild, data, template = null, channelOverride = null) {
+  const channel = channelOverride || (data.config.communityPollChannelId
+    ? await guild.channels.fetch(data.config.communityPollChannelId).catch(() => null)
+    : null);
+  if (!channel?.isTextBased()) return null;
+  const selected = template || nextPollTemplate(data);
+  const poll = {
+    id: createShortId('p'),
+    guildId: guild.id,
+    channelId: channel.id,
+    question: selected.question,
+    options: selected.options.slice(0, 5),
+    votes: {},
+    createdAt: Date.now(),
+  };
+  const message = await channel.send(communityPollPayload(poll));
+  poll.messageId = message.id;
+  data.communityPolls.active[poll.id] = poll;
+  return message;
+}
+
+function clipPayload(clip, disabled = false) {
+  const votes = Array.isArray(clip.votes) ? clip.votes.length : 0;
+  const embed = new EmbedBuilder()
+    .setColor(clip.winner ? 0xf1c40f : 0x8b5cf6)
+    .setTitle(clip.winner ? `🏆 Clip der Woche • ${clip.title}` : `🎬 ${clip.title}`)
+    .setURL(clip.url)
+    .setDescription(`Eingereicht von <@${clip.userId}>\n\n**${votes} Stimme${votes === 1 ? '' : 'n'}**`)
+    .setFooter({ text: `Clip-ID: ${clip.id} • Woche ${clip.weekKey}` })
+    .setTimestamp(clip.createdAt);
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setLabel('Clip öffnen').setEmoji('▶️').setStyle(ButtonStyle.Link).setURL(clip.url),
+    new ButtonBuilder().setCustomId(`clip_vote:${clip.id}`).setLabel(disabled ? 'Abstimmung beendet' : 'Abstimmen').setEmoji('⭐').setStyle(ButtonStyle.Success).setDisabled(disabled),
+  );
+  return { embeds: [embed], components: [row], allowedMentions: { parse: [] } };
+}
+
+async function finishClipWeek(guild, data, weekKey) {
+  if (!weekKey || data.clips.lastFinishedWeek === weekKey) return null;
+  const clips = Object.values(data.clips.submissions)
+    .filter(clip => clip.weekKey === weekKey && !clip.disqualified)
+    .sort((a, b) => (b.votes?.length || 0) - (a.votes?.length || 0) || a.createdAt - b.createdAt);
+  data.clips.lastFinishedWeek = weekKey;
+  if (!clips.length) return null;
+  const winner = clips[0];
+  winner.winner = true;
+  data.clips.winners[weekKey] = {
+    clipId: winner.id,
+    userId: winner.userId,
+    votes: winner.votes?.length || 0,
+    awardedAt: Date.now(),
+  };
+  await checkAndAwardBadges(data, winner.userId);
+
+  for (const clip of clips) {
+    const channel = await guild.channels.fetch(clip.channelId).catch(() => null);
+    const message = channel?.isTextBased() ? await channel.messages.fetch(clip.messageId).catch(() => null) : null;
+    if (message) await message.edit(clipPayload(clip, true)).catch(() => {});
+  }
+
+  const channel = data.config.clipChannelId
+    ? await guild.channels.fetch(data.config.clipChannelId).catch(() => null)
+    : null;
+  if (channel?.isTextBased()) {
+    await channel.send({
+      content: `<@${winner.userId}>`,
+      embeds: [new EmbedBuilder()
+        .setColor(0xf1c40f)
+        .setTitle('🏆 Clip der Woche')
+        .setDescription(`**[${winner.title}](${winner.url})** von <@${winner.userId}> hat mit **${winner.votes?.length || 0} Stimmen** gewonnen!`)
+        .setTimestamp()],
+      allowedMentions: { users: [winner.userId] },
+    }).catch(() => {});
+  }
+  return winner;
+}
+
+function lfgPayload(entry, disabled = false) {
+  const players = Array.isArray(entry.players) ? entry.players : [];
+  const playerText = players.length ? players.map(id => `<@${id}>`).join(', ') : '*Noch niemand dabei.*';
+  const embed = new EmbedBuilder()
+    .setColor(entry.closed ? 0x2b2d31 : 0x2ecc71)
+    .setTitle(`🎮 Mitspielersuche • ${entry.game}`)
+    .setDescription(entry.description || 'Gemeinsam spielen und neue Leute kennenlernen!')
+    .addFields(
+      { name: `Teilnehmer (${players.length}/${entry.slots})`, value: playerText },
+      { name: 'Erstellt von', value: `<@${entry.ownerId}>`, inline: true },
+      { name: 'Status', value: entry.closed ? '🔒 Geschlossen' : '🟢 Offen', inline: true },
+    )
+    .setFooter({ text: `Suche-ID: ${entry.id}` })
+    .setTimestamp(entry.createdAt);
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`lfg_join:${entry.id}`).setLabel('Beitreten / Verlassen').setEmoji('🙋').setStyle(ButtonStyle.Success).setDisabled(disabled || entry.closed),
+    new ButtonBuilder().setCustomId(`lfg_close:${entry.id}`).setLabel('Suche schließen').setEmoji('🔒').setStyle(ButtonStyle.Danger).setDisabled(disabled || entry.closed),
+  );
+  return { embeds: [embed], components: [row], allowedMentions: { parse: [] } };
+}
+
+function challengePayload(challenge, disabled = false) {
+  const progress = Math.min(challenge.goal, Object.values(challenge.contributions || {}).reduce((sum, value) => sum + Number(value || 0), 0));
+  const percent = Math.min(100, Math.floor((progress / Math.max(1, challenge.goal)) * 100));
+  const top = Object.entries(challenge.contributions || {}).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const topText = top.length ? top.map(([userId, value], index) => `${index + 1}. <@${userId}> • **${value} ${challenge.unit}**`).join('\n') : '*Noch keine Beiträge.*';
+  const embed = new EmbedBuilder()
+    .setColor(challenge.completed ? 0x2ecc71 : 0x8b5cf6)
+    .setTitle(`${challenge.completed ? '✅' : '🤝'} Community-Challenge • ${challenge.title}`)
+    .setDescription(`${challenge.description || 'Gemeinsam schaffen wir das Ziel!'}\n\n${'▰'.repeat(Math.round(percent / 10))}${'▱'.repeat(10 - Math.round(percent / 10))}\n**${progress} / ${challenge.goal} ${challenge.unit} • ${percent}%**`)
+    .addFields({ name: 'Top-Beiträge', value: topText })
+    .setFooter({ text: `Challenge-ID: ${challenge.id}` })
+    .setTimestamp(challenge.createdAt);
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`challenge_contribute:${challenge.id}`).setLabel(challenge.completed ? 'Ziel erreicht' : 'Beitrag eintragen').setEmoji('➕').setStyle(ButtonStyle.Primary).setDisabled(disabled || challenge.completed),
+  );
+  return { embeds: [embed], components: [row], allowedMentions: { parse: [] } };
+}
+
+function quizPayload(quiz) {
+  const embed = new EmbedBuilder()
+    .setColor(0x3498db)
+    .setTitle('🧠 Community-Quiz')
+    .setDescription(`## ${quiz.question}\n\nWähle die richtige Antwort. Jeder kann einmal mitmachen!`)
+    .setFooter({ text: `Quiz-ID: ${quiz.id}` });
+  const row = new ActionRowBuilder();
+  quiz.options.forEach((option, index) => {
+    row.addComponents(new ButtonBuilder().setCustomId(`quiz_answer:${quiz.id}:${index}`).setLabel(`${index + 1}. ${option}`.slice(0, 80)).setStyle(ButtonStyle.Primary));
+  });
+  return { embeds: [embed], components: [row] };
+}
+
+function interestPanelPayload(guild, data) {
+  const options = data.interests.options.slice(0, 25);
+  const embed = new EmbedBuilder()
+    .setColor(0x8b5cf6)
+    .setTitle('👋 Willkommen! Was interessiert dich?')
+    .setDescription(options.length
+      ? 'Wähle unten deine Interessen aus. Du bekommst sofort die passenden Rollen und kannst sie jederzeit wieder entfernen.'
+      : 'Es wurden noch keine Interessen eingerichtet.')
+    .setFooter({ text: guild.name });
+  const rows = [];
+  for (let i = 0; i < options.length; i += 5) {
+    const row = new ActionRowBuilder();
+    for (const option of options.slice(i, i + 5)) {
+      row.addComponents(new ButtonBuilder().setCustomId(`interest_role:${option.roleId}`).setLabel(option.label.slice(0, 80)).setEmoji('🏷️').setStyle(ButtonStyle.Secondary));
+    }
+    rows.push(row);
+  }
+  return { embeds: [embed], components: rows, allowedMentions: { parse: [] } };
+}
+
+async function updateInterestPanel(guild, data, channelOverride = null) {
+  const channel = channelOverride || (data.config.interestsChannelId
+    ? await guild.channels.fetch(data.config.interestsChannelId).catch(() => null)
+    : null);
+  if (!channel?.isTextBased()) return null;
+  let message = data.interests.panelMessageId
+    ? await channel.messages.fetch(data.interests.panelMessageId).catch(() => null)
+    : null;
+  if (message) await message.edit(interestPanelPayload(guild, data));
+  else {
+    message = await channel.send(interestPanelPayload(guild, data));
+    data.interests.panelMessageId = message.id;
+  }
+  data.config.interestsChannelId = channel.id;
+  return message;
+}
+
+function profileEmbed(user, data) {
+  const profile = data.profiles[user.id] || {};
+  const activity = activityFor(data, user.id, 'total');
+  const monthly = activityFor(data, user.id, 'month');
+  const rep = data.reputation.users[user.id]?.points || 0;
+  const level = calculateLevel(data.levels[user.id]?.xp || 0);
+  const invites = data.inviteStats[user.id]?.active || 0;
+  const badges = (data.achievements[user.id] || []).filter(id => BADGES[id]);
+  const ranking = activityLeaderboard(data, 'total');
+  const place = ranking.findIndex(entry => entry.userId === user.id) + 1;
+  const badgeText = badges.length
+    ? badges.map(id => `${BADGES[id].emoji} **${BADGES[id].name}**`).join(' • ')
+    : '*Noch keine Abzeichen.*';
+  return new EmbedBuilder()
+    .setColor(0x8b5cf6)
+    .setTitle(`👤 Community-Profil • ${user.username}`)
+    .setThumbnail(user.displayAvatarURL({ size: 256 }))
+    .setDescription(profile.bio || '*Noch keine Beschreibung hinterlegt.*')
+    .addFields(
+      { name: '🎮 Lieblingsspiel', value: profile.game || 'Nicht angegeben', inline: true },
+      { name: '🏆 Level', value: String(level), inline: true },
+      { name: '💜 Reputation', value: String(rep), inline: true },
+      { name: '💬 Nachrichten', value: `${activity.messages || 0} gesamt\n${monthly.messages || 0} diesen Monat`, inline: true },
+      { name: '🎧 Voice-Zeit', value: formatLongDuration(activity.voiceMs || 0), inline: true },
+      { name: '📊 Community-Rang', value: place ? `Platz ${place}` : 'Noch nicht platziert', inline: true },
+      { name: '🔗 Aktive Einladungen', value: String(invites), inline: true },
+      { name: '🎬 Clip-Siege', value: String(clipWinCount(data, user.id)), inline: true },
+      { name: '🏅 Abzeichen', value: badgeText },
+    )
+    .setFooter({ text: `Community-Punkte: ${communityScore(activity)}` });
+}
+
+async function handleCommunityGameMessage(message, data) {
+  const game = data.games.channels[message.channel.id];
+  if (!game) return false;
+  const content = message.content.trim();
+
+  const reject = async reason => {
+    if (message.deletable) {
+      suggestionSourceDeletes.add(message.id);
+      await message.delete().catch(() => suggestionSourceDeletes.delete(message.id));
+      setTimeout(() => suggestionSourceDeletes.delete(message.id), 10_000);
+    }
+    const notice = await message.channel.send({ content: `❌ <@${message.author.id}> ${reason}`, allowedMentions: { users: [message.author.id] } }).catch(() => null);
+    if (notice) setTimeout(() => notice.delete().catch(() => {}), 5000);
+  };
+
+  if (game.type === 'counting') {
+    const number = Number(content);
+    if (!Number.isInteger(number) || number !== game.current + 1) {
+      await reject(`die nächste Zahl ist **${game.current + 1}**.`);
+      return true;
+    }
+    if (game.lastUserId === message.author.id) {
+      await reject('du darfst nicht zweimal hintereinander zählen.');
+      return true;
+    }
+    game.current = number;
+    game.lastUserId = message.author.id;
+    saveData(data);
+    await message.react('✅').catch(() => {});
+    return true;
+  }
+
+  if (game.type === 'wordchain') {
+    const word = content.toLocaleLowerCase('de-DE');
+    if (!/^[a-zäöüß]{2,30}$/i.test(word)) {
+      await reject('bitte schreibe genau ein gültiges Wort.');
+      return true;
+    }
+    if (game.lastUserId === message.author.id) {
+      await reject('du darfst nicht zweimal hintereinander schreiben.');
+      return true;
+    }
+    if (game.lastWord && word[0] !== game.lastWord.slice(-1)) {
+      await reject(`dein Wort muss mit **${game.lastWord.slice(-1).toUpperCase()}** beginnen.`);
+      return true;
+    }
+    if ((game.usedWords || []).includes(word)) {
+      await reject('dieses Wort wurde bereits verwendet.');
+      return true;
+    }
+    game.lastWord = word;
+    game.lastUserId = message.author.id;
+    game.usedWords = [...(game.usedWords || []), word].slice(-500);
+    saveData(data);
+    await message.react('✅').catch(() => {});
+    return true;
+  }
+
+  if (game.type === 'number') {
+    const number = Number(content);
+    if (!Number.isInteger(number) || number < 1 || number > game.max) {
+      await reject(`rate eine ganze Zahl zwischen **1 und ${game.max}**.`);
+      return true;
+    }
+    game.attempts = (game.attempts || 0) + 1;
+    if (number === game.secret) {
+      delete data.games.channels[message.channel.id];
+      saveData(data);
+      await message.react('🎉').catch(() => {});
+      await message.channel.send({ content: `🎉 <@${message.author.id}> hat die Zahl **${number}** nach **${game.attempts} Versuchen** erraten!`, allowedMentions: { users: [message.author.id] } });
+      return true;
+    }
+    saveData(data);
+    await message.reply({ content: number < game.secret ? '⬆️ Die gesuchte Zahl ist **größer**.' : '⬇️ Die gesuchte Zahl ist **kleiner**.', allowedMentions: { parse: [] } }).catch(() => {});
+    return true;
+  }
+  return false;
+}
+
+async function checkCommunityAutomation(clientInstance) {
+  const data = loadData();
+  const nowInfo = localDateInfo();
+  const currentWeek = isoWeekKey();
+  let changed = false;
+
+  for (const guild of clientInstance.guilds.cache.values()) {
+    if (data.dailyQuestions.enabled && nowInfo.hour >= Number(data.dailyQuestions.hour || 0) && data.dailyQuestions.lastPostedDate !== nowInfo.date) {
+      const posted = await postDailyQuestion(guild, data).catch(() => null);
+      if (posted) {
+        data.dailyQuestions.lastPostedDate = nowInfo.date;
+        changed = true;
+      }
+    }
+
+    if (data.communityPolls.enabled && nowInfo.hour >= Number(data.communityPolls.hour || 0)) {
+      const scheduledToday = data.communityPolls.cadence === 'daily' || nowInfo.weekday === Number(data.communityPolls.weekday);
+      const key = data.communityPolls.cadence === 'daily' ? nowInfo.date : currentWeek;
+      if (scheduledToday && data.communityPolls.lastPostedKey !== key) {
+        const posted = await postCommunityPoll(guild, data).catch(() => null);
+        if (posted) {
+          data.communityPolls.lastPostedKey = key;
+          changed = true;
+        }
+      }
+    }
+
+    if (data.memberOfMonth.enabled) {
+      const month = previousMonthKey();
+      if (data.memberOfMonth.lastAwardedMonth !== month) {
+        await awardMemberOfMonth(guild, data, month).catch(() => null);
+        changed = true;
+      }
+    }
+
+    if (data.clips.enabled) {
+      if (!data.clips.activeWeek) {
+        data.clips.activeWeek = currentWeek;
+        changed = true;
+      } else if (data.clips.activeWeek !== currentWeek) {
+        await finishClipWeek(guild, data, data.clips.activeWeek).catch(() => null);
+        data.clips.activeWeek = currentWeek;
+        changed = true;
+      }
+    }
+  }
+
+  for (const [quizId, quiz] of Object.entries(data.games.quizzes || {})) {
+    if (Date.now() - quiz.createdAt > 2 * 60 * 60 * 1000) {
+      delete data.games.quizzes[quizId];
+      changed = true;
+    }
+  }
+  if (changed) saveData(data);
+}
+
 // ============================================================
 // SLASH COMMANDS
 // ============================================================
@@ -1069,6 +1852,14 @@ function buildCommands() {
           { name: 'Bewerbungs-Auswertung', value: 'applications' },
           { name: 'Ticket-Transkripte', value: 'transcripts' },
           { name: 'AutoMod-Logs', value: 'automodlogs' },
+          { name: 'Frage des Tages', value: 'questions' },
+          { name: 'Community-Umfragen', value: 'communitypolls' },
+          { name: 'Mitglied des Monats', value: 'membermonth' },
+          { name: 'Clips der Woche', value: 'clips' },
+          { name: 'Mitspielersuche', value: 'lfg' },
+          { name: 'Community-Challenges', value: 'challenges' },
+          { name: 'Anonyme Nachrichten', value: 'anonymous' },
+          { name: 'Willkommen & Interessen', value: 'interests' },
         ))
         .addChannelOption(o => o.setName('channel').setDescription('Channel').setRequired(true).addChannelTypes(ChannelType.GuildText)))
       .addSubcommand(s => s
@@ -1083,6 +1874,7 @@ function buildCommands() {
           { name: 'Socials Admin', value: 'socialadmin' },
           { name: 'Socials Löschen', value: 'socialdelete' },
           { name: 'Bewerbung angenommen', value: 'applicationaccepted' },
+          { name: 'Mitglied des Monats', value: 'membermonth' },
         ))
         .addRoleOption(o => o.setName('rolle').setDescription('Rolle').setRequired(true)))
       .addSubcommand(s => s
@@ -1318,6 +2110,92 @@ function buildCommands() {
       .addSubcommand(s => s.setName('list').setDescription('Zeigt alle eigenen Commands.'))
       .addSubcommand(s => s.setName('run').setDescription('Führt einen eigenen Command aus.').addStringOption(o => o.setName('name').setDescription('Command-Name').setRequired(true).setMaxLength(32))),
 
+    // Community-Aktivität
+    new SlashCommandBuilder()
+      .setName('frage')
+      .setDescription('Verwaltet die Frage des Tages.')
+      .addSubcommand(s => s.setName('setup').setDescription('Aktiviert die tägliche Frage.').addChannelOption(o => o.setName('channel').setDescription('Channel für die Fragen').setRequired(true).addChannelTypes(ChannelType.GuildText)).addIntegerOption(o => o.setName('stunde').setDescription('Uhrzeit in österreichischer Zeit').setRequired(false).setMinValue(0).setMaxValue(23)))
+      .addSubcommand(s => s.setName('add').setDescription('Fügt eine eigene Frage hinzu.').addStringOption(o => o.setName('text').setDescription('Neue Frage').setRequired(true).setMaxLength(500)))
+      .addSubcommand(s => s.setName('remove').setDescription('Entfernt eine eigene Frage.').addIntegerOption(o => o.setName('nummer').setDescription('Nummer aus /frage list').setRequired(true).setMinValue(1).setMaxValue(100)))
+      .addSubcommand(s => s.setName('list').setDescription('Zeigt die eigenen Fragen.'))
+      .addSubcommand(s => s.setName('post').setDescription('Postet sofort eine Frage.'))
+      .addSubcommand(s => s.setName('disable').setDescription('Deaktiviert die Automatik.'))
+      .addSubcommand(s => s.setName('status').setDescription('Zeigt die Einstellungen.')),
+
+    new SlashCommandBuilder()
+      .setName('communitypoll')
+      .setDescription('Verwaltet automatische Community-Umfragen.')
+      .addSubcommand(s => s.setName('setup').setDescription('Aktiviert automatische Umfragen.').addChannelOption(o => o.setName('channel').setDescription('Umfrage-Channel').setRequired(true).addChannelTypes(ChannelType.GuildText)).addStringOption(o => o.setName('rhythmus').setDescription('Täglich oder wöchentlich').setRequired(true).addChoices({ name: 'Täglich', value: 'daily' }, { name: 'Wöchentlich', value: 'weekly' })).addIntegerOption(o => o.setName('stunde').setDescription('Uhrzeit in österreichischer Zeit').setRequired(false).setMinValue(0).setMaxValue(23)).addIntegerOption(o => o.setName('wochentag').setDescription('Nur bei wöchentlich').setRequired(false).addChoices({ name: 'Montag', value: 1 }, { name: 'Dienstag', value: 2 }, { name: 'Mittwoch', value: 3 }, { name: 'Donnerstag', value: 4 }, { name: 'Freitag', value: 5 }, { name: 'Samstag', value: 6 }, { name: 'Sonntag', value: 0 })))
+      .addSubcommand(s => s.setName('add').setDescription('Fügt eine Umfrage-Vorlage hinzu.').addStringOption(o => o.setName('frage').setDescription('Umfragefrage').setRequired(true).setMaxLength(300)).addStringOption(o => o.setName('optionen').setDescription('2–5 Antworten mit | trennen').setRequired(true).setMaxLength(500)))
+      .addSubcommand(s => s.setName('remove').setDescription('Entfernt eine Vorlage.').addIntegerOption(o => o.setName('nummer').setDescription('Nummer aus /communitypoll list').setRequired(true).setMinValue(1).setMaxValue(100)))
+      .addSubcommand(s => s.setName('list').setDescription('Zeigt alle Vorlagen.'))
+      .addSubcommand(s => s.setName('post').setDescription('Postet sofort die nächste Umfrage.'))
+      .addSubcommand(s => s.setName('disable').setDescription('Deaktiviert die Automatik.'))
+      .addSubcommand(s => s.setName('status').setDescription('Zeigt die Einstellungen.')),
+
+    new SlashCommandBuilder()
+      .setName('memberofthemonth')
+      .setDescription('Verwaltet das Mitglied des Monats.')
+      .addSubcommand(s => s.setName('setup').setDescription('Aktiviert die monatliche Auszeichnung.').addChannelOption(o => o.setName('channel').setDescription('Channel für die Auszeichnung').setRequired(true).addChannelTypes(ChannelType.GuildText)).addRoleOption(o => o.setName('rolle').setDescription('Optionale Gewinnerrolle').setRequired(false)))
+      .addSubcommand(s => s.setName('run').setDescription('Wertet einen Monat sofort aus.').addStringOption(o => o.setName('monat').setDescription('YYYY-MM, sonst aktueller Monat').setRequired(false).setMaxLength(7)))
+      .addSubcommand(s => s.setName('disable').setDescription('Deaktiviert die Automatik.'))
+      .addSubcommand(s => s.setName('status').setDescription('Zeigt den Status.')),
+
+    new SlashCommandBuilder()
+      .setName('rep')
+      .setDescription('Gibt einem Mitglied einen Reputationspunkt.')
+      .addUserOption(o => o.setName('user').setDescription('Mitglied').setRequired(true))
+      .addStringOption(o => o.setName('grund').setDescription('Warum möchtest du dich bedanken?').setRequired(false).setMaxLength(300)),
+    new SlashCommandBuilder().setName('reps').setDescription('Zeigt die Reputation eines Mitglieds.').addUserOption(o => o.setName('user').setDescription('Mitglied').setRequired(false)),
+    new SlashCommandBuilder().setName('communityrank').setDescription('Zeigt deine Chat- und Voice-Aktivität.').addUserOption(o => o.setName('user').setDescription('Mitglied').setRequired(false)),
+    new SlashCommandBuilder().setName('communityleaderboard').setDescription('Zeigt die aktivsten Community-Mitglieder.').addStringOption(o => o.setName('zeitraum').setDescription('Zeitraum').setRequired(false).addChoices({ name: 'Dieser Monat', value: 'month' }, { name: 'Gesamt', value: 'total' })),
+
+    new SlashCommandBuilder()
+      .setName('clip')
+      .setDescription('Verwaltet den Clip der Woche.')
+      .addSubcommand(s => s.setName('setup').setDescription('Legt den Clip-Channel fest.').addChannelOption(o => o.setName('channel').setDescription('Clip-Channel').setRequired(true).addChannelTypes(ChannelType.GuildText)))
+      .addSubcommand(s => s.setName('submit').setDescription('Reicht einen Clip ein.').addStringOption(o => o.setName('url').setDescription('Link zum Clip').setRequired(true).setMaxLength(1000)).addStringOption(o => o.setName('titel').setDescription('Titel des Clips').setRequired(true).setMaxLength(100)))
+      .addSubcommand(s => s.setName('top').setDescription('Zeigt die besten Clips dieser Woche.'))
+      .addSubcommand(s => s.setName('finish').setDescription('Beendet die aktuelle Abstimmung sofort.')),
+
+    new SlashCommandBuilder()
+      .setName('mitspieler')
+      .setDescription('Sucht Mitspieler in der Community.')
+      .addSubcommand(s => s.setName('setup').setDescription('Legt den Mitspieler-Channel fest.').addChannelOption(o => o.setName('channel').setDescription('Mitspieler-Channel').setRequired(true).addChannelTypes(ChannelType.GuildText)))
+      .addSubcommand(s => s.setName('create').setDescription('Erstellt eine Mitspielersuche.').addStringOption(o => o.setName('spiel').setDescription('Spiel oder Aktivität').setRequired(true).setMaxLength(100)).addIntegerOption(o => o.setName('plaetze').setDescription('Gesamtanzahl der Plätze').setRequired(true).setMinValue(2).setMaxValue(50)).addStringOption(o => o.setName('text').setDescription('Zusätzliche Informationen').setRequired(false).setMaxLength(1000)))
+      .addSubcommand(s => s.setName('list').setDescription('Zeigt offene Mitspielersuchen.'))
+      .addSubcommand(s => s.setName('close').setDescription('Schließt deine Suche.').addStringOption(o => o.setName('id').setDescription('Suche-ID').setRequired(true))),
+
+    new SlashCommandBuilder()
+      .setName('challenge')
+      .setDescription('Verwaltet gemeinsame Community-Ziele.')
+      .addSubcommand(s => s.setName('create').setDescription('Erstellt eine Challenge.').addStringOption(o => o.setName('titel').setDescription('Titel').setRequired(true).setMaxLength(100)).addIntegerOption(o => o.setName('ziel').setDescription('Gemeinsames Ziel').setRequired(true).setMinValue(1).setMaxValue(1000000)).addStringOption(o => o.setName('einheit').setDescription('z. B. Punkte, Runden oder Stunden').setRequired(true).setMaxLength(30)).addStringOption(o => o.setName('text').setDescription('Beschreibung').setRequired(false).setMaxLength(1000)).addChannelOption(o => o.setName('channel').setDescription('Ziel-Channel').setRequired(false).addChannelTypes(ChannelType.GuildText)))
+      .addSubcommand(s => s.setName('list').setDescription('Zeigt laufende Challenges.'))
+      .addSubcommand(s => s.setName('end').setDescription('Beendet eine Challenge.').addStringOption(o => o.setName('id').setDescription('Challenge-ID').setRequired(true))),
+
+    new SlashCommandBuilder()
+      .setName('game')
+      .setDescription('Startet Community-Minispiele.')
+      .addSubcommand(s => s.setName('start').setDescription('Startet ein Channel-Spiel.').addStringOption(o => o.setName('typ').setDescription('Spielart').setRequired(true).addChoices({ name: 'Zählen', value: 'counting' }, { name: 'Wörterkette', value: 'wordchain' }, { name: 'Zahl erraten', value: 'number' })).addIntegerOption(o => o.setName('maximum').setDescription('Nur beim Zahlenraten').setRequired(false).setMinValue(10).setMaxValue(100000)))
+      .addSubcommand(s => s.setName('stop').setDescription('Beendet das Spiel im Channel.'))
+      .addSubcommand(s => s.setName('status').setDescription('Zeigt das laufende Spiel.'))
+      .addSubcommand(s => s.setName('quiz').setDescription('Startet eine Quizfrage.'))
+      .addSubcommand(s => s.setName('leaderboard').setDescription('Zeigt die Quiz-Bestenliste.')),
+
+    new SlashCommandBuilder().setName('badges').setDescription('Zeigt Erfolge und Abzeichen.').addUserOption(o => o.setName('user').setDescription('Mitglied').setRequired(false)),
+    new SlashCommandBuilder().setName('anonymouspanel').setDescription('Erstellt die anonyme Nachrichtenbox.').addChannelOption(o => o.setName('inbox').setDescription('Nur das Team sollte diesen Channel sehen').setRequired(true).addChannelTypes(ChannelType.GuildText)),
+    new SlashCommandBuilder().setName('anonymousinfo').setDescription('Zeigt den Absender einer anonymen Nachricht.').addStringOption(o => o.setName('id').setDescription('Nachrichten-ID').setRequired(true)),
+    new SlashCommandBuilder().setName('profil').setDescription('Zeigt ein Community-Profil.').addUserOption(o => o.setName('user').setDescription('Mitglied').setRequired(false)),
+    new SlashCommandBuilder().setName('profilset').setDescription('Bearbeitet dein Community-Profil.').addStringOption(o => o.setName('bio').setDescription('Kurze Beschreibung').setRequired(false).setMaxLength(500)).addStringOption(o => o.setName('spiel').setDescription('Dein Lieblingsspiel').setRequired(false).setMaxLength(100)),
+
+    new SlashCommandBuilder()
+      .setName('interessen')
+      .setDescription('Verwaltet die Willkommens- und Interessenrollen.')
+      .addSubcommand(s => s.setName('add').setDescription('Fügt eine Interesse-Auswahl hinzu.').addStringOption(o => o.setName('name').setDescription('z. B. FiveM oder Events').setRequired(true).setMaxLength(80)).addRoleOption(o => o.setName('rolle').setDescription('Passende Rolle').setRequired(true)))
+      .addSubcommand(s => s.setName('remove').setDescription('Entfernt eine Interesse-Auswahl.').addRoleOption(o => o.setName('rolle').setDescription('Zu entfernende Rolle').setRequired(true)))
+      .addSubcommand(s => s.setName('list').setDescription('Zeigt alle Interessen.'))
+      .addSubcommand(s => s.setName('panel').setDescription('Erstellt oder aktualisiert das Willkommens-Panel.').addChannelOption(o => o.setName('channel').setDescription('Panel-Channel').setRequired(false).addChannelTypes(ChannelType.GuildText))),
+
     // Socials
     new SlashCommandBuilder().setName('socials').setDescription('Fügt Socials über Discord-ID hinzu.'),
     new SlashCommandBuilder().setName('editsocials').setDescription('Ersetzt die Socials einer Discord-ID.'),
@@ -1410,6 +2288,20 @@ client.once(Events.ClientReady, async readyClient => {
   // Geplante Community-Events und Erinnerungen fortsetzen.
   await checkCommunityEvents(readyClient);
   setInterval(() => checkCommunityEvents(readyClient).catch(() => {}), EVENT_CHECK_INTERVAL_MS);
+
+  // Community-Aktivität nach einem Neustart für bereits verbundene Voice-Mitglieder neu starten.
+  const startupData = loadData();
+  startupData.activity.voiceActive = {};
+  for (const guild of readyClient.guilds.cache.values()) {
+    for (const member of guild.members.cache.values()) {
+      if (member.voice.channelId) startVoiceSession(startupData, member, member.voice.channelId);
+    }
+  }
+  saveData(startupData);
+
+  // Fragen, Umfragen, Mitglied des Monats und Clip der Woche automatisch ausführen.
+  await checkCommunityAutomation(readyClient);
+  setInterval(() => checkCommunityAutomation(readyClient).catch(() => {}), COMMUNITY_CHECK_INTERVAL_MS);
 });
 
 // ============================================================
@@ -1427,6 +2319,7 @@ client.on(Events.GuildMemberAdd, async member => {
     stats.active++;
     data.inviteStats[inviterId] = stats;
     data.inviteMembers[member.id] = inviterId;
+    await checkAndAwardBadges(data, inviterId);
     saveData(data);
   }
 
@@ -1437,10 +2330,13 @@ client.on(Events.GuildMemberAdd, async member => {
   }
 
   if (data.config.welcomeChannelId) {
+    const interestsHint = data.config.interestsChannelId
+      ? `\n\nWähle in <#${data.config.interestsChannelId}> deine Interessen und passenden Rollen aus.`
+      : '';
     const embed = new EmbedBuilder()
       .setColor(0x2ecc71)
       .setTitle('👋 Willkommen!')
-      .setDescription(`Willkommen <@${member.id}> auf **${member.guild.name}**!`)
+      .setDescription(`Willkommen <@${member.id}> auf **${member.guild.name}**!${interestsHint}`)
       .setThumbnail(member.user.displayAvatarURL({ size: 256 }))
       .addFields({ name: 'Mitglieder', value: String(member.guild.memberCount), inline: true })
       .setTimestamp();
@@ -1505,6 +2401,15 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   const data = loadData();
   const lobbyId = data.config.tempVoiceLobbyId;
 
+  if (oldState.channelId !== newState.channelId && !newState.member?.user.bot) {
+    if (oldState.channelId) {
+      const duration = finishVoiceSession(data, newState.member.id);
+      if (duration) await checkAndAwardBadges(data, newState.member.id);
+    }
+    if (newState.channelId) startVoiceSession(data, newState.member, newState.channelId);
+    saveData(data);
+  }
+
   if (lobbyId && newState.channelId === lobbyId && oldState.channelId !== lobbyId) {
     const member = newState.member;
     const channel = await newState.guild.channels.create({
@@ -1559,7 +2464,10 @@ client.on(Events.MessageCreate, async message => {
   const data = loadData();
   if (await handleAutomodMessage(message, data)) return;
 
+  await recordCommunityMessage(message, data).catch(error => console.error('❌ Community-Aktivität Fehler:', error));
   await awardMessageXp(message, data).catch(error => console.error('❌ Level-System Fehler:', error));
+
+  if (await handleCommunityGameMessage(message, data)) return;
 
   const prefix = data.config.customCommandPrefix || '!';
   if (message.content?.startsWith(prefix)) {
@@ -1946,6 +2854,162 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
+      if (interaction.customId.startsWith('community_poll_vote:')) {
+        const [, pollId, rawIndex] = interaction.customId.split(':');
+        const poll = data.communityPolls.active[pollId];
+        const index = Number(rawIndex);
+        if (!poll || !Number.isInteger(index) || !poll.options[index]) {
+          await interaction.reply({ content: '❌ Diese Umfrage ist nicht mehr verfügbar.', ephemeral: true });
+          return;
+        }
+        const previous = poll.votes[interaction.user.id];
+        poll.votes[interaction.user.id] = index;
+        saveData(data);
+        await interaction.update(communityPollPayload(poll));
+        await interaction.followUp({
+          content: previous === undefined
+            ? `✅ Deine Stimme für **${poll.options[index]}** wurde gezählt.`
+            : `✅ Deine Stimme wurde auf **${poll.options[index]}** geändert.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (interaction.customId.startsWith('clip_vote:')) {
+        const clipId = interaction.customId.split(':')[1];
+        const clip = data.clips.submissions[clipId];
+        if (!clip || clip.weekKey !== data.clips.activeWeek || data.clips.lastFinishedWeek === clip.weekKey) {
+          await interaction.reply({ content: '❌ Die Abstimmung für diesen Clip ist beendet.', ephemeral: true });
+          return;
+        }
+        if (clip.userId === interaction.user.id) {
+          await interaction.reply({ content: '❌ Du kannst nicht für deinen eigenen Clip abstimmen.', ephemeral: true });
+          return;
+        }
+        if (!Array.isArray(clip.votes)) clip.votes = [];
+        const voted = clip.votes.includes(interaction.user.id);
+        clip.votes = voted ? clip.votes.filter(id => id !== interaction.user.id) : [...clip.votes, interaction.user.id];
+        saveData(data);
+        await interaction.update(clipPayload(clip));
+        await interaction.followUp({ content: voted ? '✅ Deine Stimme wurde entfernt.' : '⭐ Deine Stimme wurde gezählt!', ephemeral: true });
+        return;
+      }
+
+      if (interaction.customId.startsWith('lfg_join:')) {
+        const entryId = interaction.customId.split(':')[1];
+        const entry = data.lfg[entryId];
+        if (!entry || entry.closed) {
+          await interaction.reply({ content: '❌ Diese Mitspielersuche ist geschlossen.', ephemeral: true });
+          return;
+        }
+        if (!Array.isArray(entry.players)) entry.players = [];
+        const joined = entry.players.includes(interaction.user.id);
+        if (!joined && entry.players.length >= entry.slots) {
+          await interaction.reply({ content: '❌ Alle Plätze sind bereits belegt.', ephemeral: true });
+          return;
+        }
+        entry.players = joined ? entry.players.filter(id => id !== interaction.user.id) : [...entry.players, interaction.user.id];
+        saveData(data);
+        await interaction.update(lfgPayload(entry));
+        await interaction.followUp({ content: joined ? '✅ Du hast die Gruppe verlassen.' : '🎮 Du bist jetzt dabei!', ephemeral: true });
+        return;
+      }
+
+      if (interaction.customId.startsWith('lfg_close:')) {
+        const entryId = interaction.customId.split(':')[1];
+        const entry = data.lfg[entryId];
+        if (!entry) {
+          await interaction.reply({ content: '❌ Mitspielersuche nicht gefunden.', ephemeral: true });
+          return;
+        }
+        if (entry.ownerId !== interaction.user.id && !canModerate(interaction.member, data)) {
+          await interaction.reply({ content: '❌ Nur der Ersteller oder das Team darf diese Suche schließen.', ephemeral: true });
+          return;
+        }
+        entry.closed = true;
+        entry.closedAt = Date.now();
+        saveData(data);
+        await interaction.update(lfgPayload(entry, true));
+        await interaction.followUp({ content: '🔒 Die Mitspielersuche wurde geschlossen.', ephemeral: true });
+        return;
+      }
+
+      if (interaction.customId.startsWith('challenge_contribute:')) {
+        const challengeId = interaction.customId.split(':')[1];
+        const challenge = data.challenges[challengeId];
+        if (!challenge || challenge.completed) {
+          await interaction.reply({ content: '❌ Diese Challenge ist bereits beendet.', ephemeral: true });
+          return;
+        }
+        const modal = new ModalBuilder().setCustomId(`challenge_submit:${challengeId}`).setTitle('Challenge-Beitrag');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('challenge_amount').setLabel(`Anzahl in ${challenge.unit}`.slice(0, 45)).setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(10)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('challenge_note').setLabel('Kurze Notiz oder Beleg (optional)').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(500)),
+        );
+        await interaction.showModal(modal);
+        return;
+      }
+
+      if (interaction.customId.startsWith('quiz_answer:')) {
+        const [, quizId, rawIndex] = interaction.customId.split(':');
+        const quiz = data.games.quizzes[quizId];
+        const index = Number(rawIndex);
+        if (!quiz || Date.now() - quiz.createdAt > 2 * 60 * 60 * 1000) {
+          await interaction.reply({ content: '❌ Dieses Quiz ist bereits abgelaufen.', ephemeral: true });
+          return;
+        }
+        if (!Array.isArray(quiz.answeredUsers)) quiz.answeredUsers = [];
+        if (quiz.answeredUsers.includes(interaction.user.id)) {
+          await interaction.reply({ content: '❌ Du hast diese Frage bereits beantwortet.', ephemeral: true });
+          return;
+        }
+        quiz.answeredUsers.push(interaction.user.id);
+        const correct = index === quiz.answer;
+        const score = data.games.quizScores[interaction.user.id] || { correct: 0, total: 0 };
+        score.total++;
+        if (correct) score.correct++;
+        data.games.quizScores[interaction.user.id] = score;
+        await checkAndAwardBadges(data, interaction.user.id, interaction.channel);
+        saveData(data);
+        await interaction.reply({
+          content: correct
+            ? `✅ Richtig! **${quiz.options[quiz.answer]}** ist die richtige Antwort.`
+            : `❌ Leider falsch. Richtig wäre **${quiz.options[quiz.answer]}** gewesen.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (interaction.customId === 'anonymous_open') {
+        if (!data.config.anonymousInboxChannelId) {
+          await interaction.reply({ content: '❌ Die anonyme Nachrichtenbox ist nicht eingerichtet.', ephemeral: true });
+          return;
+        }
+        const modal = new ModalBuilder().setCustomId('anonymous_submit').setTitle('Anonyme Nachricht');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('anonymous_subject').setLabel('Betreff').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(100)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('anonymous_message').setLabel('Deine Nachricht').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(2000)),
+        );
+        await interaction.showModal(modal);
+        return;
+      }
+
+      if (interaction.customId.startsWith('interest_role:')) {
+        const roleId = interaction.customId.split(':')[1];
+        const option = data.interests.options.find(entry => entry.roleId === roleId);
+        const role = option ? await interaction.guild.roles.fetch(roleId).catch(() => null) : null;
+        const botMember = interaction.guild.members.me;
+        if (!role || role.managed || role.id === interaction.guild.id || !botMember || botMember.roles.highest.comparePositionTo(role) <= 0) {
+          await interaction.reply({ content: '❌ Diese Interessenrolle kann der Bot nicht vergeben. Prüfe die Rollen-Reihenfolge.', ephemeral: true });
+          return;
+        }
+        const hasRole = interaction.member.roles.cache.has(role.id);
+        if (hasRole) await interaction.member.roles.remove(role);
+        else await interaction.member.roles.add(role);
+        await interaction.reply({ content: hasRole ? `➖ **${option.label}** wurde entfernt.` : `✅ **${option.label}** wurde ausgewählt.`, ephemeral: true });
+        return;
+      }
+
       if (interaction.customId.startsWith('social_delete_yes:')) {
         const [, userId, requesterId] = interaction.customId.split(':');
         if (interaction.user.id !== requesterId) {
@@ -2096,6 +3160,81 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
+      if (interaction.customId.startsWith('challenge_submit:')) {
+        const challengeId = interaction.customId.split(':')[1];
+        const challenge = data.challenges[challengeId];
+        if (!challenge || challenge.completed) {
+          await interaction.reply({ content: '❌ Diese Challenge ist bereits beendet.', ephemeral: true });
+          return;
+        }
+        const rateKey = `${interaction.guildId}:${interaction.user.id}:${challengeId}`;
+        if (Date.now() - (challengeRateLimits.get(rateKey) || 0) < 3000) {
+          await interaction.reply({ content: '❌ Bitte warte kurz, bevor du erneut etwas einträgst.', ephemeral: true });
+          return;
+        }
+        const amount = Number(interaction.fields.getTextInputValue('challenge_amount').trim());
+        const note = interaction.fields.getTextInputValue('challenge_note').trim();
+        if (!Number.isInteger(amount) || amount < 1 || amount > 1_000_000) {
+          await interaction.reply({ content: '❌ Bitte gib eine ganze Zahl zwischen 1 und 1.000.000 ein.', ephemeral: true });
+          return;
+        }
+        challengeRateLimits.set(rateKey, Date.now());
+        if (!challenge.contributions) challenge.contributions = {};
+        challenge.contributions[interaction.user.id] = Number(challenge.contributions[interaction.user.id] || 0) + amount;
+        if (!Array.isArray(challenge.notes)) challenge.notes = [];
+        if (note) challenge.notes.push({ userId: interaction.user.id, amount, note, createdAt: Date.now() });
+        challenge.notes = challenge.notes.slice(-100);
+        const total = Object.values(challenge.contributions).reduce((sum, value) => sum + Number(value || 0), 0);
+        if (total >= challenge.goal) {
+          challenge.completed = true;
+          challenge.completedAt = Date.now();
+        }
+        await checkAndAwardBadges(data, interaction.user.id, interaction.channel);
+        saveData(data);
+
+        const channel = await interaction.guild.channels.fetch(challenge.channelId).catch(() => null);
+        const message = channel?.isTextBased() ? await channel.messages.fetch(challenge.messageId).catch(() => null) : null;
+        if (message) await message.edit(challengePayload(challenge, challenge.completed)).catch(() => {});
+        if (challenge.completed && channel?.isTextBased()) {
+          await channel.send('🎉 **Die Community-Challenge wurde gemeinsam geschafft!**').catch(() => {});
+        }
+        await interaction.reply({ content: `✅ Dein Beitrag von **${amount} ${challenge.unit}** wurde eingetragen.${challenge.completed ? '\n🎉 Das gemeinsame Ziel wurde erreicht!' : ''}`, ephemeral: true });
+        return;
+      }
+
+      if (interaction.customId === 'anonymous_submit') {
+        const inbox = data.config.anonymousInboxChannelId
+          ? await interaction.guild.channels.fetch(data.config.anonymousInboxChannelId).catch(() => null)
+          : null;
+        if (!inbox?.isTextBased()) {
+          await interaction.reply({ content: '❌ Der Nachrichten-Channel wurde nicht gefunden.', ephemeral: true });
+          return;
+        }
+        const submission = {
+          id: createShortId('x'),
+          guildId: interaction.guild.id,
+          userId: interaction.user.id,
+          subject: interaction.fields.getTextInputValue('anonymous_subject').trim(),
+          message: interaction.fields.getTextInputValue('anonymous_message').trim(),
+          createdAt: Date.now(),
+        };
+        const sent = await inbox.send({
+          embeds: [new EmbedBuilder()
+            .setColor(0x8b5cf6)
+            .setTitle(`📮 Anonyme Nachricht • ${submission.subject}`)
+            .setDescription(submission.message)
+            .setFooter({ text: `Nachrichten-ID: ${submission.id}` })
+            .setTimestamp(submission.createdAt)],
+          allowedMentions: { parse: [] },
+        });
+        submission.channelId = inbox.id;
+        submission.messageId = sent.id;
+        data.anonymous.submissions[submission.id] = submission;
+        saveData(data);
+        await interaction.reply({ content: `✅ Deine Nachricht wurde ohne sichtbaren Namen gesendet. **ID:** \`${submission.id}\``, ephemeral: true });
+        return;
+      }
+
       if (interaction.customId === 'socials_add_modal' || interaction.customId === 'socials_edit_modal') {
         if (!canManageSocials(interaction.member, data)) {
           await interaction.reply({ content: '❌ Du darfst die Socials nicht verwalten.', ephemeral: true });
@@ -2162,6 +3301,9 @@ client.on(Events.InteractionCreate, async interaction => {
           { name: '🛡️ Schutz & Voice', value: '`/automod` `/tempvoice` `/voice`' },
           { name: '🏆 Level & Invites', value: '`/rank` `/leaderboard` `/levelrole` `/levelsystem` `/invites` `/inviteleaderboard`' },
           { name: '📅 Events & Team', value: '`/event` `/duty` `/dutystats` `/dutyleaderboard`' },
+          { name: '💬 Community-Aktivität', value: '`/frage` `/communitypoll` `/memberofthemonth` `/rep` `/reps` `/communityrank` `/communityleaderboard`' },
+          { name: '🎮 Gemeinsam', value: '`/clip` `/mitspieler` `/challenge` `/game` `/badges`' },
+          { name: '👤 Profile & Willkommen', value: '`/profil` `/profilset` `/interessen` `/anonymouspanel` `/anonymousinfo`' },
           { name: '🧩 Eigene Commands', value: '`/customcommand` oder gespeicherte Befehle mit `!name`' },
           { name: '⚙️ Einrichtung', value: '`/setup channel` `/setup role` `/setup tickets` `/setup show`' },
         );
@@ -2237,6 +3379,14 @@ client.on(Events.InteractionCreate, async interaction => {
           applications: 'applicationReviewChannelId',
           transcripts: 'ticketTranscriptChannelId',
           automodlogs: 'automodLogChannelId',
+          questions: 'questionChannelId',
+          communitypolls: 'communityPollChannelId',
+          membermonth: 'memberOfMonthChannelId',
+          clips: 'clipChannelId',
+          lfg: 'lfgChannelId',
+          challenges: 'challengeChannelId',
+          anonymous: 'anonymousInboxChannelId',
+          interests: 'interestsChannelId',
         };
         data.config[map[type]] = channel.id;
         saveData(data);
@@ -2256,6 +3406,7 @@ client.on(Events.InteractionCreate, async interaction => {
           socialadmin: 'socialAdminRoleId',
           socialdelete: 'socialDeleteRoleId',
           applicationaccepted: 'applicationAcceptedRoleId',
+          membermonth: 'memberOfMonthRoleId',
         };
         data.config[map[type]] = role.id;
         saveData(data);
@@ -2276,8 +3427,9 @@ client.on(Events.InteractionCreate, async interaction => {
         const fmtCh = id => id ? `<#${id}>` : 'Nicht gesetzt';
         const fmtRole = id => id ? `<@&${id}>` : 'Nicht gesetzt';
         const embed = new EmbedBuilder().setColor(0x111111).setTitle('⚙️ Bot-Konfiguration').addFields(
-          { name: 'Channels', value: `Welcome: ${fmtCh(c.welcomeChannelId)}\nLeave: ${fmtCh(c.leaveChannelId)}\nLogs: ${fmtCh(c.logChannelId)}\nSuggestions: ${fmtCh(c.suggestionsChannelId)}\nGiveaways: ${fmtCh(c.giveawayChannelId)}\nSocials: ${fmtCh(c.socialsChannelId)}\nSocial Audit: ${fmtCh(c.socialAuditChannelId)}\nBewerbungen: ${fmtCh(c.applicationReviewChannelId)}\nTranskripte: ${fmtCh(c.ticketTranscriptChannelId)}\nAutoMod: ${fmtCh(c.automodLogChannelId)}` },
-          { name: 'Rollen', value: `Verified: ${fmtRole(c.verifiedRoleId)}\nUnverified: ${fmtRole(c.unverifiedRoleId)}\nSupport: ${fmtRole(c.supportRoleId)}\nModerator: ${fmtRole(c.moderatorRoleId)}\nAnnouncements: ${fmtRole(c.announcementRoleId)}\nSocial Admin: ${fmtRole(c.socialAdminRoleId)}\nSocial Delete: ${fmtRole(c.socialDeleteRoleId)}\nBewerbung angenommen: ${fmtRole(c.applicationAcceptedRoleId)}` },
+          { name: 'Basis-Channels', value: `Welcome: ${fmtCh(c.welcomeChannelId)}\nLeave: ${fmtCh(c.leaveChannelId)}\nLogs: ${fmtCh(c.logChannelId)}\nSuggestions: ${fmtCh(c.suggestionsChannelId)}\nGiveaways: ${fmtCh(c.giveawayChannelId)}\nSocials: ${fmtCh(c.socialsChannelId)}\nSocial Audit: ${fmtCh(c.socialAuditChannelId)}\nBewerbungen: ${fmtCh(c.applicationReviewChannelId)}\nTranskripte: ${fmtCh(c.ticketTranscriptChannelId)}\nAutoMod: ${fmtCh(c.automodLogChannelId)}` },
+          { name: 'Community-Channels', value: `Fragen: ${fmtCh(c.questionChannelId)}\nUmfragen: ${fmtCh(c.communityPollChannelId)}\nMitglied des Monats: ${fmtCh(c.memberOfMonthChannelId)}\nClips: ${fmtCh(c.clipChannelId)}\nMitspielersuche: ${fmtCh(c.lfgChannelId)}\nChallenges: ${fmtCh(c.challengeChannelId)}\nAnonyme Inbox: ${fmtCh(c.anonymousInboxChannelId)}\nInteressen: ${fmtCh(c.interestsChannelId)}` },
+          { name: 'Rollen', value: `Verified: ${fmtRole(c.verifiedRoleId)}\nUnverified: ${fmtRole(c.unverifiedRoleId)}\nSupport: ${fmtRole(c.supportRoleId)}\nModerator: ${fmtRole(c.moderatorRoleId)}\nAnnouncements: ${fmtRole(c.announcementRoleId)}\nSocial Admin: ${fmtRole(c.socialAdminRoleId)}\nSocial Delete: ${fmtRole(c.socialDeleteRoleId)}\nBewerbung angenommen: ${fmtRole(c.applicationAcceptedRoleId)}\nMitglied des Monats: ${fmtRole(c.memberOfMonthRoleId)}` },
           { name: 'Tickets & Temp Voice', value: `Ticket-Kategorie: ${c.ticketCategoryId ? `<#${c.ticketCategoryId}>` : 'Nicht gesetzt'}\nVoice-Lobby: ${fmtCh(c.tempVoiceLobbyId)}\nVoice-Kategorie: ${fmtCh(c.tempVoiceCategoryId)}` },
         );
         await interaction.reply({ embeds: [embed], ephemeral: true, allowedMentions: { parse: [] } });
@@ -2800,6 +3952,671 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
       await interaction.reply({ content: renderCustomCommand(custom.response, interaction).slice(0, 2000), allowedMentions: { parse: [] } });
+      return;
+    }
+
+    if (command === 'frage') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Du brauchst **Server verwalten** oder Administrator.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'setup') {
+        const channel = interaction.options.getChannel('channel');
+        const hour = interaction.options.getInteger('stunde');
+        data.config.questionChannelId = channel.id;
+        data.dailyQuestions.enabled = true;
+        if (hour !== null) data.dailyQuestions.hour = hour;
+        data.dailyQuestions.lastPostedDate = null;
+        saveData(data);
+        await interaction.reply({ content: `✅ Die Frage des Tages erscheint täglich um **${data.dailyQuestions.hour}:00 Uhr** in <#${channel.id}>.`, ephemeral: true });
+        return;
+      }
+      if (sub === 'add') {
+        const text = interaction.options.getString('text').trim();
+        if (data.dailyQuestions.questions.includes(text)) {
+          await interaction.reply({ content: '❌ Diese Frage ist bereits gespeichert.', ephemeral: true });
+          return;
+        }
+        data.dailyQuestions.questions.push(text);
+        saveData(data);
+        await interaction.reply({ content: `✅ Frage **${data.dailyQuestions.questions.length}** wurde gespeichert.`, ephemeral: true });
+        return;
+      }
+      if (sub === 'remove') {
+        const index = interaction.options.getInteger('nummer') - 1;
+        if (!data.dailyQuestions.questions[index]) {
+          await interaction.reply({ content: '❌ Eigene Frage mit dieser Nummer nicht gefunden.', ephemeral: true });
+          return;
+        }
+        const [removed] = data.dailyQuestions.questions.splice(index, 1);
+        data.dailyQuestions.nextIndex = 0;
+        saveData(data);
+        await interaction.reply({ content: `✅ Entfernt: **${removed}**`, ephemeral: true });
+        return;
+      }
+      if (sub === 'list') {
+        const questions = data.dailyQuestions.questions;
+        const text = questions.length
+          ? questions.map((question, index) => `**${index + 1}.** ${question}`).join('\n').slice(0, 3900)
+          : `*Keine eigenen Fragen gespeichert. Der Bot nutzt automatisch ${DEFAULT_DAILY_QUESTIONS.length} eingebaute Fragen.*`;
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle('💭 Fragen des Tages').setDescription(text)], ephemeral: true });
+        return;
+      }
+      if (sub === 'post') {
+        const channel = data.config.questionChannelId
+          ? await interaction.guild.channels.fetch(data.config.questionChannelId).catch(() => null)
+          : interaction.channel;
+        const message = await postDailyQuestion(interaction.guild, data, channel);
+        saveData(data);
+        await interaction.reply({ content: message ? `✅ Frage gepostet: ${message.url}` : '❌ Frage-Channel nicht gefunden.', ephemeral: true });
+        return;
+      }
+      if (sub === 'disable') {
+        data.dailyQuestions.enabled = false;
+        saveData(data);
+        await interaction.reply({ content: '✅ Die automatische Frage des Tages wurde deaktiviert.', ephemeral: true });
+        return;
+      }
+      await interaction.reply({
+        embeds: [new EmbedBuilder().setColor(data.dailyQuestions.enabled ? 0x2ecc71 : 0xe74c3c).setTitle('💭 Frage des Tages • Status').setDescription(
+          `**Automatik:** ${data.dailyQuestions.enabled ? 'Aktiv' : 'Inaktiv'}\n**Channel:** ${data.config.questionChannelId ? `<#${data.config.questionChannelId}>` : 'Nicht gesetzt'}\n**Uhrzeit:** ${data.dailyQuestions.hour}:00 Uhr (${COMMUNITY_TIMEZONE})\n**Eigene Fragen:** ${data.dailyQuestions.questions.length}`,
+        )],
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (command === 'communitypoll') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Du brauchst **Server verwalten** oder Administrator.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'setup') {
+        const channel = interaction.options.getChannel('channel');
+        data.config.communityPollChannelId = channel.id;
+        data.communityPolls.enabled = true;
+        data.communityPolls.cadence = interaction.options.getString('rhythmus');
+        const hour = interaction.options.getInteger('stunde');
+        const weekday = interaction.options.getInteger('wochentag');
+        if (hour !== null) data.communityPolls.hour = hour;
+        if (weekday !== null) data.communityPolls.weekday = weekday;
+        data.communityPolls.lastPostedKey = null;
+        saveData(data);
+        await interaction.reply({ content: `✅ Community-Umfragen erscheinen **${data.communityPolls.cadence === 'daily' ? 'täglich' : 'wöchentlich'}** um **${data.communityPolls.hour}:00 Uhr** in <#${channel.id}>.`, ephemeral: true });
+        return;
+      }
+      if (sub === 'add') {
+        const question = interaction.options.getString('frage').trim();
+        const options = parsePollOptions(interaction.options.getString('optionen'));
+        if (options.length < 2) {
+          await interaction.reply({ content: '❌ Gib mindestens zwei verschiedene Antworten an und trenne sie mit `|`.', ephemeral: true });
+          return;
+        }
+        data.communityPolls.templates.push({ question, options });
+        saveData(data);
+        await interaction.reply({ content: `✅ Umfrage-Vorlage **${data.communityPolls.templates.length}** gespeichert.`, ephemeral: true });
+        return;
+      }
+      if (sub === 'remove') {
+        const index = interaction.options.getInteger('nummer') - 1;
+        if (!data.communityPolls.templates[index]) {
+          await interaction.reply({ content: '❌ Vorlage mit dieser Nummer nicht gefunden.', ephemeral: true });
+          return;
+        }
+        const [removed] = data.communityPolls.templates.splice(index, 1);
+        data.communityPolls.nextIndex = 0;
+        saveData(data);
+        await interaction.reply({ content: `✅ Umfrage **${removed.question}** wurde entfernt.`, ephemeral: true });
+        return;
+      }
+      if (sub === 'list') {
+        const templates = data.communityPolls.templates;
+        const text = templates.length
+          ? templates.map((template, index) => `**${index + 1}. ${template.question}**\n${template.options.join(' • ')}`).join('\n\n').slice(0, 3900)
+          : `*Keine eigenen Vorlagen. Der Bot nutzt automatisch ${DEFAULT_COMMUNITY_POLLS.length} eingebaute Umfragen.*`;
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('📊 Community-Umfragen').setDescription(text)], ephemeral: true });
+        return;
+      }
+      if (sub === 'post') {
+        const channel = data.config.communityPollChannelId
+          ? await interaction.guild.channels.fetch(data.config.communityPollChannelId).catch(() => null)
+          : interaction.channel;
+        const message = await postCommunityPoll(interaction.guild, data, null, channel);
+        saveData(data);
+        await interaction.reply({ content: message ? `✅ Umfrage gepostet: ${message.url}` : '❌ Umfrage-Channel nicht gefunden.', ephemeral: true });
+        return;
+      }
+      if (sub === 'disable') {
+        data.communityPolls.enabled = false;
+        saveData(data);
+        await interaction.reply({ content: '✅ Automatische Community-Umfragen wurden deaktiviert.', ephemeral: true });
+        return;
+      }
+      const weekdays = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'];
+      await interaction.reply({
+        embeds: [new EmbedBuilder().setColor(data.communityPolls.enabled ? 0x2ecc71 : 0xe74c3c).setTitle('📊 Community-Umfragen • Status').setDescription(
+          `**Automatik:** ${data.communityPolls.enabled ? 'Aktiv' : 'Inaktiv'}\n**Rhythmus:** ${data.communityPolls.cadence === 'daily' ? 'Täglich' : `Wöchentlich am ${weekdays[data.communityPolls.weekday]}`}\n**Uhrzeit:** ${data.communityPolls.hour}:00 Uhr\n**Channel:** ${data.config.communityPollChannelId ? `<#${data.config.communityPollChannelId}>` : 'Nicht gesetzt'}\n**Eigene Vorlagen:** ${data.communityPolls.templates.length}`,
+        )],
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (command === 'memberofthemonth') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'setup') {
+        const channel = interaction.options.getChannel('channel');
+        const role = interaction.options.getRole('rolle');
+        if (role) {
+          const botMember = interaction.guild.members.me;
+          if (role.managed || role.id === interaction.guild.id || !botMember || botMember.roles.highest.comparePositionTo(role) <= 0) {
+            await interaction.reply({ content: '❌ Diese Rolle kann der Bot nicht vergeben. Schiebe die Bot-Rolle weiter nach oben.', ephemeral: true });
+            return;
+          }
+        }
+        data.config.memberOfMonthChannelId = channel.id;
+        data.config.memberOfMonthRoleId = role?.id || null;
+        data.memberOfMonth.enabled = true;
+        saveData(data);
+        await interaction.reply({ content: `✅ Mitglied des Monats ist aktiv. Auszeichnung in <#${channel.id}>${role ? ` mit <@&${role.id}>` : ''}.`, ephemeral: true, allowedMentions: { parse: [] } });
+        return;
+      }
+      if (sub === 'run') {
+        const month = interaction.options.getString('monat') || localDateInfo().month;
+        if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+          await interaction.reply({ content: '❌ Nutze das Format `YYYY-MM`, zum Beispiel `2026-08`.', ephemeral: true });
+          return;
+        }
+        await interaction.deferReply({ ephemeral: true });
+        const winner = await awardMemberOfMonth(interaction.guild, data, month, true);
+        saveData(data);
+        await interaction.editReply(winner ? `✅ <@${winner.userId}> wurde für **${month}** ausgezeichnet.` : `⚠️ Für **${month}** wurden keine Aktivitäten gefunden.`);
+        return;
+      }
+      if (sub === 'disable') {
+        data.memberOfMonth.enabled = false;
+        saveData(data);
+        await interaction.reply({ content: '✅ Die automatische Monatsauszeichnung wurde deaktiviert.', ephemeral: true });
+        return;
+      }
+      await interaction.reply({
+        embeds: [new EmbedBuilder().setColor(data.memberOfMonth.enabled ? 0x2ecc71 : 0xe74c3c).setTitle('👑 Mitglied des Monats • Status').setDescription(
+          `**Automatik:** ${data.memberOfMonth.enabled ? 'Aktiv' : 'Inaktiv'}\n**Channel:** ${data.config.memberOfMonthChannelId ? `<#${data.config.memberOfMonthChannelId}>` : 'Nicht gesetzt'}\n**Rolle:** ${data.config.memberOfMonthRoleId ? `<@&${data.config.memberOfMonthRoleId}>` : 'Keine'}\n**Aktueller Gewinner:** ${data.memberOfMonth.currentWinnerId ? `<@${data.memberOfMonth.currentWinnerId}>` : 'Noch niemand'}`,
+        )],
+        ephemeral: true,
+        allowedMentions: { parse: [] },
+      });
+      return;
+    }
+
+    if (command === 'rep') {
+      const user = interaction.options.getUser('user');
+      const reason = interaction.options.getString('grund') || 'Hilfsbereit und freundlich';
+      if (user.id === interaction.user.id || user.bot) {
+        await interaction.reply({ content: '❌ Du kannst dir selbst oder einem Bot keine Reputation geben.', ephemeral: true });
+        return;
+      }
+      const lastGiven = Number(data.reputation.givers[interaction.user.id] || 0);
+      const remaining = REP_COOLDOWN_MS - (Date.now() - lastGiven);
+      if (remaining > 0) {
+        await interaction.reply({ content: `❌ Du kannst erst <t:${Math.floor((Date.now() + remaining) / 1000)}:R> wieder einen Rep-Punkt vergeben.`, ephemeral: true });
+        return;
+      }
+      const record = data.reputation.users[user.id] || { points: 0, received: [] };
+      record.points++;
+      record.received.push({ fromUserId: interaction.user.id, reason, createdAt: Date.now() });
+      record.received = record.received.slice(-500);
+      data.reputation.users[user.id] = record;
+      data.reputation.givers[interaction.user.id] = Date.now();
+      await checkAndAwardBadges(data, user.id, interaction.channel);
+      saveData(data);
+      await interaction.reply({ content: `💜 <@${interaction.user.id}> hat <@${user.id}> einen Reputationspunkt gegeben!\n**Grund:** ${reason}\n**Neue Reputation:** ${record.points}`, allowedMentions: { users: [interaction.user.id, user.id] } });
+      return;
+    }
+
+    if (command === 'reps') {
+      const user = interaction.options.getUser('user') || interaction.user;
+      const record = data.reputation.users[user.id] || { points: 0, received: [] };
+      const latest = record.received.slice(-5).reverse();
+      const text = latest.length ? latest.map(entry => `• ${entry.reason} • <t:${Math.floor(entry.createdAt / 1000)}:R>`).join('\n') : '*Noch keine Einträge.*';
+      await interaction.reply({
+        embeds: [new EmbedBuilder().setColor(0x9b59b6).setTitle(`💜 Reputation • ${user.username}`).setThumbnail(user.displayAvatarURL({ size: 256 })).setDescription(`## ${record.points} Rep-Punkte`).addFields({ name: 'Letzte Begründungen', value: text })],
+        allowedMentions: { parse: [] },
+      });
+      return;
+    }
+
+    if (command === 'communityrank') {
+      const user = interaction.options.getUser('user') || interaction.user;
+      const monthly = activityFor(data, user.id, 'month');
+      const total = activityFor(data, user.id, 'total');
+      const place = activityLeaderboard(data, 'month').findIndex(entry => entry.userId === user.id) + 1;
+      await interaction.reply({
+        embeds: [new EmbedBuilder()
+          .setColor(0x8b5cf6)
+          .setTitle(`📊 Community-Rang • ${user.username}`)
+          .setThumbnail(user.displayAvatarURL({ size: 256 }))
+          .addFields(
+            { name: 'Diesen Monat', value: `💬 ${monthly.messages || 0} Nachrichten\n🎧 ${formatLongDuration(monthly.voiceMs || 0)}\n⭐ ${communityScore(monthly)} Punkte`, inline: true },
+            { name: 'Gesamt', value: `💬 ${total.messages || 0} Nachrichten\n🎧 ${formatLongDuration(total.voiceMs || 0)}\n⭐ ${communityScore(total)} Punkte`, inline: true },
+            { name: 'Monatsplatz', value: place ? `**Platz ${place}**` : 'Noch nicht platziert', inline: true },
+          )],
+      });
+      return;
+    }
+
+    if (command === 'communityleaderboard') {
+      const scope = interaction.options.getString('zeitraum') || 'month';
+      const top = activityLeaderboard(data, scope).slice(0, 10);
+      const text = top.length
+        ? top.map((entry, index) => `**${index + 1}.** <@${entry.userId}> • **${entry.score} Punkte** • 💬 ${entry.record.messages || 0} • 🎧 ${formatLongDuration(entry.record.voiceMs || 0)}`).join('\n')
+        : '*Noch keine Community-Aktivität erfasst.*';
+      await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle(`📊 Community-Bestenliste • ${scope === 'total' ? 'Gesamt' : 'Dieser Monat'}`).setDescription(text)], allowedMentions: { parse: [] } });
+      return;
+    }
+
+    if (command === 'clip') {
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'setup') {
+        if (!canSetup(interaction.member)) {
+          await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+          return;
+        }
+        const channel = interaction.options.getChannel('channel');
+        data.config.clipChannelId = channel.id;
+        data.clips.enabled = true;
+        data.clips.activeWeek = isoWeekKey();
+        saveData(data);
+        await interaction.reply({ content: `✅ Clips der Woche sind jetzt in <#${channel.id}> aktiv.`, ephemeral: true });
+        return;
+      }
+      if (sub === 'submit') {
+        if (!data.config.clipChannelId || !data.clips.enabled) {
+          await interaction.reply({ content: '❌ Das Clip-System wurde noch nicht mit `/clip setup` eingerichtet.', ephemeral: true });
+          return;
+        }
+        const week = isoWeekKey();
+        if (data.clips.lastFinishedWeek === week) {
+          await interaction.reply({ content: '❌ Die Abstimmung dieser Woche wurde bereits beendet.', ephemeral: true });
+          return;
+        }
+        const duplicate = Object.values(data.clips.submissions).find(clip => clip.weekKey === week && clip.userId === interaction.user.id);
+        if (duplicate) {
+          await interaction.reply({ content: `❌ Du hast diese Woche bereits einen Clip eingereicht: \`${duplicate.id}\``, ephemeral: true });
+          return;
+        }
+        const url = normalizeUrl(interaction.options.getString('url'));
+        if (!url) {
+          await interaction.reply({ content: '❌ Bitte gib einen gültigen http/https-Link an.', ephemeral: true });
+          return;
+        }
+        const channel = await interaction.guild.channels.fetch(data.config.clipChannelId).catch(() => null);
+        if (!channel?.isTextBased()) {
+          await interaction.reply({ content: '❌ Der Clip-Channel wurde nicht gefunden.', ephemeral: true });
+          return;
+        }
+        data.clips.activeWeek = week;
+        const clip = {
+          id: createShortId('c'),
+          guildId: interaction.guild.id,
+          channelId: channel.id,
+          userId: interaction.user.id,
+          title: interaction.options.getString('titel').trim(),
+          url,
+          weekKey: week,
+          votes: [],
+          createdAt: Date.now(),
+        };
+        const message = await channel.send(clipPayload(clip));
+        clip.messageId = message.id;
+        data.clips.submissions[clip.id] = clip;
+        saveData(data);
+        await interaction.reply({ content: `✅ Dein Clip wurde eingereicht: ${message.url}`, ephemeral: true });
+        return;
+      }
+      if (sub === 'top') {
+        const week = data.clips.activeWeek || isoWeekKey();
+        const clips = Object.values(data.clips.submissions).filter(clip => clip.weekKey === week).sort((a, b) => (b.votes?.length || 0) - (a.votes?.length || 0)).slice(0, 10);
+        const text = clips.length ? clips.map((clip, index) => `**${index + 1}.** [${clip.title}](${clip.url}) • <@${clip.userId}> • ⭐ ${clip.votes?.length || 0}`).join('\n') : '*Diese Woche wurden noch keine Clips eingereicht.*';
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle(`🎬 Clips • ${week}`).setDescription(text)], allowedMentions: { parse: [] } });
+        return;
+      }
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+        return;
+      }
+      const week = data.clips.activeWeek || isoWeekKey();
+      const winner = await finishClipWeek(interaction.guild, data, week);
+      saveData(data);
+      await interaction.reply({ content: winner ? `✅ <@${winner.userId}> hat mit **${winner.votes?.length || 0} Stimmen** gewonnen.` : '⚠️ Keine Clips vorhanden oder diese Woche wurde bereits ausgewertet.', ephemeral: true, allowedMentions: { parse: [] } });
+      return;
+    }
+
+    if (command === 'mitspieler') {
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'setup') {
+        if (!canSetup(interaction.member)) {
+          await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+          return;
+        }
+        const channel = interaction.options.getChannel('channel');
+        data.config.lfgChannelId = channel.id;
+        saveData(data);
+        await interaction.reply({ content: `✅ Neue Mitspielersuchen erscheinen in <#${channel.id}>.`, ephemeral: true });
+        return;
+      }
+      if (sub === 'create') {
+        const channel = data.config.lfgChannelId
+          ? await interaction.guild.channels.fetch(data.config.lfgChannelId).catch(() => null)
+          : interaction.channel;
+        if (!channel?.isTextBased()) {
+          await interaction.reply({ content: '❌ Mitspieler-Channel nicht gefunden.', ephemeral: true });
+          return;
+        }
+        const entry = {
+          id: createShortId('m'),
+          guildId: interaction.guild.id,
+          channelId: channel.id,
+          ownerId: interaction.user.id,
+          game: interaction.options.getString('spiel').trim(),
+          slots: interaction.options.getInteger('plaetze'),
+          description: interaction.options.getString('text') || null,
+          players: [interaction.user.id],
+          createdAt: Date.now(),
+          closed: false,
+        };
+        const message = await channel.send(lfgPayload(entry));
+        entry.messageId = message.id;
+        data.lfg[entry.id] = entry;
+        saveData(data);
+        await interaction.reply({ content: `✅ Mitspielersuche erstellt: ${message.url}\n**ID:** \`${entry.id}\``, ephemeral: true });
+        return;
+      }
+      if (sub === 'list') {
+        const entries = Object.values(data.lfg).filter(entry => entry.guildId === interaction.guild.id && !entry.closed).sort((a, b) => b.createdAt - a.createdAt).slice(0, 20);
+        const text = entries.length ? entries.map(entry => `• \`${entry.id}\` • **${entry.game}** • ${entry.players?.length || 0}/${entry.slots} • <@${entry.ownerId}>`).join('\n') : '*Keine offenen Mitspielersuchen.*';
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x2ecc71).setTitle('🎮 Offene Mitspielersuchen').setDescription(text)], allowedMentions: { parse: [] } });
+        return;
+      }
+      const entryId = interaction.options.getString('id').trim();
+      const entry = data.lfg[entryId];
+      if (!entry || entry.guildId !== interaction.guild.id) {
+        await interaction.reply({ content: '❌ Mitspielersuche nicht gefunden.', ephemeral: true });
+        return;
+      }
+      if (entry.ownerId !== interaction.user.id && !canModerate(interaction.member, data)) {
+        await interaction.reply({ content: '❌ Nur der Ersteller oder das Team darf diese Suche schließen.', ephemeral: true });
+        return;
+      }
+      entry.closed = true;
+      entry.closedAt = Date.now();
+      saveData(data);
+      const channel = await interaction.guild.channels.fetch(entry.channelId).catch(() => null);
+      const message = channel?.isTextBased() ? await channel.messages.fetch(entry.messageId).catch(() => null) : null;
+      if (message) await message.edit(lfgPayload(entry, true)).catch(() => {});
+      await interaction.reply({ content: '🔒 Mitspielersuche geschlossen.', ephemeral: true });
+      return;
+    }
+
+    if (command === 'challenge') {
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'create') {
+        if (!canAnnounce(interaction.member, data)) {
+          await interaction.reply({ content: '❌ Du darfst keine Community-Challenges erstellen.', ephemeral: true });
+          return;
+        }
+        const channel = interaction.options.getChannel('channel') || (data.config.challengeChannelId
+          ? await interaction.guild.channels.fetch(data.config.challengeChannelId).catch(() => null)
+          : interaction.channel);
+        if (!channel?.isTextBased()) {
+          await interaction.reply({ content: '❌ Challenge-Channel nicht gefunden.', ephemeral: true });
+          return;
+        }
+        data.config.challengeChannelId = channel.id;
+        const challenge = {
+          id: createShortId('h'),
+          guildId: interaction.guild.id,
+          channelId: channel.id,
+          creatorId: interaction.user.id,
+          title: interaction.options.getString('titel').trim(),
+          goal: interaction.options.getInteger('ziel'),
+          unit: interaction.options.getString('einheit').trim(),
+          description: interaction.options.getString('text') || null,
+          contributions: {},
+          notes: [],
+          completed: false,
+          createdAt: Date.now(),
+        };
+        const message = await channel.send(challengePayload(challenge));
+        challenge.messageId = message.id;
+        data.challenges[challenge.id] = challenge;
+        saveData(data);
+        await interaction.reply({ content: `✅ Community-Challenge erstellt: ${message.url}\n**ID:** \`${challenge.id}\``, ephemeral: true });
+        return;
+      }
+      if (sub === 'list') {
+        const challenges = Object.values(data.challenges).filter(challenge => challenge.guildId === interaction.guild.id && !challenge.completed).slice(0, 20);
+        const text = challenges.length ? challenges.map(challenge => {
+          const progress = Object.values(challenge.contributions || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+          return `• \`${challenge.id}\` • **${challenge.title}** • ${progress}/${challenge.goal} ${challenge.unit}`;
+        }).join('\n') : '*Keine laufenden Challenges.*';
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle('🤝 Community-Challenges').setDescription(text)], ephemeral: true });
+        return;
+      }
+      const challengeId = interaction.options.getString('id').trim();
+      const challenge = data.challenges[challengeId];
+      if (!challenge || challenge.guildId !== interaction.guild.id) {
+        await interaction.reply({ content: '❌ Challenge nicht gefunden.', ephemeral: true });
+        return;
+      }
+      if (challenge.creatorId !== interaction.user.id && !canAnnounce(interaction.member, data)) {
+        await interaction.reply({ content: '❌ Du darfst diese Challenge nicht beenden.', ephemeral: true });
+        return;
+      }
+      challenge.completed = true;
+      challenge.completedAt = Date.now();
+      saveData(data);
+      const channel = await interaction.guild.channels.fetch(challenge.channelId).catch(() => null);
+      const message = channel?.isTextBased() ? await channel.messages.fetch(challenge.messageId).catch(() => null) : null;
+      if (message) await message.edit(challengePayload(challenge, true)).catch(() => {});
+      await interaction.reply({ content: '✅ Challenge wurde beendet.', ephemeral: true });
+      return;
+    }
+
+    if (command === 'game') {
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'leaderboard') {
+        const top = Object.entries(data.games.quizScores).sort(([, a], [, b]) => (b.correct || 0) - (a.correct || 0) || (a.total || 0) - (b.total || 0)).slice(0, 10);
+        const text = top.length ? top.map(([userId, score], index) => `**${index + 1}.** <@${userId}> • **${score.correct || 0} richtig** von ${score.total || 0}`).join('\n') : '*Noch keine Quiz-Ergebnisse.*';
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x3498db).setTitle('🧠 Quiz-Bestenliste').setDescription(text)], allowedMentions: { parse: [] } });
+        return;
+      }
+      if (sub === 'status') {
+        const game = data.games.channels[interaction.channel.id];
+        if (!game) {
+          await interaction.reply({ content: 'ℹ️ In diesem Channel läuft kein Nachrichtenspiel.', ephemeral: true });
+          return;
+        }
+        const details = game.type === 'counting'
+          ? `Aktuelle Zahl: **${game.current}**`
+          : game.type === 'wordchain'
+            ? `Letztes Wort: **${game.lastWord || 'Noch keines'}**`
+            : `Zahl zwischen **1 und ${game.max}** • ${game.attempts || 0} Versuche`;
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x3498db).setTitle('🎮 Laufendes Minispiel').setDescription(`**Typ:** ${game.type}\n${details}`)], ephemeral: true });
+        return;
+      }
+      if (!canAnnounce(interaction.member, data)) {
+        await interaction.reply({ content: '❌ Du darfst keine Community-Spiele starten oder stoppen.', ephemeral: true });
+        return;
+      }
+      if (sub === 'stop') {
+        if (!data.games.channels[interaction.channel.id]) {
+          await interaction.reply({ content: '❌ In diesem Channel läuft kein Spiel.', ephemeral: true });
+          return;
+        }
+        delete data.games.channels[interaction.channel.id];
+        saveData(data);
+        await interaction.reply('🛑 Das Community-Spiel wurde beendet.');
+        return;
+      }
+      if (sub === 'quiz') {
+        const template = QUIZ_QUESTIONS[Math.floor(Math.random() * QUIZ_QUESTIONS.length)];
+        const quiz = { id: createShortId('q'), ...template, guildId: interaction.guild.id, channelId: interaction.channel.id, answeredUsers: [], createdAt: Date.now() };
+        data.games.quizzes[quiz.id] = quiz;
+        saveData(data);
+        await interaction.reply(quizPayload(quiz));
+        return;
+      }
+      if (data.games.channels[interaction.channel.id]) {
+        await interaction.reply({ content: '❌ In diesem Channel läuft bereits ein Spiel. Nutze zuerst `/game stop`.', ephemeral: true });
+        return;
+      }
+      const type = interaction.options.getString('typ');
+      const game = { type, startedBy: interaction.user.id, startedAt: Date.now() };
+      let description;
+      if (type === 'counting') {
+        Object.assign(game, { current: 0, lastUserId: null });
+        description = 'Beginnt mit **1** und zählt gemeinsam weiter. Niemand darf zweimal hintereinander schreiben.';
+      } else if (type === 'wordchain') {
+        Object.assign(game, { lastWord: null, lastUserId: null, usedWords: [] });
+        description = 'Das nächste Wort muss mit dem letzten Buchstaben des vorherigen Wortes beginnen. Niemand darf zweimal hintereinander schreiben.';
+      } else {
+        const max = interaction.options.getInteger('maximum') || 100;
+        Object.assign(game, { max, secret: Math.floor(Math.random() * max) + 1, attempts: 0 });
+        description = `Erratet gemeinsam die geheime Zahl zwischen **1 und ${max}**. Der Bot sagt euch, ob sie größer oder kleiner ist.`;
+      }
+      data.games.channels[interaction.channel.id] = game;
+      saveData(data);
+      await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x3498db).setTitle(`🎮 Minispiel gestartet • ${type}`).setDescription(description)] });
+      return;
+    }
+
+    if (command === 'badges') {
+      const user = interaction.options.getUser('user') || interaction.user;
+      await checkAndAwardBadges(data, user.id);
+      saveData(data);
+      const badges = (data.achievements[user.id] || []).filter(id => BADGES[id]);
+      const text = badges.length ? badges.map(id => `${BADGES[id].emoji} **${BADGES[id].name}**\n${BADGES[id].description}`).join('\n\n') : '*Noch keine Abzeichen freigeschaltet.*';
+      await interaction.reply({ embeds: [new EmbedBuilder().setColor(0xf1c40f).setTitle(`🏅 Abzeichen • ${user.username}`).setThumbnail(user.displayAvatarURL({ size: 256 })).setDescription(text).setFooter({ text: `${badges.length} von ${Object.keys(BADGES).length} Abzeichen` })] });
+      return;
+    }
+
+    if (command === 'anonymouspanel') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+        return;
+      }
+      const inbox = interaction.options.getChannel('inbox');
+      data.config.anonymousInboxChannelId = inbox.id;
+      saveData(data);
+      const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('anonymous_open').setLabel('Anonyme Nachricht senden').setEmoji('📮').setStyle(ButtonStyle.Primary));
+      await interaction.channel.send({
+        embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle('📮 Anonyme Nachrichtenbox').setDescription('Möchtest du Feedback, eine Frage oder ein Anliegen senden? Dein Name wird in der Nachricht **nicht angezeigt**.\n\nZum Schutz vor Missbrauch speichert der Bot die Discord-ID. Nur berechtigte Teammitglieder können sie bei Bedarf prüfen.')],
+        components: [row],
+      });
+      await interaction.reply({ content: `✅ Panel erstellt. Nachrichten landen in <#${inbox.id}>.`, ephemeral: true });
+      return;
+    }
+
+    if (command === 'anonymousinfo') {
+      if (!canModerate(interaction.member, data) && !canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Nur berechtigte Teammitglieder dürfen Absender prüfen.', ephemeral: true });
+        return;
+      }
+      const id = interaction.options.getString('id').trim();
+      const submission = data.anonymous.submissions[id];
+      if (!submission || submission.guildId !== interaction.guild.id) {
+        await interaction.reply({ content: '❌ Anonyme Nachricht nicht gefunden.', ephemeral: true });
+        return;
+      }
+      await interaction.reply({
+        embeds: [new EmbedBuilder().setColor(0xe67e22).setTitle(`🔎 Anonyme Nachricht • ${id}`).setDescription(`**Absender:** <@${submission.userId}> (\`${submission.userId}\`)\n**Betreff:** ${submission.subject}\n**Gesendet:** <t:${Math.floor(submission.createdAt / 1000)}:F>\n\n**Nachricht:**\n${submission.message}`)],
+        ephemeral: true,
+        allowedMentions: { parse: [] },
+      });
+      return;
+    }
+
+    if (command === 'profil') {
+      const user = interaction.options.getUser('user') || interaction.user;
+      await checkAndAwardBadges(data, user.id);
+      saveData(data);
+      await interaction.reply({ embeds: [profileEmbed(user, data)] });
+      return;
+    }
+
+    if (command === 'profilset') {
+      const bio = interaction.options.getString('bio');
+      const game = interaction.options.getString('spiel');
+      if (bio === null && game === null) {
+        await interaction.reply({ content: '❌ Gib mindestens eine neue Bio oder ein Lieblingsspiel an.', ephemeral: true });
+        return;
+      }
+      const profile = data.profiles[interaction.user.id] || {};
+      if (bio !== null) profile.bio = bio.trim();
+      if (game !== null) profile.game = game.trim();
+      profile.updatedAt = Date.now();
+      data.profiles[interaction.user.id] = profile;
+      saveData(data);
+      await interaction.reply({ content: '✅ Dein Community-Profil wurde aktualisiert.', ephemeral: true });
+      return;
+    }
+
+    if (command === 'interessen') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Du brauchst **Server verwalten** oder Administrator.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'add') {
+        if (data.interests.options.length >= 25) {
+          await interaction.reply({ content: '❌ Es sind maximal 25 Interessen möglich.', ephemeral: true });
+          return;
+        }
+        const role = interaction.options.getRole('rolle');
+        const botMember = interaction.guild.members.me;
+        if (role.managed || role.id === interaction.guild.id || !botMember || botMember.roles.highest.comparePositionTo(role) <= 0) {
+          await interaction.reply({ content: '❌ Diese Rolle kann der Bot nicht vergeben. Schiebe die Bot-Rolle weiter nach oben.', ephemeral: true });
+          return;
+        }
+        if (data.interests.options.some(option => option.roleId === role.id)) {
+          await interaction.reply({ content: '❌ Diese Rolle ist bereits als Interesse eingetragen.', ephemeral: true });
+          return;
+        }
+        data.interests.options.push({ label: interaction.options.getString('name').trim(), roleId: role.id });
+        if (data.config.interestsChannelId) await updateInterestPanel(interaction.guild, data).catch(() => {});
+        saveData(data);
+        await interaction.reply({ content: `✅ Interesse **${interaction.options.getString('name')}** mit <@&${role.id}> hinzugefügt.`, ephemeral: true, allowedMentions: { parse: [] } });
+        return;
+      }
+      if (sub === 'remove') {
+        const role = interaction.options.getRole('rolle');
+        const before = data.interests.options.length;
+        data.interests.options = data.interests.options.filter(option => option.roleId !== role.id);
+        if (before === data.interests.options.length) {
+          await interaction.reply({ content: '❌ Diese Rolle ist nicht eingetragen.', ephemeral: true });
+          return;
+        }
+        if (data.config.interestsChannelId) await updateInterestPanel(interaction.guild, data).catch(() => {});
+        saveData(data);
+        await interaction.reply({ content: `✅ <@&${role.id}> wurde aus den Interessen entfernt.`, ephemeral: true, allowedMentions: { parse: [] } });
+        return;
+      }
+      if (sub === 'list') {
+        const text = data.interests.options.length ? data.interests.options.map((option, index) => `**${index + 1}.** ${option.label} → <@&${option.roleId}>`).join('\n') : '*Noch keine Interessen eingerichtet.*';
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle('🏷️ Willkommens-Interessen').setDescription(text)], ephemeral: true, allowedMentions: { parse: [] } });
+        return;
+      }
+      const channel = interaction.options.getChannel('channel') || interaction.channel;
+      const message = await updateInterestPanel(interaction.guild, data, channel);
+      saveData(data);
+      await interaction.reply({ content: message ? `✅ Willkommens-Panel erstellt oder aktualisiert: ${message.url}` : '❌ Panel-Channel nicht gefunden.', ephemeral: true });
       return;
     }
 
