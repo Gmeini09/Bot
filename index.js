@@ -374,8 +374,11 @@ function buildSocialPage(guild, entries, pageIndex, pageCount, totalCount) {
       .join('  •  ');
 
     embed.addFields({
-      name: `👤  PROFIL ${profileNumber}  •  <@${entry.userId}>`,
-      value: linksText ? `> ${linksText}` : '> *Keine Links hinterlegt*',
+      name: `👤  PROFIL ${profileNumber}`,
+      value: [
+        `<@${entry.userId}>`,
+        linksText ? `> ${linksText}` : '> *Keine Links hinterlegt*',
+      ].join('\n'),
       inline: false,
     });
 
