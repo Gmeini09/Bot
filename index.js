@@ -55,6 +55,8 @@ if (!fs.existsSync(storageDir)) fs.mkdirSync(storageDir, { recursive: true });
 const dataPath = path.join(storageDir, 'data.json');
 
 const MAX_SOCIAL_LINKS = 5;
+const SOCIALS_PER_PAGE = 5;
+const SOCIAL_PANEL_COLOR = 0x8b5cf6;
 const VERIFY_TTL_MS = 5 * 60 * 1000;
 const verifyChallenges = new Map();
 const refreshRunningGuilds = new Set();
@@ -213,6 +215,7 @@ function platformInfo(urlString) {
     if (host.includes('tiktok.com')) return { label: 'TikTok', emoji: '🎵' };
     if (host.includes('twitch.tv')) return { label: 'Twitch', emoji: '🟣' };
     if (host.includes('instagram.com')) return { label: 'Instagram', emoji: '📸' };
+    if (host === 'discord.gg' || host.includes('discord.com')) return { label: 'Discord', emoji: '💬' };
     if (host === 'x.com' || host.includes('twitter.com')) return { label: 'X', emoji: '✖️' };
     if (host.includes('spotify.com')) return { label: 'Spotify', emoji: '🎧' };
     if (host.includes('soundcloud.com')) return { label: 'SoundCloud', emoji: '☁️' };
@@ -324,27 +327,55 @@ async function sortedSocialMembers(guild, members) {
   return enriched.map(x => x.entry);
 }
 
-function buildSocialPage(entries, pageIndex, pageCount, totalCount) {
-  const embed = new EmbedBuilder()
-    .setColor(0x111111)
-    .setTitle(pageIndex === 0 ? '🌐 Community Socials' : `🌐 Community Socials • Seite ${pageIndex + 1}`)
-    .setFooter({ text: `${totalCount} Mitglied${totalCount === 1 ? '' : 'er'} • Seite ${pageIndex + 1}/${pageCount}` });
-  if (pageIndex === 0) embed.setDescription('Hier findest du die Socials unserer Community.');
+function socialPanelBaseEmbed(guild) {
+  const embed = new EmbedBuilder().setColor(SOCIAL_PANEL_COLOR);
+  const iconURL = guild.iconURL({ size: 256 });
+  const author = { name: `${guild.name} • SOCIAL HUB` };
+
+  if (iconURL) {
+    author.iconURL = iconURL;
+    embed.setThumbnail(iconURL);
+  }
+
+  return embed.setAuthor(author);
+}
+
+function socialProfileLabel(count) {
+  return `${count} ${count === 1 ? 'Profil' : 'Profile'}`;
+}
+
+function buildSocialPage(guild, entries, pageIndex, pageCount, totalCount) {
+  const embed = socialPanelBaseEmbed(guild)
+    .setTitle(pageIndex === 0 ? '🌐 Entdecke unsere Community' : `🌐 Weitere Socials • Seite ${pageIndex + 1}`)
+    .setDescription(
+      pageIndex === 0
+        ? [
+            '**Alle Creator, Kanäle und Profile auf einen Blick.**',
+            'Wähle unten einfach die gewünschte Plattform aus.',
+            '',
+            '✦ Mit `/mysocials` kannst du deine eigenen Links verwalten.',
+          ].join('\n')
+        : 'Weitere Profile aus unserer Community. Wähle unten die gewünschte Plattform aus.',
+    )
+    .setFooter({
+      text: `${socialProfileLabel(totalCount)}  •  Seite ${pageIndex + 1} von ${pageCount}`,
+    });
 
   const rows = [];
 
   entries.forEach((entry, localIndex) => {
-    const globalIndex = pageIndex * 5 + localIndex + 1;
+    const globalIndex = pageIndex * SOCIALS_PER_PAGE + localIndex + 1;
+    const profileNumber = String(globalIndex).padStart(2, '0');
     const linksText = entry.links
       .map(link => {
         const p = platformInfo(link);
         return `${p.emoji} [${p.label}](${link})`;
       })
-      .join(' • ');
+      .join('  •  ');
 
     embed.addFields({
-      name: `${globalIndex}. <@${entry.userId}>`,
-      value: linksText || '*Keine Links*',
+      name: `👤  PROFIL ${profileNumber}  •  <@${entry.userId}>`,
+      value: linksText ? `> ${linksText}` : '> *Keine Links hinterlegt*',
       inline: false,
     });
 
@@ -355,7 +386,7 @@ function buildSocialPage(entries, pageIndex, pageCount, totalCount) {
         row.addComponents(
           new ButtonBuilder()
             .setStyle(ButtonStyle.Link)
-            .setLabel(`${globalIndex} • ${p.label}`.slice(0, 80))
+            .setLabel(`${profileNumber}  •  ${p.label}`.slice(0, 80))
             .setEmoji(p.emoji)
             .setURL(link),
         );
@@ -378,8 +409,8 @@ async function updateSocialPanel(guild, data) {
     data.socials.members = await sortedSocialMembers(guild, data.socials.members);
     const chunks = [];
     if (data.socials.members.length === 0) chunks.push([]);
-    for (let i = 0; i < data.socials.members.length; i += 5) {
-      chunks.push(data.socials.members.slice(i, i + 5));
+    for (let i = 0; i < data.socials.members.length; i += SOCIALS_PER_PAGE) {
+      chunks.push(data.socials.members.slice(i, i + SOCIALS_PER_PAGE));
     }
 
     const newMessageIds = [];
@@ -389,15 +420,18 @@ async function updateSocialPanel(guild, data) {
       if (entries.length === 0) {
         payload = {
           embeds: [
-            new EmbedBuilder()
-              .setColor(0x111111)
+            socialPanelBaseEmbed(guild)
               .setTitle('🌐 Community Socials')
-              .setDescription('*Noch keine Socials eingetragen.*'),
+              .setDescription([
+                '**Hier ist noch Platz für das erste Profil.**',
+                'Trage deine Socials mit `/mysocials add` ein und zeig der Community, wo man dich findet.',
+              ].join('\n'))
+              .setFooter({ text: '0 Profile  •  Bereit für deinen ersten Eintrag' }),
           ],
           components: [],
         };
       } else {
-        const built = buildSocialPage(entries, i, chunks.length, data.socials.members.length);
+        const built = buildSocialPage(guild, entries, i, chunks.length, data.socials.members.length);
         payload = { embeds: [built.embed], components: built.rows };
       }
 
@@ -430,7 +464,7 @@ function findSocial(data, userId) {
 
 function socialInfoPayload(entry, title = '🌐 Socials') {
   const embed = new EmbedBuilder()
-    .setColor(0x111111)
+    .setColor(SOCIAL_PANEL_COLOR)
     .setTitle(title)
     .setDescription(
       entry?.links?.length
@@ -1967,7 +2001,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (command === 'sociallist') {
       const sorted = await sortedSocialMembers(interaction.guild, data.socials.members);
       const text = sorted.length ? sorted.map((entry, i) => `**${i + 1}.** <@${entry.userId}> • ${entry.links.length} Link${entry.links.length === 1 ? '' : 's'}`).join('\n').slice(0, 3900) : '*Niemand eingetragen.*';
-      await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x111111).setTitle('🌐 Socials Übersicht').setDescription(text)], ephemeral: true, allowedMentions: { parse: [] } });
+      await interaction.reply({ embeds: [new EmbedBuilder().setColor(SOCIAL_PANEL_COLOR).setTitle('🌐 Socials Übersicht').setDescription(text)], ephemeral: true, allowedMentions: { parse: [] } });
       return;
     }
 
