@@ -741,6 +741,10 @@ function buildCommands() {
       .setDescription('Entbannt eine Discord-ID.')
       .addStringOption(o => o.setName('discord_id').setDescription('Discord-ID').setRequired(true)),
     new SlashCommandBuilder()
+      .setName('unbanall')
+      .setDescription('Entbannt alle gebannten Nutzer vom Server.')
+      .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers),
+    new SlashCommandBuilder()
       .setName('purge')
       .setDescription('Löscht mehrere Nachrichten.')
       .addIntegerOption(o => o.setName('anzahl').setDescription('1 bis 100').setRequired(true).setMinValue(1).setMaxValue(100)),
@@ -1090,6 +1094,60 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
+      if (interaction.customId.startsWith('unbanall_confirm:')) {
+        const [, requesterId] = interaction.customId.split(':');
+
+        if (interaction.user.id !== requesterId) {
+          await interaction.reply({ content: '❌ Diese Bestätigung gehört nicht dir.', ephemeral: true });
+          return;
+        }
+
+        if (
+          !interaction.member.permissions.has(PermissionFlagsBits.Administrator) &&
+          !interaction.member.permissions.has(PermissionFlagsBits.BanMembers)
+        ) {
+          await interaction.update({ content: '❌ Du hast keine Berechtigung, alle Bans aufzuheben.', components: [] });
+          return;
+        }
+
+        await interaction.update({ content: '⏳ Alle gebannten Nutzer werden entbannt ...', components: [] });
+
+        const bans = await interaction.guild.bans.fetch();
+        let success = 0;
+        let failed = 0;
+
+        for (const ban of bans.values()) {
+          try {
+            await interaction.guild.members.unban(
+              ban.user.id,
+              `Unban All ausgeführt von ${interaction.user.tag}`,
+            );
+            success++;
+          } catch (error) {
+            failed++;
+            console.error(`❌ Unban fehlgeschlagen für ${ban.user.id}:`, error);
+          }
+        }
+
+        const result = failed
+          ? `✅ **${success}** Nutzer entbannt. ❌ **${failed}** konnten nicht entbannt werden.`
+          : `✅ **${success}** gebannte Nutzer wurden erfolgreich entbannt.`;
+
+        await interaction.editReply({ content: result, components: [] }).catch(() => {});
+        await logEvent(
+          interaction.guild,
+          data,
+          '🔓 Unban All',
+          `<@${interaction.user.id}> hat **${success}** Nutzer entbannt.${failed ? `\n**Fehlgeschlagen:** ${failed}` : ''}`,
+        );
+        return;
+      }
+
+      if (interaction.customId === 'unbanall_cancel') {
+        await interaction.update({ content: '✅ Unban All wurde abgebrochen.', components: [] });
+        return;
+      }
+
       if (interaction.customId.startsWith('giveaway_join:')) {
         if (!interaction.inGuild()) return;
         const messageId = interaction.customId.split(':')[1];
@@ -1287,7 +1345,7 @@ client.on(Events.InteractionCreate, async interaction => {
         .addFields(
           { name: '🌐 Socials', value: '`/socials` `/editsocials` `/removesocial` `/deletesocials` `/socialinfo` `/sociallist` `/mysocials` `/refreshsocials`' },
           { name: '🎫 Tickets & Verify', value: '`/ticketpanel` `/ticket` `/verificationpanel`' },
-          { name: '🛡️ Moderation', value: '`/warn` `/warnings` `/clearwarnings` `/timeout` `/untimeout` `/kick` `/ban` `/unban` `/purge` `/slowmode` `/lock` `/unlock`' },
+          { name: '🛡️ Moderation', value: '`/warn` `/warnings` `/clearwarnings` `/timeout` `/untimeout` `/kick` `/ban` `/unban` `/unbanall` `/purge` `/slowmode` `/lock` `/unlock`' },
           { name: '📣 Community', value: '`/announce` `/embed` `/poll` `/suggest` `/giveaway`' },
           { name: 'ℹ️ Info', value: '`/serverinfo` `/userinfo` `/avatar` `/ping`' },
           { name: '⚙️ Einrichtung', value: '`/setup channel` `/setup role` `/setup tickets` `/setup show`' },
@@ -1689,7 +1747,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     // ---------- MODERATION ----------
-    const moderationCommands = new Set(['warn', 'warnings', 'clearwarnings', 'timeout', 'untimeout', 'kick', 'ban', 'unban', 'purge', 'slowmode', 'lock', 'unlock']);
+    const moderationCommands = new Set(['warn', 'warnings', 'clearwarnings', 'timeout', 'untimeout', 'kick', 'ban', 'unban', 'unbanall', 'purge', 'slowmode', 'lock', 'unlock']);
     if (moderationCommands.has(command) && !canModerate(interaction.member, data)) {
       await interaction.reply({ content: '❌ Du darfst diese Moderationsfunktion nicht verwenden.', ephemeral: true });
       return;
@@ -1782,6 +1840,41 @@ client.on(Events.InteractionCreate, async interaction => {
       await interaction.guild.members.unban(userId, `Unban von ${interaction.user.tag}`);
       await interaction.reply({ content: `✅ **${userId}** wurde entbannt.` });
       await logEvent(interaction.guild, data, '✅ Unban', `${userId} wurde von <@${interaction.user.id}> entbannt.`);
+      return;
+    }
+
+    if (command === 'unbanall') {
+      if (
+        !interaction.member.permissions.has(PermissionFlagsBits.Administrator) &&
+        !interaction.member.permissions.has(PermissionFlagsBits.BanMembers)
+      ) {
+        await interaction.reply({ content: '❌ Du brauchst die Berechtigung **Mitglieder bannen**.', ephemeral: true });
+        return;
+      }
+
+      const bans = await interaction.guild.bans.fetch();
+      if (bans.size === 0) {
+        await interaction.reply({ content: '✅ Auf diesem Server ist aktuell niemand gebannt.', ephemeral: true });
+        return;
+      }
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`unbanall_confirm:${interaction.user.id}`)
+          .setLabel('Ja, alle entbannen')
+          .setEmoji('🔓')
+          .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId('unbanall_cancel')
+          .setLabel('Abbrechen')
+          .setStyle(ButtonStyle.Secondary),
+      );
+
+      await interaction.reply({
+        content: `⚠️ Wirklich **alle ${bans.size} gebannten Nutzer** entbannen?`,
+        components: [row],
+        ephemeral: true,
+      });
       return;
     }
 

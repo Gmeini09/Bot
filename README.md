@@ -62,3 +62,8 @@ Im Formular:
 - Bild-URL (optional)
 
 Berechtigung: dieselbe Berechtigung wie `/announce` (Announcement-Rolle bzw. Server verwalten/Admin).
+
+
+## Unban All
+
+`/unbanall` entbannt nach einer Sicherheitsabfrage alle gebannten Nutzer. Benötigt **Mitglieder bannen** oder Administrator.
