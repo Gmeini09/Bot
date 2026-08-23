@@ -25,6 +25,7 @@ Der Bot registriert die Slash-Commands beim Start automatisch. Die vorhandenen D
 
 ## Team-Befehle
 
+- `/clear anzahl:1–100` – mehrere Nachrichten gleichzeitig löschen
 - `/frage add`, `/frage remove`, `/frage post`, `/frage status`
 - `/communitypoll add`, `/communitypoll remove`, `/communitypoll post`, `/communitypoll status`
 - `/memberofthemonth run`

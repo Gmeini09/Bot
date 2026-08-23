@@ -1,6 +1,6 @@
 {
   "name": "community-allround-bot",
-  "version": "3.0.0",
+  "version": "3.0.2",
   "description": "Discord community allround bot with socials, moderation, tickets, activity, polls, clips, games, profiles and automation",
   "main": "index.js",
   "scripts": {

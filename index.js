@@ -478,6 +478,10 @@ function canManageSocials(member, data) {
   return hasAnyRole(member, ids);
 }
 
+function canUseSocialsCommand(member) {
+  return Boolean(member?.roles?.cache?.has('1531994258691588177'));
+}
+
 function canDeleteSocials(member, data) {
   if (!member) return false;
   if (isAdministrator(member) || member.permissions.has(PermissionFlagsBits.ManageGuild)) return true;
@@ -1992,6 +1996,10 @@ function buildCommands() {
       .setDescription('Löscht mehrere Nachrichten.')
       .addIntegerOption(o => o.setName('anzahl').setDescription('1 bis 100').setRequired(true).setMinValue(1).setMaxValue(100)),
     new SlashCommandBuilder()
+      .setName('clear')
+      .setDescription('Löscht mehrere Nachrichten.')
+      .addIntegerOption(o => o.setName('anzahl').setDescription('1 bis 100').setRequired(true).setMinValue(1).setMaxValue(100)),
+    new SlashCommandBuilder()
       .setName('slowmode')
       .setDescription('Setzt den Slowmode im Channel.')
       .addIntegerOption(o => o.setName('sekunden').setDescription('0 bis 21600').setRequired(true).setMinValue(0).setMaxValue(21600)),
@@ -3231,12 +3239,21 @@ client.on(Events.InteractionCreate, async interaction => {
         submission.messageId = sent.id;
         data.anonymous.submissions[submission.id] = submission;
         saveData(data);
+        await logEvent(
+          interaction.guild,
+          data,
+          '📮 Anonyme Nachricht gesendet',
+          `**Absender:** <@${submission.userId}> (\`${submission.userId}\`)\n**Nachrichten-ID:** \`${submission.id}\`\n**Betreff:** ${submission.subject}\n**Inbox:** <#${inbox.id}>\n**Nachricht:** ${submission.message}\n\n[Nachricht öffnen](${sent.url})`,
+        );
         await interaction.reply({ content: `✅ Deine Nachricht wurde ohne sichtbaren Namen gesendet. **ID:** \`${submission.id}\``, ephemeral: true });
         return;
       }
 
       if (interaction.customId === 'socials_add_modal' || interaction.customId === 'socials_edit_modal') {
-        if (!canManageSocials(interaction.member, data)) {
+        const allowed = interaction.customId === 'socials_add_modal'
+          ? canUseSocialsCommand(interaction.member)
+          : canManageSocials(interaction.member, data);
+        if (!allowed) {
           await interaction.reply({ content: '❌ Du darfst die Socials nicht verwalten.', ephemeral: true });
           return;
         }
@@ -3294,7 +3311,7 @@ client.on(Events.InteractionCreate, async interaction => {
         .addFields(
           { name: '🌐 Socials', value: '`/socials` `/editsocials` `/removesocial` `/deletesocials` `/socialinfo` `/sociallist` `/mysocials` `/refreshsocials`' },
           { name: '🎫 Tickets & Verify', value: '`/ticketpanel` `/ticket` `/verificationpanel`' },
-          { name: '🛡️ Moderation', value: '`/warn` `/warnings` `/clearwarnings` `/timeout` `/untimeout` `/kick` `/ban` `/unban` `/unbanall` `/purge` `/slowmode` `/lock` `/unlock`' },
+          { name: '🛡️ Moderation', value: '`/warn` `/warnings` `/clearwarnings` `/timeout` `/untimeout` `/kick` `/ban` `/unban` `/unbanall` `/clear` `/purge` `/slowmode` `/lock` `/unlock`' },
           { name: '📣 Community', value: '`/announce` `/embed` `/poll` `/suggest` `/giveaway`' },
           { name: 'ℹ️ Info', value: '`/serverinfo` `/userinfo` `/avatar` `/ping`' },
           { name: '📨 Bewerbungen & Rollen', value: '`/applicationpanel` `/applicationlist` `/rolepanel`' },
@@ -4517,7 +4534,7 @@ client.on(Events.InteractionCreate, async interaction => {
       saveData(data);
       const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('anonymous_open').setLabel('Anonyme Nachricht senden').setEmoji('📮').setStyle(ButtonStyle.Primary));
       await interaction.channel.send({
-        embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle('📮 Anonyme Nachrichtenbox').setDescription('Möchtest du Feedback, eine Frage oder ein Anliegen senden? Dein Name wird in der Nachricht **nicht angezeigt**.\n\nZum Schutz vor Missbrauch speichert der Bot die Discord-ID. Nur berechtigte Teammitglieder können sie bei Bedarf prüfen.')],
+        embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle('📮 Anonyme Nachrichtenbox').setDescription('Möchtest du Feedback, eine Frage oder ein Anliegen senden? Dein Name wird in der Nachricht **nicht öffentlich angezeigt**.\n\nZum Schutz vor Missbrauch wird dein Absender im **Team-Log** angezeigt.')],
         components: [row],
       });
       await interaction.reply({ content: `✅ Panel erstellt. Nachrichten landen in <#${inbox.id}>.`, ephemeral: true });
@@ -4843,7 +4860,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     // ---------- MODERATION ----------
-    const moderationCommands = new Set(['warn', 'warnings', 'clearwarnings', 'timeout', 'untimeout', 'kick', 'ban', 'unban', 'unbanall', 'purge', 'slowmode', 'lock', 'unlock']);
+    const moderationCommands = new Set(['warn', 'warnings', 'clearwarnings', 'timeout', 'untimeout', 'kick', 'ban', 'unban', 'unbanall', 'clear', 'purge', 'slowmode', 'lock', 'unlock']);
     if (moderationCommands.has(command) && !canModerate(interaction.member, data)) {
       await interaction.reply({ content: '❌ Du darfst diese Moderationsfunktion nicht verwenden.', ephemeral: true });
       return;
@@ -4974,7 +4991,7 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
-    if (command === 'purge') {
+    if (command === 'clear' || command === 'purge') {
       const amount = interaction.options.getInteger('anzahl');
       const deleted = await interaction.channel.bulkDelete(amount, true);
       await interaction.reply({ content: `🧹 **${deleted.size}** Nachrichten gelöscht.`, ephemeral: true });
@@ -5001,7 +5018,10 @@ client.on(Events.InteractionCreate, async interaction => {
 
     // ---------- SOCIALS ----------
     if (command === 'socials' || command === 'editsocials') {
-      if (!canManageSocials(interaction.member, data)) {
+      const allowed = command === 'socials'
+        ? canUseSocialsCommand(interaction.member)
+        : canManageSocials(interaction.member, data);
+      if (!allowed) {
         await interaction.reply({ content: '❌ Du darfst die Socials nicht verwalten.', ephemeral: true });
         return;
       }
