@@ -1,8 +1,20 @@
-# Unfug Community Bot – All-in-One v6
+# Unfug Community Bot – All-in-One v7
 
-Diese Version baut auf v5 auf und enthält zusätzlich ein vollständiges Engagement-System für größere Community-Discords.
+Diese Version baut auf v6 auf und ergänzt das Engagement-System um ein vollständiges, editierbares Regelwerk-System.
 
-## Neu in v6
+
+## Neu in v7 – `/regelwerk`
+
+- `/regelwerk anzeigen` – zeigt das aktuelle Regelwerk privat an
+- `/regelwerk bearbeiten` – öffnet einen Editor für Titel, Regeln und Footer
+- `/regelwerk posten [channel]` – veröffentlicht das Regelwerk oder aktualisiert den bestehenden Regelwerk-Post
+- `/regelwerk reset` – setzt auf das Regelwerk des aktuell installierten Server-Designs zurück
+- Beim Bearbeiten wird ein bereits veröffentlichter Regelwerk-Post automatisch aktualisiert
+- `/setupserver` speichert den angelegten Regelwerk-Channel automatisch
+- `/setup channel typ:Regelwerk` kann einen bestehenden Regelwerk-Channel manuell verbinden
+- Bearbeiten/Posten/Reset benötigen **Server verwalten** oder Administrator; Anzeigen ist für alle möglich
+
+## Engagement-System aus v6
 
 ### Daily + Streaks
 - `/daily`

@@ -134,6 +134,7 @@ function defaultData() {
     version: 9,
     config: {
       welcomeChannelId: null,
+      rulesChannelId: null,
       leaveChannelId: null,
       logChannelId: null,
       suggestionsChannelId: null,
@@ -252,6 +253,15 @@ function defaultData() {
       options: [],
       panelMessageId: null,
     },
+    rulebook: {
+      title: '📕 COMMUNITY REGELWERK',
+      text: '',
+      footer: 'Mit Nutzung des Servers akzeptierst du das Regelwerk.',
+      updatedBy: null,
+      updatedAt: null,
+      messageId: null,
+      channelId: null,
+    },
     serverBackups: {},
     setupHistory: {},
     engagement: {
@@ -366,6 +376,10 @@ function normalizeData(raw) {
     options: Array.isArray(raw?.interests?.options) ? raw.interests.options : [],
     panelMessageId: raw?.interests?.panelMessageId || null,
   };
+  base.rulebook = {
+    ...base.rulebook,
+    ...(raw?.rulebook && typeof raw.rulebook === 'object' ? raw.rulebook : {}),
+  };
   base.serverBackups = raw?.serverBackups && typeof raw.serverBackups === 'object' ? raw.serverBackups : {};
   base.setupHistory = raw?.setupHistory && typeof raw.setupHistory === 'object' ? raw.setupHistory : {};
   base.engagement = {
@@ -386,7 +400,7 @@ function normalizeData(raw) {
     },
     activityPanelMessageId: raw?.engagement?.activityPanelMessageId || null,
   };
-  base.version = 9;
+  base.version = 10;
   return base;
 }
 
@@ -453,7 +467,7 @@ function saveData(data) {
   const cleanGuildData = JSON.parse(JSON.stringify(data));
   delete cleanGuildData.guilds;
   root.guilds[guildId] = cleanGuildData;
-  root.version = Math.max(Number(root.version) || 0, Number(cleanGuildData.version) || 0, 9);
+  root.version = Math.max(Number(root.version) || 0, Number(cleanGuildData.version) || 0, 10);
   writeDataFile(root);
 }
 
@@ -558,6 +572,111 @@ function isGuildOwner(interaction) {
 function canUsePremiumSetup(interaction) {
   if (!isGuildOwner(interaction)) return false;
   return PREMIUM_GUILD_IDS.includes(interaction.guild.id) || MASTER_USER_IDS.includes(interaction.user.id);
+}
+
+function defaultRulebookForTemplate(templateId = '1') {
+  if (String(templateId) === '2') {
+    return {
+      title: '🔥 REDLINE • REGELWERK',
+      text: [
+        '**01 • Respekt** — Community-Mitglieder werden respektvoll behandelt. Persönlicher Stress gehört nicht in öffentliche Channels.',
+        '**02 • Kein Spam** — Keine Werbung, Mass-Pings, unnötiger Chat-Spam oder absichtliches Stören von Voice-Channels.',
+        '**03 • Fair Play** — Cheats, Exploits, Ban-Evasion oder andere unerlaubte Hilfsmittel werden innerhalb der Community nicht unterstützt.',
+        '**04 • Serverregeln gelten** — Auf jedem FiveM-Server gelten zusätzlich die Regeln des jeweiligen Projekts.',
+        '**05 • Intern bleibt intern** — Keine Leaks aus internen Channels, Voice-Gesprächen, Tickets oder Team-Bereichen.',
+        '**06 • Kein Rufschaden** — Wer unter dem Community-Namen auftritt, soll die Community nicht absichtlich in unnötigen Stress oder Sanktionen ziehen.',
+        '**07 • Support statt Drama** — Konflikte und Beschwerden werden über Tickets oder das Management geklärt.',
+      ].join('\n\n'),
+      footer: 'REDLINE • Regelwerk kann vom Management jederzeit angepasst werden.',
+    };
+  }
+  if (String(templateId) === '3') {
+    return {
+      title: 'RULES',
+      text: [
+        '**01**  Respect other members.',
+        '**02**  No spam, unnecessary pings or advertising.',
+        '**03**  No cheats, exploits or ban evasion.',
+        '**04**  Follow the rules of every FiveM server you play on.',
+        '**05**  Keep private/internal information private.',
+        '**06**  Staff decisions belong in support, not public chat.',
+      ].join('\n\n'),
+      footer: 'MINIMAL ELITE • Rules may be updated at any time.',
+    };
+  }
+  if (String(templateId) === '4') {
+    return {
+      title: '⚜️ UNFUGSTIFTER • REGELWERK',
+      text: [
+        '**1. Community zuerst** — Intern respektvoll bleiben und persönlichen Streit nicht in öffentliche Bereiche ziehen.',
+        '**2. Kein Spam / keine Fremdwerbung** — Mass-Pings, Spam und Werbung ohne Freigabe sind untersagt.',
+        '**3. Keine unerlaubten Hilfsmittel** — Cheats, Exploits, Ban-Evasion und vergleichbare Umgehungen werden nicht unterstützt.',
+        '**4. Fremde Serverregeln gelten** — Wer als Unfugstifter auf anderen FiveM-Servern spielt, hält deren jeweilige Regeln ein.',
+        '**5. Keine Leaks** — Interne Informationen, Tickets, Team-Channels und vertrauliche Inhalte bleiben intern.',
+        '**6. Name & Auftreten** — Der Community-Name darf nicht für Scams, Fake-Giveaways oder absichtlichen Rufschaden genutzt werden.',
+        '**7. Entscheidungen** — Beschwerden gegen Member oder Teamentscheidungen werden über den Support geklärt.',
+      ].join('\n\n'),
+      footer: 'UNFUGSTIFTER • Änderungen durch Inhaber / Management vorbehalten.',
+    };
+  }
+  return {
+    title: '📕 COMMUNITY REGELWERK',
+    text: [
+      '**1. Respekt** — Kein unnötiger Stress, Beleidigungen oder Provokationen gegen Community-Mitglieder.',
+      '**2. Kein Spam** — Keine Werbung, Mass-Pings oder Chat-Spam.',
+      '**3. Fair Play** — Keine Cheats, Exploits oder unerlaubten Hilfsmittel.',
+      '**4. Serverregeln gelten** — Auf jedem FiveM-Server gelten zusätzlich dessen eigene Regeln.',
+      '**5. Interne Sachen bleiben intern** — Keine Leaks aus Team- oder Community-Bereichen.',
+      '**6. Support statt Drama** — Probleme werden über Tickets und nicht im Main-Chat geklärt.',
+    ].join('\n\n'),
+    footer: 'Das Team kann das Regelwerk jederzeit ergänzen.',
+  };
+}
+
+function currentRulebook(data) {
+  const fallback = defaultRulebookForTemplate(data?.config?.setupTemplateId || '1');
+  const stored = data?.rulebook || {};
+  return {
+    title: String(stored.title || fallback.title).slice(0, 256),
+    text: String(stored.text || fallback.text).slice(0, 4096),
+    footer: String(stored.footer || fallback.footer).slice(0, 2048),
+  };
+}
+
+function buildRulebookEmbed(guild, data) {
+  const book = currentRulebook(data);
+  const color = data?.config?.setupThemeColor || 0x5865f2;
+  const embed = new EmbedBuilder()
+    .setColor(color)
+    .setTitle(book.title)
+    .setDescription(book.text)
+    .setFooter({ text: book.footer })
+    .setTimestamp();
+  const icon = guild?.iconURL?.({ size: 256 });
+  if (icon) embed.setThumbnail(icon);
+  return embed;
+}
+
+async function publishRulebookMessage(guild, data, channel, { forceNew = false } = {}) {
+  if (!channel?.isTextBased()) throw new Error('RULEBOOK_CHANNEL_INVALID');
+
+  let message = null;
+  if (!forceNew && data.rulebook?.messageId && data.rulebook?.channelId === channel.id) {
+    message = await channel.messages.fetch(data.rulebook.messageId).catch(() => null);
+  }
+
+  const payload = { embeds: [buildRulebookEmbed(guild, data)], allowedMentions: { parse: [] } };
+  if (message) {
+    await message.edit(payload);
+  } else {
+    message = await channel.send(payload);
+  }
+
+  data.rulebook.messageId = message.id;
+  data.rulebook.channelId = channel.id;
+  data.config.rulesChannelId = channel.id;
+  saveData(data);
+  return message;
 }
 
 function setupRole(name, key, options = {}) {
@@ -1029,6 +1148,7 @@ function applySetupConfig(data, created, templateId) {
   const c = data.config;
 
   c.welcomeChannelId = channelMap.welcome?.id || null;
+  c.rulesChannelId = channelMap.rules?.id || null;
   c.leaveChannelId = channelMap.welcome?.id || null;
   c.logChannelId = channelMap.logs?.id || null;
   c.suggestionsChannelId = channelMap.suggestions?.id || null;
@@ -1061,6 +1181,16 @@ function applySetupConfig(data, created, templateId) {
   c.engagementChannelId = channelMap.activity?.id || channelMap.general?.id || null;
   c.setupTemplateId = templateId;
   c.setupThemeColor = SERVER_SETUP_TEMPLATES[templateId]?.color || 0x5865f2;
+
+  const freshRulebook = defaultRulebookForTemplate(templateId);
+  data.rulebook = {
+    ...data.rulebook,
+    ...freshRulebook,
+    updatedBy: null,
+    updatedAt: Date.now(),
+    messageId: null,
+    channelId: c.rulesChannelId,
+  };
 
   data.socials.messageIds = [];
   data.interests.panelMessageId = null;
@@ -1135,29 +1265,7 @@ async function publishSetupPanels(guild, data, created, templateId) {
   }
 
   if (channelMap.rules?.isTextBased()) {
-    const rules = templateId === '3'
-      ? [
-          '**01**  Respect other members.',
-          '**02**  No spam, unnecessary pings or advertising.',
-          '**03**  Follow the rules of every FiveM server you play on.',
-          '**04**  Keep private/internal information private.',
-          '**05**  Staff decisions belong in support, not public chat.',
-        ].join('\n\n')
-      : [
-          '**1. Respekt** — Kein unnötiger Stress, Beleidigungen oder Provokationen gegen Community-Mitglieder.',
-          '**2. Kein Spam** — Keine Werbung, Mass-Pings oder Chat-Spam.',
-          '**3. Serverregeln gelten** — Auf jedem FiveM-Server gelten zusätzlich dessen eigene Regeln.',
-          '**4. Interne Sachen bleiben intern** — Keine Leaks aus Team- oder Community-Bereichen.',
-          '**5. Support statt Drama** — Probleme werden über Tickets und nicht im Main-Chat geklärt.',
-        ].join('\n\n');
-    await channelMap.rules.send({
-      embeds: [new EmbedBuilder()
-        .setColor(color)
-        .setTitle(templateId === '3' ? 'RULES' : '📕 COMMUNITY REGELWERK')
-        .setDescription(rules)
-        .setFooter({ text: 'Das Team kann das Regelwerk jederzeit ergänzen.' })],
-      allowedMentions: { parse: [] },
-    }).catch(() => {});
+    await publishRulebookMessage(guild, data, channelMap.rules).catch(() => {});
   }
 
   if (templateId === '2' && channelMap.leaderboard?.isTextBased()) {
@@ -2964,6 +3072,17 @@ function buildCommands() {
       .addUserOption(o => o.setName('user').setDescription('Mitglied').setRequired(false)),
 
     new SlashCommandBuilder()
+      .setName('regelwerk')
+      .setDescription('Zeigt oder verwaltet das Community-Regelwerk.')
+      .addSubcommand(sub => sub.setName('anzeigen').setDescription('Zeigt das aktuelle Regelwerk.'))
+      .addSubcommand(sub => sub
+        .setName('posten')
+        .setDescription('Postet oder aktualisiert das Regelwerk in einem Channel.')
+        .addChannelOption(o => o.setName('channel').setDescription('Optionaler Regelwerk-Channel').setRequired(false).addChannelTypes(ChannelType.GuildText)))
+      .addSubcommand(sub => sub.setName('bearbeiten').setDescription('Öffnet einen Editor für Titel, Regeln und Footer.'))
+      .addSubcommand(sub => sub.setName('reset').setDescription('Setzt das Regelwerk auf das aktuelle Server-Design zurück.')),
+
+    new SlashCommandBuilder()
       .setName('daily')
       .setDescription('Holt deine tägliche Coin-Belohnung und erhöht deinen Streak.'),
     new SlashCommandBuilder()
@@ -3042,6 +3161,7 @@ function buildCommands() {
         .setDescription('Setzt einen Community-Channel.')
         .addStringOption(o => o.setName('typ').setDescription('Channel-Typ').setRequired(true).addChoices(
           { name: 'Welcome', value: 'welcome' },
+          { name: 'Regelwerk', value: 'rules' },
           { name: 'Leave', value: 'leave' },
           { name: 'Logs', value: 'logs' },
           { name: 'Suggestions', value: 'suggestions' },
@@ -4285,6 +4405,49 @@ client.on(Events.InteractionCreate, async interaction => {
 
     // ---------- MODALS ----------
     if (interaction.isModalSubmit()) {
+      if (interaction.customId === 'regelwerk_edit_modal') {
+        if (!interaction.inGuild() || !canSetup(interaction.member)) {
+          await interaction.reply({ content: '❌ Du brauchst **Server verwalten** oder Administrator.', ephemeral: true });
+          return;
+        }
+
+        const title = interaction.fields.getTextInputValue('regelwerk_title').trim();
+        const text = interaction.fields.getTextInputValue('regelwerk_text').trim();
+        const footer = interaction.fields.getTextInputValue('regelwerk_footer').trim();
+        if (!title || !text) {
+          await interaction.reply({ content: '❌ Titel und Regelwerk dürfen nicht leer sein.', ephemeral: true });
+          return;
+        }
+
+        data.rulebook.title = title.slice(0, 256);
+        data.rulebook.text = text.slice(0, 4096);
+        data.rulebook.footer = (footer || 'Das Team kann das Regelwerk jederzeit ergänzen.').slice(0, 2048);
+        data.rulebook.updatedBy = interaction.user.id;
+        data.rulebook.updatedAt = Date.now();
+        saveData(data);
+
+        let updatedExisting = false;
+        if (data.rulebook.messageId && data.rulebook.channelId) {
+          const channel = await interaction.guild.channels.fetch(data.rulebook.channelId).catch(() => null);
+          if (channel?.isTextBased()) {
+            const message = await channel.messages.fetch(data.rulebook.messageId).catch(() => null);
+            if (message) {
+              await message.edit({ embeds: [buildRulebookEmbed(interaction.guild, data)], allowedMentions: { parse: [] } }).catch(() => {});
+              updatedExisting = true;
+            }
+          }
+        }
+
+        await interaction.reply({
+          content: updatedExisting
+            ? '✅ Regelwerk gespeichert und der bestehende Regelwerk-Post wurde automatisch aktualisiert.'
+            : '✅ Regelwerk gespeichert. Mit `/regelwerk posten` kannst du es veröffentlichen.',
+          ephemeral: true,
+        });
+        await logEvent(interaction.guild, data, '📕 Regelwerk bearbeitet', `<@${interaction.user.id}> hat das Community-Regelwerk aktualisiert.`);
+        return;
+      }
+
       if (interaction.customId === 'verify_math_modal') {
         const key = `${interaction.guildId}:${interaction.user.id}`;
         const challenge = verifyChallenges.get(key);
@@ -4548,7 +4711,7 @@ client.on(Events.InteractionCreate, async interaction => {
           { name: '🌐 Socials', value: '`/socials` `/editsocials` `/removesocial` `/deletesocials` `/socialinfo` `/sociallist` `/mysocials` `/refreshsocials`' },
           { name: '🎫 Tickets & Verify', value: '`/ticketpanel` `/ticket` `/verificationpanel`' },
           { name: '🛡️ Moderation', value: '`/warn` `/warnings` `/clearwarnings` `/timeout` `/untimeout` `/kick` `/ban` `/unban` `/unbanall` `/clear` `/purge` `/slowmode` `/lock` `/unlock`' },
-          { name: '📣 Community', value: '`/announce` `/embed` `/poll` `/suggest` `/giveaway`' },
+          { name: '📣 Community', value: '`/regelwerk` `/announce` `/embed` `/poll` `/suggest` `/giveaway`' },
           { name: 'ℹ️ Info', value: '`/serverinfo` `/userinfo` `/avatar` `/ping`' },
           { name: '📨 Bewerbungen & Rollen', value: '`/applicationpanel` `/applicationlist` `/rolepanel`' },
           { name: '🛡️ Schutz & Voice', value: '`/automod` `/tempvoice` `/voice`' },
@@ -4611,6 +4774,95 @@ client.on(Events.InteractionCreate, async interaction => {
       const url = user.displayAvatarURL({ size: 1024, extension: 'png' });
       await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x111111).setTitle(`🖼️ Avatar • ${user.username}`).setImage(url)] });
       return;
+    }
+
+    if (command === 'regelwerk') {
+      const sub = interaction.options.getSubcommand();
+
+      if (sub === 'anzeigen') {
+        await interaction.reply({ embeds: [buildRulebookEmbed(interaction.guild, data)], ephemeral: true, allowedMentions: { parse: [] } });
+        return;
+      }
+
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Du brauchst **Server verwalten** oder Administrator, um das Regelwerk zu verwalten.', ephemeral: true });
+        return;
+      }
+
+      if (sub === 'bearbeiten') {
+        const book = currentRulebook(data);
+        const modal = new ModalBuilder().setCustomId('regelwerk_edit_modal').setTitle('Regelwerk bearbeiten');
+        const titleInput = new TextInputBuilder()
+          .setCustomId('regelwerk_title')
+          .setLabel('Titel')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(256)
+          .setValue(book.title.slice(0, 256));
+        const textInput = new TextInputBuilder()
+          .setCustomId('regelwerk_text')
+          .setLabel('Regeln (Discord-Markdown möglich)')
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMaxLength(4000)
+          .setValue(book.text.slice(0, 4000));
+        const footerInput = new TextInputBuilder()
+          .setCustomId('regelwerk_footer')
+          .setLabel('Footer')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setMaxLength(300)
+          .setValue(book.footer.slice(0, 300));
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(titleInput),
+          new ActionRowBuilder().addComponents(textInput),
+          new ActionRowBuilder().addComponents(footerInput),
+        );
+        await interaction.showModal(modal);
+        return;
+      }
+
+      if (sub === 'reset') {
+        const defaults = defaultRulebookForTemplate(data.config.setupTemplateId || '1');
+        data.rulebook = {
+          ...data.rulebook,
+          ...defaults,
+          updatedBy: interaction.user.id,
+          updatedAt: Date.now(),
+        };
+        saveData(data);
+
+        let updatedExisting = false;
+        if (data.rulebook.messageId && data.rulebook.channelId) {
+          const channel = await interaction.guild.channels.fetch(data.rulebook.channelId).catch(() => null);
+          if (channel?.isTextBased()) {
+            const message = await channel.messages.fetch(data.rulebook.messageId).catch(() => null);
+            if (message) {
+              await message.edit({ embeds: [buildRulebookEmbed(interaction.guild, data)], allowedMentions: { parse: [] } }).catch(() => {});
+              updatedExisting = true;
+            }
+          }
+        }
+        await interaction.reply({ content: updatedExisting ? '✅ Regelwerk zurückgesetzt und Post aktualisiert.' : '✅ Regelwerk auf das Design-Standardregelwerk zurückgesetzt.', ephemeral: true });
+        return;
+      }
+
+      if (sub === 'posten') {
+        const selected = interaction.options.getChannel('channel');
+        const configured = data.config.rulesChannelId
+          ? await interaction.guild.channels.fetch(data.config.rulesChannelId).catch(() => null)
+          : null;
+        const channel = selected || configured || interaction.channel;
+        if (!channel?.isTextBased()) {
+          await interaction.reply({ content: '❌ Kein gültiger Text-Channel für das Regelwerk gefunden.', ephemeral: true });
+          return;
+        }
+        await interaction.deferReply({ ephemeral: true });
+        const message = await publishRulebookMessage(interaction.guild, data, channel);
+        await interaction.editReply({ content: `✅ Regelwerk veröffentlicht/aktualisiert: ${message.url}` });
+        await logEvent(interaction.guild, data, '📕 Regelwerk veröffentlicht', `<@${interaction.user.id}> hat das Regelwerk in <#${channel.id}> veröffentlicht oder aktualisiert.`);
+        return;
+      }
     }
 
 
@@ -5063,6 +5315,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const channel = interaction.options.getChannel('channel');
         const map = {
           welcome: 'welcomeChannelId',
+          rules: 'rulesChannelId',
           leave: 'leaveChannelId',
           logs: 'logChannelId',
           suggestions: 'suggestionsChannelId',
@@ -5120,7 +5373,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const fmtCh = id => id ? `<#${id}>` : 'Nicht gesetzt';
         const fmtRole = id => id ? `<@&${id}>` : 'Nicht gesetzt';
         const embed = new EmbedBuilder().setColor(0x111111).setTitle('⚙️ Bot-Konfiguration').addFields(
-          { name: 'Basis-Channels', value: `Welcome: ${fmtCh(c.welcomeChannelId)}\nLeave: ${fmtCh(c.leaveChannelId)}\nLogs: ${fmtCh(c.logChannelId)}\nSuggestions: ${fmtCh(c.suggestionsChannelId)}\nGiveaways: ${fmtCh(c.giveawayChannelId)}\nSocials: ${fmtCh(c.socialsChannelId)}\nSocial Audit: ${fmtCh(c.socialAuditChannelId)}\nBewerbungen: ${fmtCh(c.applicationReviewChannelId)}\nTranskripte: ${fmtCh(c.ticketTranscriptChannelId)}\nAutoMod: ${fmtCh(c.automodLogChannelId)}` },
+          { name: 'Basis-Channels', value: `Welcome: ${fmtCh(c.welcomeChannelId)}\nRegelwerk: ${fmtCh(c.rulesChannelId)}\nLeave: ${fmtCh(c.leaveChannelId)}\nLogs: ${fmtCh(c.logChannelId)}\nSuggestions: ${fmtCh(c.suggestionsChannelId)}\nGiveaways: ${fmtCh(c.giveawayChannelId)}\nSocials: ${fmtCh(c.socialsChannelId)}\nSocial Audit: ${fmtCh(c.socialAuditChannelId)}\nBewerbungen: ${fmtCh(c.applicationReviewChannelId)}\nTranskripte: ${fmtCh(c.ticketTranscriptChannelId)}\nAutoMod: ${fmtCh(c.automodLogChannelId)}` },
           { name: 'Community-Channels', value: `Fragen: ${fmtCh(c.questionChannelId)}\nUmfragen: ${fmtCh(c.communityPollChannelId)}\nMitglied des Monats: ${fmtCh(c.memberOfMonthChannelId)}\nClips: ${fmtCh(c.clipChannelId)}\nMitspielersuche: ${fmtCh(c.lfgChannelId)}\nChallenges: ${fmtCh(c.challengeChannelId)}\nAnonyme Inbox: ${fmtCh(c.anonymousInboxChannelId)}\nInteressen: ${fmtCh(c.interestsChannelId)}` },
           { name: 'Rollen', value: `Verified: ${fmtRole(c.verifiedRoleId)}\nUnverified: ${fmtRole(c.unverifiedRoleId)}\nSupport: ${fmtRole(c.supportRoleId)}\nModerator: ${fmtRole(c.moderatorRoleId)}\nAnnouncements: ${fmtRole(c.announcementRoleId)}\nSocial Admin: ${fmtRole(c.socialAdminRoleId)}\nSocial Delete: ${fmtRole(c.socialDeleteRoleId)}\nBewerbung angenommen: ${fmtRole(c.applicationAcceptedRoleId)}\nMitglied des Monats: ${fmtRole(c.memberOfMonthRoleId)}` },
           { name: 'Tickets & Temp Voice', value: `Ticket-Kategorie: ${c.ticketCategoryId ? `<#${c.ticketCategoryId}>` : 'Nicht gesetzt'}\nVoice-Lobby: ${fmtCh(c.tempVoiceLobbyId)}\nVoice-Kategorie: ${fmtCh(c.tempVoiceCategoryId)}` },

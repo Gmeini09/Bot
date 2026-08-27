@@ -1,4 +1,14 @@
-# Unfug Community Bot v6 – Commands
+# Unfug Community Bot v7 – Commands
+
+
+## Regelwerk
+
+- `/regelwerk anzeigen` – aktuelles Regelwerk anzeigen
+- `/regelwerk bearbeiten` – Regelwerk per Modal bearbeiten
+- `/regelwerk posten [channel]` – Regelwerk posten bzw. vorhandenen Post aktualisieren
+- `/regelwerk reset` – Design-Standard wiederherstellen
+
+`bearbeiten`, `posten` und `reset` benötigen Server-verwalten oder Administrator.
 
 ## Coins & Aktivität
 
