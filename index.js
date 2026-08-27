@@ -131,7 +131,7 @@ const BADGES = {
 
 function defaultData() {
   return {
-    version: 6,
+    version: 8,
     config: {
       welcomeChannelId: null,
       leaveChannelId: null,
@@ -251,6 +251,8 @@ function defaultData() {
       options: [],
       panelMessageId: null,
     },
+    serverBackups: {},
+    setupHistory: {},
   };
 }
 
@@ -353,24 +355,77 @@ function normalizeData(raw) {
     options: Array.isArray(raw?.interests?.options) ? raw.interests.options : [],
     panelMessageId: raw?.interests?.panelMessageId || null,
   };
-  base.version = 6;
+  base.serverBackups = raw?.serverBackups && typeof raw.serverBackups === 'object' ? raw.serverBackups : {};
+  base.setupHistory = raw?.setupHistory && typeof raw.setupHistory === 'object' ? raw.setupHistory : {};
+  base.version = 8;
   return base;
 }
 
-function loadData() {
+function readRootData() {
   try {
-    if (!fs.existsSync(dataPath)) return defaultData();
-    return normalizeData(JSON.parse(fs.readFileSync(dataPath, 'utf8')));
+    if (!fs.existsSync(dataPath)) {
+      const fresh = defaultData();
+      fresh.guilds = {};
+      return fresh;
+    }
+    const raw = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
+    const root = normalizeData(raw);
+    root.guilds = raw?.guilds && typeof raw.guilds === 'object' ? raw.guilds : {};
+    return root;
   } catch (error) {
     console.error('⚠️ data.json konnte nicht gelesen werden:', error);
-    return defaultData();
+    const fresh = defaultData();
+    fresh.guilds = {};
+    return fresh;
   }
 }
 
-function saveData(data) {
+function guildDataSnapshot(root) {
+  const snapshot = { ...root };
+  delete snapshot.guilds;
+  return snapshot;
+}
+
+function loadData(guildId = null) {
+  const root = readRootData();
+  if (!guildId) return root;
+
+  let rawGuild = root.guilds[guildId];
+  if (!rawGuild) {
+    // Migration: Der erste Server übernimmt automatisch die bisherige
+    // Einzelserver-Konfiguration. Weitere Server starten sauber getrennt.
+    rawGuild = Object.keys(root.guilds).length === 0 ? guildDataSnapshot(root) : {};
+  }
+
+  const guildData = normalizeData(rawGuild);
+  Object.defineProperty(guildData, '__guildId', { value: String(guildId), enumerable: false });
+  Object.defineProperty(guildData, '__rootData', { value: root, enumerable: false });
+  return guildData;
+}
+
+function writeDataFile(data) {
   const temp = `${dataPath}.tmp`;
   fs.writeFileSync(temp, JSON.stringify(data, null, 2), 'utf8');
   fs.renameSync(temp, dataPath);
+}
+
+function saveData(data) {
+  const guildId = data?.__guildId;
+  if (!guildId) {
+    writeDataFile(data);
+    return;
+  }
+
+  // Immer den neuesten Root-Stand laden, damit parallele Aktionen auf
+  // verschiedenen Discord-Servern sich nicht gegenseitig überschreiben.
+  const root = readRootData();
+  if (!root.guilds || typeof root.guilds !== 'object') root.guilds = {};
+
+  const cleanGuildData = JSON.parse(JSON.stringify(data));
+  delete cleanGuildData.guilds;
+  root.guilds[guildId] = cleanGuildData;
+  root.version = Math.max(Number(root.version) || 0, Number(cleanGuildData.version) || 0, 8);
+  writeDataFile(root);
 }
 
 // ============================================================
@@ -462,6 +517,669 @@ function isAdministrator(member) {
 
 function canSetup(member) {
   return isAdministrator(member) || Boolean(member?.permissions?.has(PermissionFlagsBits.ManageGuild));
+}
+
+const PREMIUM_GUILD_IDS = idsFromEnv('PREMIUM_GUILD_IDS', []);
+const MASTER_USER_IDS = idsFromEnv('MASTER_USER_IDS', []);
+
+function isGuildOwner(interaction) {
+  return Boolean(interaction?.inGuild?.() && interaction.guild?.ownerId === interaction.user?.id);
+}
+
+function canUsePremiumSetup(interaction) {
+  if (!isGuildOwner(interaction)) return false;
+  return PREMIUM_GUILD_IDS.includes(interaction.guild.id) || MASTER_USER_IDS.includes(interaction.user.id);
+}
+
+function setupRole(name, key, options = {}) {
+  return { name, key, ...options };
+}
+
+function setupChannel(name, key, type = 'text', options = {}) {
+  return { name, key, type, ...options };
+}
+
+const SERVER_SETUP_TEMPLATES = {
+  '1': {
+    name: 'Clean Community',
+    color: 0x5865f2,
+    roles: [
+      setupRole('👑 Inhaber', 'owner', { permissions: ['Administrator'], hoist: true }),
+      setupRole('🧭 Management', 'management', { permissions: ['ManageGuild', 'ManageChannels', 'ManageRoles', 'ManageMessages', 'KickMembers', 'BanMembers'], hoist: true }),
+      setupRole('🛡️ Moderator', 'moderator', { permissions: ['ManageMessages', 'ModerateMembers', 'KickMembers'], hoist: true }),
+      setupRole('🎫 Support', 'support', { permissions: ['ManageMessages'], hoist: true }),
+      setupRole('🎥 Creator', 'creator', { hoist: true }),
+      setupRole('🤝 Partner', 'partner'),
+      setupRole('💜 Booster', 'booster'),
+      setupRole('🔔 Ankündigungen', 'announcement'),
+      setupRole('✅ Verifiziert', 'verified'),
+      setupRole('👤 Mitglied', 'member'),
+    ],
+    sections: [
+      { name: '━━ START ━━', key: 'start', channels: [
+        setupChannel('👋・willkommen', 'welcome'),
+        setupChannel('📜・regeln', 'rules', 'text', { readOnly: true }),
+        setupChannel('📢・ankündigungen', 'announcements', 'text', { readOnly: true }),
+        setupChannel('✅・verifizierung', 'verification'),
+        setupChannel('🏷️・rollen', 'interests'),
+      ]},
+      { name: '━━ COMMUNITY ━━', key: 'community', channels: [
+        setupChannel('💬・allgemein', 'general'),
+        setupChannel('📸・medien', 'media'),
+        setupChannel('🎬・clips', 'clips'),
+        setupChannel('💡・vorschläge', 'suggestions'),
+        setupChannel('🌐・socials', 'socials'),
+        setupChannel('🎉・giveaways', 'giveaways'),
+        setupChannel('🎮・mitspieler', 'lfg'),
+        setupChannel('📊・umfragen', 'polls'),
+      ]},
+      { name: '━━ VOICE ━━', key: 'voice', channels: [
+        setupChannel('➕・Voice erstellen', 'tempvoice', 'voice'),
+        setupChannel('🎮・Gaming', 'gamingvoice', 'voice'),
+        setupChannel('💬・Talk', 'talkvoice', 'voice'),
+      ]},
+      { name: '━━ SUPPORT ━━', key: 'supportcat', channels: [
+        setupChannel('🎫・ticket-erstellen', 'tickets'),
+        setupChannel('📨・bewerbungen', 'applications'),
+        setupChannel('📮・anonym', 'anonymous'),
+      ]},
+      { name: '━━ TEAM ━━', key: 'team', privateFor: ['owner', 'management', 'moderator', 'support'], channels: [
+        setupChannel('🧭・team-chat', 'teamchat'),
+        setupChannel('📋・logs', 'logs'),
+        setupChannel('🛡️・automod-logs', 'automodlogs'),
+        setupChannel('📄・transkripte', 'transcripts'),
+        setupChannel('🌐・social-audit', 'socialaudit'),
+        setupChannel('📥・anonyme-inbox', 'anonymousinbox'),
+      ]},
+    ],
+  },
+  '2': {
+    name: 'Gambo / Szene',
+    color: 0xe74c3c,
+    roles: [
+      setupRole('👑 Owner', 'owner', { permissions: ['Administrator'], hoist: true }),
+      setupRole('🔱 Leitung', 'management', { permissions: ['ManageGuild', 'ManageChannels', 'ManageRoles', 'ManageMessages', 'KickMembers', 'BanMembers'], hoist: true }),
+      setupRole('⚔️ Management', 'moderator', { permissions: ['ManageMessages', 'ModerateMembers', 'KickMembers'], hoist: true }),
+      setupRole('🧰 Support', 'support', { permissions: ['ManageMessages'], hoist: true }),
+      setupRole('🎯 Unfugstifter', 'elite', { hoist: true }),
+      setupRole('🎥 Content', 'creator', { hoist: true }),
+      setupRole('🤝 Partner', 'partner'),
+      setupRole('🔔 Ping', 'announcement'),
+      setupRole('✅ Verified', 'verified'),
+      setupRole('👤 Community', 'member'),
+    ],
+    sections: [
+      { name: '╭・INFORMATION', key: 'start', channels: [
+        setupChannel('・start-here', 'welcome'),
+        setupChannel('・regeln', 'rules', 'text', { readOnly: true }),
+        setupChannel('・news', 'announcements', 'text', { readOnly: true }),
+        setupChannel('・verify', 'verification'),
+      ]},
+      { name: '├・SZENE', key: 'scene', channels: [
+        setupChannel('・chat', 'general'),
+        setupChannel('・gambo-clips', 'clips'),
+        setupChannel('・screens', 'media'),
+        setupChannel('・fight-talk', 'fighttalk'),
+        setupChannel('・mitspieler', 'lfg'),
+        setupChannel('・socials', 'socials'),
+      ]},
+      { name: '├・COMMUNITY', key: 'community', channels: [
+        setupChannel('・events', 'events'),
+        setupChannel('・giveaways', 'giveaways'),
+        setupChannel('・vorschläge', 'suggestions'),
+        setupChannel('・abstimmungen', 'polls'),
+        setupChannel('・rollen', 'interests'),
+        setupChannel('・anonym', 'anonymous'),
+      ]},
+      { name: '├・VOICE', key: 'voice', channels: [
+        setupChannel('➕・erstellen', 'tempvoice', 'voice'),
+        setupChannel('🔫・Gambo 1', 'gamingvoice', 'voice'),
+        setupChannel('🔫・Gambo 2', 'gamingvoice2', 'voice'),
+        setupChannel('💤・Chill', 'talkvoice', 'voice'),
+      ]},
+      { name: '╰・SUPPORT', key: 'supportcat', channels: [
+        setupChannel('・ticket', 'tickets'),
+        setupChannel('・bewerbung', 'applications'),
+      ]},
+      { name: '🔒・INTERN', key: 'team', privateFor: ['owner', 'management', 'moderator', 'support'], channels: [
+        setupChannel('・leitung', 'teamchat'),
+        setupChannel('・logs', 'logs'),
+        setupChannel('・automod', 'automodlogs'),
+        setupChannel('・transkripte', 'transcripts'),
+        setupChannel('・social-audit', 'socialaudit'),
+        setupChannel('・anonymous-log', 'anonymousinbox'),
+      ]},
+    ],
+  },
+  '3': {
+    name: 'Minimal Elite',
+    color: 0x2b2d31,
+    roles: [
+      setupRole('👑 OWNER', 'owner', { permissions: ['Administrator'], hoist: true }),
+      setupRole('◆ MANAGEMENT', 'management', { permissions: ['ManageGuild', 'ManageChannels', 'ManageRoles', 'ManageMessages', 'KickMembers', 'BanMembers'], hoist: true }),
+      setupRole('◆ TEAM', 'moderator', { permissions: ['ManageMessages', 'ModerateMembers'], hoist: true }),
+      setupRole('◆ SUPPORT', 'support', { permissions: ['ManageMessages'], hoist: true }),
+      setupRole('◆ CREATOR', 'creator'),
+      setupRole('◆ VERIFIED', 'verified'),
+      setupRole('◆ MEMBER', 'member'),
+    ],
+    sections: [
+      { name: '00 — START', key: 'start', channels: [
+        setupChannel('welcome', 'welcome'),
+        setupChannel('rules', 'rules', 'text', { readOnly: true }),
+        setupChannel('announcements', 'announcements', 'text', { readOnly: true }),
+        setupChannel('verify', 'verification'),
+      ]},
+      { name: '01 — COMMUNITY', key: 'community', channels: [
+        setupChannel('general', 'general'),
+        setupChannel('media', 'media'),
+        setupChannel('clips', 'clips'),
+        setupChannel('socials', 'socials'),
+        setupChannel('suggestions', 'suggestions'),
+        setupChannel('giveaways', 'giveaways'),
+        setupChannel('lfg', 'lfg'),
+        setupChannel('roles', 'interests'),
+      ]},
+      { name: '02 — VOICE', key: 'voice', channels: [
+        setupChannel('Create Voice', 'tempvoice', 'voice'),
+        setupChannel('Gaming', 'gamingvoice', 'voice'),
+        setupChannel('Talk', 'talkvoice', 'voice'),
+      ]},
+      { name: '03 — SUPPORT', key: 'supportcat', channels: [
+        setupChannel('ticket', 'tickets'),
+        setupChannel('applications', 'applications'),
+        setupChannel('anonymous', 'anonymous'),
+      ]},
+      { name: '04 — STAFF', key: 'team', privateFor: ['owner', 'management', 'moderator', 'support'], channels: [
+        setupChannel('staff-chat', 'teamchat'),
+        setupChannel('logs', 'logs'),
+        setupChannel('automod-logs', 'automodlogs'),
+        setupChannel('transcripts', 'transcripts'),
+        setupChannel('social-audit', 'socialaudit'),
+        setupChannel('anonymous-inbox', 'anonymousinbox'),
+      ]},
+    ],
+  },
+  '4': {
+    name: 'UNFUGSTIFTER • Private Edition',
+    color: 0x8b5cf6,
+    premium: true,
+    roles: [
+      setupRole('👑・INHABER', 'owner', { permissions: ['Administrator'], hoist: true }),
+      setupRole('♛・CO-OWNER', 'coowner', { permissions: ['Administrator'], hoist: true }),
+      setupRole('⚜️・MANAGEMENT', 'management', { permissions: ['ManageGuild', 'ManageChannels', 'ManageRoles', 'ManageMessages', 'KickMembers', 'BanMembers', 'ModerateMembers'], hoist: true }),
+      setupRole('🛡️・MODERATION', 'moderator', { permissions: ['ManageMessages', 'ModerateMembers', 'KickMembers'], hoist: true }),
+      setupRole('🎫・SUPPORT', 'support', { permissions: ['ManageMessages'], hoist: true }),
+      setupRole('💎・UNFUGSTIFTER', 'elite', { hoist: true }),
+      setupRole('🎥・CREATOR', 'creator', { hoist: true }),
+      setupRole('🤝・PARTNER', 'partner'),
+      setupRole('💜・BOOSTER', 'booster'),
+      setupRole('🎉・EVENT PING', 'eventping'),
+      setupRole('🔔・NEWS PING', 'announcement'),
+      setupRole('🎁・GIVEAWAY PING', 'giveawayping'),
+      setupRole('🎮・FIVEM', 'interest_fivem'),
+      setupRole('🎯・GAMBO', 'interest_gambo'),
+      setupRole('✅・VERIFIZIERT', 'verified'),
+      setupRole('👤・COMMUNITY', 'member'),
+    ],
+    sections: [
+      { name: '╔═══〔 UNFUGSTIFTER 〕═══╗', key: 'start', channels: [
+        setupChannel('👋・willkommen', 'welcome'),
+        setupChannel('📜・regelwerk', 'rules', 'text', { readOnly: true }),
+        setupChannel('📣・ankündigungen', 'announcements', 'text', { readOnly: true }),
+        setupChannel('✅・verifizierung', 'verification'),
+        setupChannel('🏷️・rollen-auswahl', 'interests'),
+      ]},
+      { name: '╠══〔 COMMUNITY 〕══╣', key: 'community', channels: [
+        setupChannel('💬・community-chat', 'general'),
+        setupChannel('📸・media', 'media'),
+        setupChannel('🎬・clip-der-woche', 'clips'),
+        setupChannel('🌐・social-hub', 'socials'),
+        setupChannel('💡・vorschläge', 'suggestions'),
+        setupChannel('🎉・giveaways', 'giveaways'),
+        setupChannel('📊・community-polls', 'polls'),
+        setupChannel('❓・frage-des-tages', 'questions'),
+        setupChannel('🏆・mitglied-des-monats', 'membermonth'),
+        setupChannel('🤝・challenges', 'challenges'),
+      ]},
+      { name: '╠══〔 GAMBO / FIVEM 〕══╣', key: 'gambo', channels: [
+        setupChannel('🎯・gambo-talk', 'fighttalk'),
+        setupChannel('🎮・mitspieler-suche', 'lfg'),
+        setupChannel('📮・anonyme-box', 'anonymous'),
+        setupChannel('📅・events', 'events'),
+      ]},
+      { name: '╠══〔 VOICE 〕══╣', key: 'voice', channels: [
+        setupChannel('➕・eigenen-voice-erstellen', 'tempvoice', 'voice'),
+        setupChannel('🔫・Gambo 01', 'gamingvoice', 'voice'),
+        setupChannel('🔫・Gambo 02', 'gamingvoice2', 'voice'),
+        setupChannel('🎮・FiveM', 'fivemvoice', 'voice'),
+        setupChannel('💬・Talk', 'talkvoice', 'voice'),
+        setupChannel('💤・AFK', 'afkvoice', 'voice'),
+      ]},
+      { name: '╠══〔 SUPPORT 〕══╣', key: 'supportcat', channels: [
+        setupChannel('🎫・ticket-erstellen', 'tickets'),
+        setupChannel('📨・bewerbungen', 'applications'),
+      ]},
+      { name: '╚══〔 TEAM INTERN 〕══╝', key: 'team', privateFor: ['owner', 'coowner', 'management', 'moderator', 'support'], channels: [
+        setupChannel('👑・leitung', 'leadership'),
+        setupChannel('🛡️・team-chat', 'teamchat'),
+        setupChannel('📋・logs', 'logs'),
+        setupChannel('🤖・automod-logs', 'automodlogs'),
+        setupChannel('📄・ticket-transkripte', 'transcripts'),
+        setupChannel('🌐・social-audit', 'socialaudit'),
+        setupChannel('📥・anonyme-inbox', 'anonymousinbox'),
+        setupChannel('📨・bewerbungs-auswertung', 'applicationreview'),
+      ]},
+    ],
+  },
+};
+
+function permissionValues(names = []) {
+  return names.map(name => PermissionFlagsBits[name]).filter(value => value !== undefined);
+}
+
+function setupOverwriteList(guild, roleMap, section, channel) {
+  const list = [];
+  const privateFor = channel.privateFor || section.privateFor || null;
+  if (privateFor) {
+    list.push({ id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] });
+    for (const key of privateFor) {
+      const role = roleMap[key];
+      if (!role) continue;
+      list.push({
+        id: role.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.Connect,
+          PermissionFlagsBits.Speak,
+        ],
+      });
+    }
+  } else if (channel.readOnly) {
+    list.push({
+      id: guild.roles.everyone.id,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+      deny: [PermissionFlagsBits.SendMessages],
+    });
+    for (const key of ['owner', 'coowner', 'management', 'moderator', 'support']) {
+      const role = roleMap[key];
+      if (!role) continue;
+      list.push({
+        id: role.id,
+        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
+      });
+    }
+  }
+  return list;
+}
+
+function backupPermissionOverwrites(channel) {
+  return [...channel.permissionOverwrites.cache.values()].map(overwrite => ({
+    id: overwrite.id,
+    type: overwrite.type,
+    allow: overwrite.allow.bitfield.toString(),
+    deny: overwrite.deny.bitfield.toString(),
+  }));
+}
+
+async function captureServerBackup(guild, data, label = 'manual') {
+  await guild.roles.fetch().catch(() => {});
+  await guild.channels.fetch().catch(() => {});
+
+  const roles = guild.roles.cache
+    .filter(role => role.id !== guild.id && !role.managed)
+    .sort((a, b) => a.position - b.position)
+    .map(role => ({
+      id: role.id,
+      name: role.name,
+      color: role.color,
+      hoist: role.hoist,
+      mentionable: role.mentionable,
+      permissions: role.permissions.bitfield.toString(),
+      position: role.position,
+    }));
+
+  const channels = guild.channels.cache
+    .sort((a, b) => a.rawPosition - b.rawPosition)
+    .map(channel => ({
+      id: channel.id,
+      name: channel.name,
+      type: channel.type,
+      parentId: channel.parentId || null,
+      position: channel.rawPosition,
+      topic: 'topic' in channel ? channel.topic || null : null,
+      nsfw: 'nsfw' in channel ? Boolean(channel.nsfw) : false,
+      rateLimitPerUser: 'rateLimitPerUser' in channel ? channel.rateLimitPerUser || 0 : 0,
+      userLimit: 'userLimit' in channel ? channel.userLimit || 0 : 0,
+      bitrate: 'bitrate' in channel ? channel.bitrate || null : null,
+      permissionOverwrites: backupPermissionOverwrites(channel),
+    }));
+
+  return {
+    id: createShortId('backup_'),
+    label,
+    guildId: guild.id,
+    guildName: guild.name,
+    createdAt: Date.now(),
+    roles,
+    channels,
+    botConfig: { ...(data.config || {}) },
+  };
+}
+
+function pushServerBackup(data, guildId, backup) {
+  if (!data.serverBackups[guildId]) data.serverBackups[guildId] = [];
+  data.serverBackups[guildId].unshift(backup);
+  data.serverBackups[guildId] = data.serverBackups[guildId].slice(0, 5);
+}
+
+async function deleteExistingServerStructure(guild, keepChannelId = null) {
+  const skippedRoles = [];
+  const failedChannels = [];
+  const botMember = guild.members.me;
+
+  const channels = [...guild.channels.cache.values()]
+    .filter(channel => channel.id !== keepChannelId)
+    .sort((a, b) => {
+      if (a.type === ChannelType.GuildCategory && b.type !== ChannelType.GuildCategory) return 1;
+      if (a.type !== ChannelType.GuildCategory && b.type === ChannelType.GuildCategory) return -1;
+      return b.rawPosition - a.rawPosition;
+    });
+
+  for (const channel of channels) {
+    await channel.delete('Server Setup Bot: altes Design entfernen').catch(() => failedChannels.push(channel.name));
+  }
+
+  const roles = [...guild.roles.cache.values()]
+    .filter(role => role.id !== guild.id && !role.managed)
+    .sort((a, b) => b.position - a.position);
+
+  for (const role of roles) {
+    if (!botMember || botMember.roles.highest.comparePositionTo(role) <= 0) {
+      skippedRoles.push(role.name);
+      continue;
+    }
+    await role.delete('Server Setup Bot: alte Rolle entfernen').catch(() => skippedRoles.push(role.name));
+  }
+
+  return { skippedRoles: [...new Set(skippedRoles)], failedChannels: [...new Set(failedChannels)] };
+}
+
+async function createTemplateStructure(guild, template) {
+  const roleMap = {};
+  const channelMap = {};
+  const categoryMap = {};
+
+  for (const def of template.roles) {
+    const role = await guild.roles.create({
+      name: def.name,
+      color: def.color ?? template.color,
+      hoist: Boolean(def.hoist),
+      mentionable: Boolean(def.mentionable),
+      permissions: permissionValues(def.permissions || []),
+      reason: `Server Setup ${template.name}`,
+    });
+    roleMap[def.key] = role;
+  }
+
+  const ownerMember = await guild.members.fetch(guild.ownerId).catch(() => null);
+  if (ownerMember && roleMap.owner && guild.members.me?.roles.highest.comparePositionTo(roleMap.owner) > 0) {
+    await ownerMember.roles.add(roleMap.owner, 'Server Setup: Inhaber-Rolle').catch(() => {});
+  }
+
+  for (const section of template.sections) {
+    const category = await guild.channels.create({
+      name: section.name,
+      type: ChannelType.GuildCategory,
+      permissionOverwrites: setupOverwriteList(guild, roleMap, section, {}),
+      reason: `Server Setup ${template.name}`,
+    });
+    categoryMap[section.key] = category;
+    channelMap[`category_${section.key}`] = category;
+
+    for (const def of section.channels) {
+      const type = def.type === 'voice' ? ChannelType.GuildVoice : ChannelType.GuildText;
+      const channel = await guild.channels.create({
+        name: def.name,
+        type,
+        parent: category.id,
+        topic: type === ChannelType.GuildText ? (def.topic || null) : undefined,
+        permissionOverwrites: setupOverwriteList(guild, roleMap, section, def),
+        reason: `Server Setup ${template.name}`,
+      });
+      channelMap[def.key] = channel;
+    }
+  }
+
+  return { roleMap, channelMap, categoryMap };
+}
+
+function applySetupConfig(data, created, templateId) {
+  const { roleMap, channelMap } = created;
+  const c = data.config;
+
+  c.welcomeChannelId = channelMap.welcome?.id || null;
+  c.leaveChannelId = channelMap.welcome?.id || null;
+  c.logChannelId = channelMap.logs?.id || null;
+  c.suggestionsChannelId = channelMap.suggestions?.id || null;
+  c.giveawayChannelId = channelMap.giveaways?.id || null;
+  c.socialsChannelId = channelMap.socials?.id || null;
+  c.socialAuditChannelId = channelMap.socialaudit?.id || channelMap.logs?.id || null;
+  c.ticketCategoryId = channelMap.category_supportcat?.id || null;
+  c.verifiedRoleId = roleMap.verified?.id || null;
+  c.unverifiedRoleId = null;
+  c.supportRoleId = roleMap.support?.id || null;
+  c.moderatorRoleId = roleMap.moderator?.id || null;
+  c.announcementRoleId = roleMap.announcement?.id || null;
+  c.socialAdminRoleId = roleMap.management?.id || roleMap.moderator?.id || null;
+  c.socialDeleteRoleId = roleMap.management?.id || roleMap.moderator?.id || null;
+  c.applicationReviewChannelId = channelMap.applicationreview?.id || channelMap.applications?.id || null;
+  c.applicationAcceptedRoleId = roleMap.member?.id || null;
+  c.ticketTranscriptChannelId = channelMap.transcripts?.id || channelMap.logs?.id || null;
+  c.automodLogChannelId = channelMap.automodlogs?.id || channelMap.logs?.id || null;
+  c.tempVoiceLobbyId = channelMap.tempvoice?.id || null;
+  c.tempVoiceCategoryId = channelMap.category_voice?.id || null;
+  c.questionChannelId = channelMap.questions?.id || channelMap.general?.id || null;
+  c.communityPollChannelId = channelMap.polls?.id || channelMap.general?.id || null;
+  c.memberOfMonthChannelId = channelMap.membermonth?.id || channelMap.announcements?.id || null;
+  c.memberOfMonthRoleId = null;
+  c.clipChannelId = channelMap.clips?.id || null;
+  c.lfgChannelId = channelMap.lfg?.id || null;
+  c.challengeChannelId = channelMap.challenges?.id || channelMap.general?.id || null;
+  c.anonymousInboxChannelId = channelMap.anonymousinbox?.id || channelMap.logs?.id || null;
+  c.interestsChannelId = channelMap.interests?.id || null;
+
+  data.socials.messageIds = [];
+  data.interests.panelMessageId = null;
+  data.giveaways = {};
+  data.events = {};
+  data.lfg = {};
+  data.challenges = {};
+  data.games.channels = {};
+  data.games.quizzes = {};
+  data.clips.submissions = {};
+  data.clips.activeWeek = null;
+
+  if (templateId === '4') {
+    data.automod.enabled = true;
+    data.dailyQuestions.enabled = Boolean(c.questionChannelId);
+    data.dailyQuestions.hour = 12;
+    data.dailyQuestions.questions = data.dailyQuestions.questions?.length ? data.dailyQuestions.questions : [...DEFAULT_DAILY_QUESTIONS];
+    data.communityPolls.enabled = Boolean(c.communityPollChannelId);
+    data.communityPolls.cadence = 'weekly';
+    data.communityPolls.hour = 18;
+    data.communityPolls.weekday = 5;
+    data.communityPolls.templates = data.communityPolls.templates?.length ? data.communityPolls.templates : [...DEFAULT_COMMUNITY_POLLS];
+    data.memberOfMonth.enabled = Boolean(c.memberOfMonthChannelId);
+    data.clips.enabled = Boolean(c.clipChannelId);
+    data.clips.activeWeek = isoWeekKey();
+    data.interests.options = [
+      roleMap.interest_fivem ? { label: 'FiveM', roleId: roleMap.interest_fivem.id } : null,
+      roleMap.interest_gambo ? { label: 'Gambo', roleId: roleMap.interest_gambo.id } : null,
+      roleMap.eventping ? { label: 'Events', roleId: roleMap.eventping.id } : null,
+      roleMap.giveawayping ? { label: 'Giveaways', roleId: roleMap.giveawayping.id } : null,
+    ].filter(Boolean);
+  } else {
+    data.interests.options = [];
+  }
+}
+
+async function publishSetupPanels(guild, data, created, templateId) {
+  const { channelMap } = created;
+
+  if (channelMap.verification?.isTextBased() && data.config.verifiedRoleId) {
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('verify_start').setLabel('Verifizieren').setEmoji('✅').setStyle(ButtonStyle.Success),
+    );
+    await channelMap.verification.send({
+      embeds: [new EmbedBuilder()
+        .setColor(SERVER_SETUP_TEMPLATES[templateId].color)
+        .setTitle('✅ Verifizierung')
+        .setDescription('Drücke auf **Verifizieren** und löse die kleine Rechenaufgabe.')],
+      components: [row],
+    }).catch(() => {});
+  }
+
+  if (channelMap.tickets?.isTextBased()) {
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('ticket_create').setLabel('Ticket erstellen').setEmoji('🎫').setStyle(ButtonStyle.Primary),
+    );
+    await channelMap.tickets.send({
+      embeds: [new EmbedBuilder()
+        .setColor(SERVER_SETUP_TEMPLATES[templateId].color)
+        .setTitle('🎫 Support')
+        .setDescription('Benötigst du Hilfe? Drücke unten auf **Ticket erstellen**.')],
+      components: [row],
+    }).catch(() => {});
+  }
+
+  if (channelMap.anonymous?.isTextBased()) {
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('anonymous_open').setLabel('Anonyme Nachricht senden').setEmoji('📮').setStyle(ButtonStyle.Primary),
+    );
+    await channelMap.anonymous.send({
+      embeds: [new EmbedBuilder()
+        .setColor(SERVER_SETUP_TEMPLATES[templateId].color)
+        .setTitle('📮 Anonyme Nachrichtenbox')
+        .setDescription('Sende Feedback oder Anliegen anonym an das Team. Zum Schutz vor Missbrauch wird der Absender intern protokolliert.')],
+      components: [row],
+    }).catch(() => {});
+  }
+
+  if (channelMap.socials?.isTextBased()) {
+    await updateSocialPanel(guild, data).catch(() => {});
+  }
+
+  if (channelMap.interests?.isTextBased()) {
+    await updateInterestPanel(guild, data, channelMap.interests).catch(() => {});
+  }
+
+  if (channelMap.logs?.isTextBased()) {
+    await channelMap.logs.send({
+      embeds: [new EmbedBuilder()
+        .setColor(SERVER_SETUP_TEMPLATES[templateId].color)
+        .setTitle('✅ Server Setup abgeschlossen')
+        .setDescription(`Design **${templateId} – ${SERVER_SETUP_TEMPLATES[templateId].name}** wurde eingerichtet.\n\nDer Bot hat Rollen, Kategorien, Channels und Kern-Panels erstellt.`)
+        .setTimestamp()],
+    }).catch(() => {});
+  }
+}
+
+function remapId(value, roleIdMap, channelIdMap) {
+  if (!value) return null;
+  return roleIdMap[value]?.id || channelIdMap[value]?.id || null;
+}
+
+async function restoreServerBackup(guild, data, backup) {
+  const roleIdMap = {};
+  const channelIdMap = {};
+  const botMember = guild.members.me;
+
+  for (const oldRole of [...backup.roles].sort((a, b) => a.position - b.position)) {
+    const role = await guild.roles.create({
+      name: oldRole.name,
+      color: oldRole.color,
+      hoist: oldRole.hoist,
+      mentionable: oldRole.mentionable,
+      permissions: BigInt(oldRole.permissions || '0'),
+      reason: `Restore Backup ${backup.id}`,
+    }).catch(() => null);
+    if (role) roleIdMap[oldRole.id] = role;
+  }
+
+  roleIdMap[guild.id] = guild.roles.everyone;
+
+  const mapOverwrites = source => (source || []).map(overwrite => {
+    const mappedRole = roleIdMap[overwrite.id];
+    const targetId = mappedRole?.id || overwrite.id;
+    return {
+      id: targetId,
+      type: overwrite.type,
+      allow: BigInt(overwrite.allow || '0'),
+      deny: BigInt(overwrite.deny || '0'),
+    };
+  });
+
+  const categories = backup.channels.filter(ch => ch.type === ChannelType.GuildCategory).sort((a, b) => a.position - b.position);
+  for (const oldChannel of categories) {
+    const channel = await guild.channels.create({
+      name: oldChannel.name,
+      type: ChannelType.GuildCategory,
+      permissionOverwrites: mapOverwrites(oldChannel.permissionOverwrites),
+      reason: `Restore Backup ${backup.id}`,
+    }).catch(() => null);
+    if (channel) channelIdMap[oldChannel.id] = channel;
+  }
+
+  const others = backup.channels.filter(ch => ch.type !== ChannelType.GuildCategory).sort((a, b) => a.position - b.position);
+  for (const oldChannel of others) {
+    const options = {
+      name: oldChannel.name,
+      type: oldChannel.type,
+      parent: oldChannel.parentId ? channelIdMap[oldChannel.parentId]?.id : undefined,
+      permissionOverwrites: mapOverwrites(oldChannel.permissionOverwrites),
+      reason: `Restore Backup ${backup.id}`,
+    };
+    if ([ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(oldChannel.type)) {
+      options.topic = oldChannel.topic || undefined;
+      options.nsfw = Boolean(oldChannel.nsfw);
+      options.rateLimitPerUser = oldChannel.rateLimitPerUser || 0;
+    }
+    if (oldChannel.type === ChannelType.GuildVoice) {
+      options.userLimit = oldChannel.userLimit || 0;
+      if (oldChannel.bitrate) options.bitrate = oldChannel.bitrate;
+    }
+    const channel = await guild.channels.create(options).catch(() => null);
+    if (channel) channelIdMap[oldChannel.id] = channel;
+  }
+
+  const oldConfig = backup.botConfig || {};
+  for (const key of Object.keys(data.config)) {
+    if (!oldConfig[key]) {
+      data.config[key] = oldConfig[key] ?? data.config[key];
+      continue;
+    }
+    data.config[key] = remapId(oldConfig[key], roleIdMap, channelIdMap) || null;
+  }
+
+  data.socials.messageIds = [];
+  data.interests.panelMessageId = null;
+  saveData(data);
+
+  if (data.config.socialsChannelId) await updateSocialPanel(guild, data).catch(() => {});
+  if (data.config.interestsChannelId) await updateInterestPanel(guild, data).catch(() => {});
+
+  const ownerMember = await guild.members.fetch(guild.ownerId).catch(() => null);
+  if (ownerMember && botMember) {
+    const topRestored = Object.values(roleIdMap).filter(role => role?.id !== guild.id).sort((a, b) => b.position - a.position)[0];
+    if (topRestored && botMember.roles.highest.comparePositionTo(topRestored) > 0) {
+      // Rechte bleiben beim echten Guild Owner ohnehin erhalten; keine automatische Fremdrollen-Zuweisung.
+    }
+  }
+
+  return { roleIdMap, channelIdMap };
 }
 
 function canModerate(member, data) {
@@ -818,19 +1536,20 @@ async function finishGiveaway(guild, data, messageId, endedBy = null) {
 }
 
 async function checkExpiredGiveaways(clientInstance) {
-  const data = loadData();
-  let changed = false;
-  for (const [messageId, giveaway] of Object.entries(data.giveaways || {})) {
-    if (giveaway.ended || giveaway.endAt > Date.now()) continue;
-    const guild = clientInstance.guilds.cache.get(giveaway.guildId);
-    if (!guild) continue;
-    const ended = await finishGiveaway(guild, data, messageId, null).catch(error => {
-      console.error('❌ Giveaway konnte nicht automatisch beendet werden:', error);
-      return false;
-    });
-    if (ended) changed = true;
+  for (const guild of clientInstance.guilds.cache.values()) {
+    const data = loadData(guild.id);
+    let changed = false;
+    for (const [messageId, giveaway] of Object.entries(data.giveaways || {})) {
+      if (giveaway.guildId && giveaway.guildId !== guild.id) continue;
+      if (giveaway.ended || giveaway.endAt > Date.now()) continue;
+      const ended = await finishGiveaway(guild, data, messageId, null).catch(error => {
+        console.error('❌ Giveaway konnte nicht automatisch beendet werden:', error);
+        return false;
+      });
+      if (ended) changed = true;
+    }
+    if (changed) saveData(data);
   }
-  if (changed) saveData(data);
 }
 
 function sanitizeChannelName(name) {
@@ -1161,43 +1880,47 @@ function communityEventPayload(event, disabled = false) {
 }
 
 async function checkCommunityEvents(clientInstance) {
-  const data = loadData();
   const now = Date.now();
-  let changed = false;
 
-  for (const event of Object.values(data.events || {})) {
-    if (event.cancelled || event.started) continue;
-    if (!event.reminders) event.reminders = {};
-    const guild = clientInstance.guilds.cache.get(event.guildId);
-    const channel = guild ? await guild.channels.fetch(event.channelId).catch(() => null) : null;
-    if (!channel?.isTextBased()) continue;
-    const remaining = event.startAt - now;
+  for (const guild of clientInstance.guilds.cache.values()) {
+    const data = loadData(guild.id);
+    let changed = false;
 
-    if (remaining <= 0) {
-      event.started = true;
-      changed = true;
-      const participantMentions = (event.participants || []).slice(0, 50);
-      await channel.send({
-        content: `🔔 **${event.name}** startet jetzt! ${participantMentions.map(id => `<@${id}>`).join(' ')}`,
-        allowedMentions: { users: participantMentions },
-      }).catch(() => {});
-      const message = await channel.messages.fetch(event.messageId).catch(() => null);
-      if (message) await message.edit(communityEventPayload(event, true)).catch(() => {});
-      continue;
+    for (const event of Object.values(data.events || {})) {
+      if (event.guildId && event.guildId !== guild.id) continue;
+      if (event.cancelled || event.started) continue;
+      if (!event.reminders) event.reminders = {};
+      const channel = await guild.channels.fetch(event.channelId).catch(() => null);
+      if (!channel?.isTextBased()) continue;
+      const remaining = event.startAt - now;
+
+      if (remaining <= 0) {
+        event.started = true;
+        changed = true;
+        const participantMentions = (event.participants || []).slice(0, 50);
+        await channel.send({
+          content: `🔔 **${event.name}** startet jetzt! ${participantMentions.map(id => `<@${id}>`).join(' ')}`,
+          allowedMentions: { users: participantMentions },
+        }).catch(() => {});
+        const message = await channel.messages.fetch(event.messageId).catch(() => null);
+        if (message) await message.edit(communityEventPayload(event, true)).catch(() => {});
+        continue;
+      }
+
+      if (remaining <= 60 * 60 * 1000 && remaining > 10 * 60 * 1000 && !event.reminders.hour) {
+        event.reminders.hour = true;
+        changed = true;
+        await channel.send(`⏰ **${event.name}** startet in weniger als einer Stunde.`).catch(() => {});
+      }
+      if (remaining <= 10 * 60 * 1000 && !event.reminders.tenMinutes) {
+        event.reminders.tenMinutes = true;
+        changed = true;
+        await channel.send(`⏰ **${event.name}** startet in weniger als 10 Minuten.`).catch(() => {});
+      }
     }
 
-    if (remaining <= 60 * 60 * 1000 && remaining > 10 * 60 * 1000 && !event.reminders.hour) {
-      event.reminders.hour = true;
-      changed = true;
-      await channel.send(`⏰ **${event.name}** startet in weniger als einer Stunde.`).catch(() => {});
-    }
-    if (remaining <= 10 * 60 * 1000 && !event.reminders.tenMinutes) {
-      event.reminders.tenMinutes = true;
-      changed = true;
-      await channel.send(`⏰ **${event.name}** startet in weniger als 10 Minuten.`).catch(() => {});
-    }
+    if (changed) saveData(data);
   }
-  if (changed) saveData(data);
 }
 
 function renderCustomCommand(text, messageOrInteraction) {
@@ -1766,12 +2489,13 @@ async function handleCommunityGameMessage(message, data) {
 }
 
 async function checkCommunityAutomation(clientInstance) {
-  const data = loadData();
   const nowInfo = localDateInfo();
   const currentWeek = isoWeekKey();
-  let changed = false;
 
   for (const guild of clientInstance.guilds.cache.values()) {
+    const data = loadData(guild.id);
+    let changed = false;
+
     if (data.dailyQuestions.enabled && nowInfo.hour >= Number(data.dailyQuestions.hour || 0) && data.dailyQuestions.lastPostedDate !== nowInfo.date) {
       const posted = await postDailyQuestion(guild, data).catch(() => null);
       if (posted) {
@@ -1810,15 +2534,16 @@ async function checkCommunityAutomation(clientInstance) {
         changed = true;
       }
     }
-  }
 
-  for (const [quizId, quiz] of Object.entries(data.games.quizzes || {})) {
-    if (Date.now() - quiz.createdAt > 2 * 60 * 60 * 1000) {
-      delete data.games.quizzes[quizId];
-      changed = true;
+    for (const [quizId, quiz] of Object.entries(data.games.quizzes || {})) {
+      if (Date.now() - quiz.createdAt > 2 * 60 * 60 * 1000) {
+        delete data.games.quizzes[quizId];
+        changed = true;
+      }
     }
+
+    if (changed) saveData(data);
   }
-  if (changed) saveData(data);
 }
 
 // ============================================================
@@ -1838,6 +2563,34 @@ function buildCommands() {
       .setName('avatar')
       .setDescription('Zeigt das Profilbild eines Mitglieds.')
       .addUserOption(o => o.setName('user').setDescription('Mitglied').setRequired(false)),
+
+    new SlashCommandBuilder()
+      .setName('setupserver')
+      .setDescription('Baut den kompletten Discord-Server mit einem Design neu auf.')
+      .addStringOption(o => o
+        .setName('design')
+        .setDescription('Welches Server-Design soll erstellt werden?')
+        .setRequired(true)
+        .addChoices(
+          { name: 'Design 1 • Clean Community', value: '1' },
+          { name: 'Design 2 • Gambo / Szene', value: '2' },
+          { name: 'Design 3 • Minimal Elite', value: '3' },
+          { name: 'Design 4 • UNFUGSTIFTER Private Edition', value: '4' },
+        ))
+      .addBooleanOption(o => o
+        .setName('bestaetigen')
+        .setDescription('MUSS true sein: alte Channels/Rollen werden gelöscht.')
+        .setRequired(true)),
+    new SlashCommandBuilder()
+      .setName('backupserver')
+      .setDescription('Sichert Rollen, Channels und Bot-Konfiguration des Servers.'),
+    new SlashCommandBuilder()
+      .setName('restoreserver')
+      .setDescription('Stellt das letzte Server-Backup wieder her.')
+      .addBooleanOption(o => o
+        .setName('bestaetigen')
+        .setDescription('MUSS true sein: aktuelles Server-Design wird ersetzt.')
+        .setRequired(true)),
 
     new SlashCommandBuilder()
       .setName('setup')
@@ -2277,8 +3030,8 @@ client.once(Events.ClientReady, async readyClient => {
 
   // Regelmäßige Socials-Neusortierung.
   setInterval(async () => {
-    const data = loadData();
     for (const guild of readyClient.guilds.cache.values()) {
+      const data = loadData(guild.id);
       if (!data.config.socialsChannelId && !config.fallbackSocialsChannelId) continue;
       await updateSocialPanel(guild, data).catch(() => {});
     }
@@ -2298,14 +3051,14 @@ client.once(Events.ClientReady, async readyClient => {
   setInterval(() => checkCommunityEvents(readyClient).catch(() => {}), EVENT_CHECK_INTERVAL_MS);
 
   // Community-Aktivität nach einem Neustart für bereits verbundene Voice-Mitglieder neu starten.
-  const startupData = loadData();
-  startupData.activity.voiceActive = {};
   for (const guild of readyClient.guilds.cache.values()) {
+    const startupData = loadData(guild.id);
+    startupData.activity.voiceActive = {};
     for (const member of guild.members.cache.values()) {
       if (member.voice.channelId) startVoiceSession(startupData, member, member.voice.channelId);
     }
+    saveData(startupData);
   }
-  saveData(startupData);
 
   // Fragen, Umfragen, Mitglied des Monats und Clip der Woche automatisch ausführen.
   await checkCommunityAutomation(readyClient);
@@ -2317,7 +3070,7 @@ client.once(Events.ClientReady, async readyClient => {
 // ============================================================
 
 client.on(Events.GuildMemberAdd, async member => {
-  const data = loadData();
+  const data = loadData(member.guild.id);
 
   const usedInvite = await detectUsedInvite(member.guild).catch(() => null);
   if (usedInvite?.inviter?.id) {
@@ -2355,7 +3108,7 @@ client.on(Events.GuildMemberAdd, async member => {
 });
 
 client.on(Events.GuildMemberRemove, async member => {
-  const data = loadData();
+  const data = loadData(member.guild.id);
 
   const inviterId = data.inviteMembers[member.id];
   if (inviterId) {
@@ -2392,7 +3145,7 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   const roleChanged = oldMember.roles.cache.size !== newMember.roles.cache.size ||
     config.socialSortRoleIds.some(id => oldMember.roles.cache.has(id) !== newMember.roles.cache.has(id));
   if (!roleChanged) return;
-  const data = loadData();
+  const data = loadData(newMember.guild.id);
   if (!findSocial(data, newMember.id)) return;
   await updateSocialPanel(newMember.guild, data).catch(() => {});
 });
@@ -2406,7 +3159,7 @@ client.on(Events.InviteDelete, async invite => {
 });
 
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
-  const data = loadData();
+  const data = loadData(newState.guild.id);
   const lobbyId = data.config.tempVoiceLobbyId;
 
   if (oldState.channelId !== newState.channelId && !newState.member?.user.bot) {
@@ -2469,7 +3222,7 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
 client.on(Events.MessageCreate, async message => {
   if (!message.guild || message.author.bot) return;
 
-  const data = loadData();
+  const data = loadData(message.guild.id);
   if (await handleAutomodMessage(message, data)) return;
 
   await recordCommunityMessage(message, data).catch(error => console.error('❌ Community-Aktivität Fehler:', error));
@@ -2547,7 +3300,7 @@ client.on(Events.MessageDelete, async message => {
     return;
   }
   if (!message.guild || message.author?.bot) return;
-  const data = loadData();
+  const data = loadData(message.guild.id);
   if (!data.config.logChannelId || message.channel.id === data.config.logChannelId) return;
   const text = message.content ? `\n**Inhalt:** ${message.content.slice(0, 1000)}` : '';
   await logEvent(message.guild, data, '🗑️ Nachricht gelöscht', `**Channel:** <#${message.channel.id}>\n**Autor:** ${message.author ? `<@${message.author.id}>` : 'Unbekannt'}${text}`);
@@ -2556,7 +3309,7 @@ client.on(Events.MessageDelete, async message => {
 client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
   if (!newMessage.guild || newMessage.author?.bot) return;
   if (!oldMessage.content || !newMessage.content || oldMessage.content === newMessage.content) return;
-  const data = loadData();
+  const data = loadData(newMessage.guild.id);
   if (!data.config.logChannelId || newMessage.channel.id === data.config.logChannelId) return;
   await logEvent(
     newMessage.guild,
@@ -2572,7 +3325,7 @@ client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
 
 client.on(Events.InteractionCreate, async interaction => {
   try {
-    const data = loadData();
+    const data = interaction.guildId ? loadData(interaction.guildId) : loadData();
 
     // ---------- BUTTONS ----------
     if (interaction.isButton()) {
@@ -3322,7 +4075,7 @@ client.on(Events.InteractionCreate, async interaction => {
           { name: '🎮 Gemeinsam', value: '`/clip` `/mitspieler` `/challenge` `/game` `/badges`' },
           { name: '👤 Profile & Willkommen', value: '`/profil` `/profilset` `/interessen` `/anonymouspanel` `/anonymousinfo`' },
           { name: '🧩 Eigene Commands', value: '`/customcommand` oder gespeicherte Befehle mit `!name`' },
-          { name: '⚙️ Einrichtung', value: '`/setup channel` `/setup role` `/setup tickets` `/setup show`' },
+          { name: '⚙️ Einrichtung', value: '`/setupserver` `/backupserver` `/restoreserver` `/setup channel` `/setup role` `/setup tickets` `/setup show`' },
         );
       await interaction.reply({ embeds: [embed], ephemeral: true });
       return;
@@ -3373,6 +4126,211 @@ client.on(Events.InteractionCreate, async interaction => {
       const user = interaction.options.getUser('user') || interaction.user;
       const url = user.displayAvatarURL({ size: 1024, extension: 'png' });
       await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x111111).setTitle(`🖼️ Avatar • ${user.username}`).setImage(url)] });
+      return;
+    }
+
+
+    if (command === 'backupserver') {
+      if (!isGuildOwner(interaction)) {
+        await interaction.reply({ content: '❌ Nur der **Server-Inhaber mit der Krone** kann ein Server-Backup erstellen.', ephemeral: true });
+        return;
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+      const backup = await captureServerBackup(interaction.guild, data, 'manual');
+      pushServerBackup(data, interaction.guild.id, backup);
+      saveData(data);
+
+      await interaction.editReply({
+        content: `✅ Backup erstellt.\n**ID:** \`${backup.id}\`\n**Rollen:** ${backup.roles.length}\n**Channels:** ${backup.channels.length}\n\nEs werden maximal die letzten **5 Backups** gespeichert.`,
+      });
+      return;
+    }
+
+    if (command === 'setupserver') {
+      if (!isGuildOwner(interaction)) {
+        await interaction.reply({
+          content: '❌ Dieser Befehl ist absichtlich **nur für den aktuellen Server-Inhaber** verfügbar. Administrator- oder Server-verwalten-Rechte reichen nicht.',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const templateId = interaction.options.getString('design');
+      const confirmed = interaction.options.getBoolean('bestaetigen');
+      const template = SERVER_SETUP_TEMPLATES[templateId];
+
+      if (!template) {
+        await interaction.reply({ content: '❌ Unbekanntes Server-Design.', ephemeral: true });
+        return;
+      }
+      if (!confirmed) {
+        await interaction.reply({ content: '❌ Abgebrochen. `bestaetigen` muss auf **true** stehen.', ephemeral: true });
+        return;
+      }
+      if (template.premium && !canUsePremiumSetup(interaction)) {
+        await interaction.reply({
+          content: '🔒 **Design 4 ist nicht freigeschaltet.**\nDer Server-Inhaber muss diese Server-ID vom Bot-Besitzer in `PREMIUM_GUILD_IDS` freischalten lassen.',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const botMember = interaction.guild.members.me;
+      if (!botMember?.permissions.has(PermissionFlagsBits.Administrator)) {
+        await interaction.reply({
+          content: '❌ Für `/setupserver` braucht der Bot selbst **Administrator**, damit Rollen, Channels und Berechtigungen zuverlässig neu erstellt werden können.',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+
+      const backup = await captureServerBackup(interaction.guild, data, `before-setup-${templateId}`);
+      pushServerBackup(data, interaction.guild.id, backup);
+      saveData(data);
+
+      const keepChannelId = interaction.channelId;
+      const oldParentId = interaction.channel?.parentId || null;
+
+      await interaction.editReply({
+        content: `⚠️ Backup **${backup.id}** wurde erstellt.\nJetzt wird **Design ${templateId} – ${template.name}** aufgebaut. Alte Channels und löschbare Rollen werden entfernt.`,
+      });
+
+      const deleted = await deleteExistingServerStructure(interaction.guild, keepChannelId);
+      const created = await createTemplateStructure(interaction.guild, template);
+      applySetupConfig(data, created, templateId);
+
+      data.setupHistory[interaction.guild.id] = {
+        templateId,
+        templateName: template.name,
+        ownerId: interaction.user.id,
+        installedAt: Date.now(),
+        backupId: backup.id,
+      };
+      saveData(data);
+
+      await publishSetupPanels(interaction.guild, data, created, templateId);
+      saveData(data);
+
+      const notes = [];
+      if (deleted.skippedRoles.length) {
+        notes.push(`⚠️ **${deleted.skippedRoles.length} Rolle(n)** konnten wegen Discord-Rollenhierarchie/Integrationen nicht gelöscht werden.`);
+      }
+      if (deleted.failedChannels.length) {
+        notes.push(`⚠️ **${deleted.failedChannels.length} Channel(s)** konnten von Discord nicht gelöscht werden.`);
+      }
+
+      await interaction.editReply({
+        content: [
+          `✅ **Server-Setup fertig.**`,
+          `**Design:** ${templateId} – ${template.name}`,
+          `**Backup:** \`${backup.id}\``,
+          `**Neue Rollen:** ${Object.keys(created.roleMap).length}`,
+          `**Neue Channels/Kategorien:** ${Object.keys(created.channelMap).length}`,
+          '',
+          ...notes,
+          notes.length ? '' : null,
+          'Mit `/restoreserver bestaetigen:true` kannst du das letzte Backup wiederherstellen.',
+        ].filter(Boolean).join('\n'),
+      }).catch(() => {});
+
+      // Der Ausführungs-Channel wird bis zum Schluss behalten, damit Discord die Antwort
+      // noch anzeigen kann. Danach wird auch er entfernt, sofern er nicht Teil des neuen Designs ist.
+      const oldCommandChannel = await interaction.guild.channels.fetch(keepChannelId).catch(() => null);
+      if (oldCommandChannel && !Object.values(created.channelMap).some(ch => ch.id === oldCommandChannel.id)) {
+        setTimeout(async () => {
+          await oldCommandChannel.delete('Server Setup abgeschlossen: letzter alter Channel').catch(() => {});
+          if (oldParentId) {
+            const oldParent = await interaction.guild.channels.fetch(oldParentId).catch(() => null);
+            if (oldParent?.type === ChannelType.GuildCategory && oldParent.children.cache.size === 0) {
+              await oldParent.delete('Server Setup abgeschlossen: leere alte Kategorie').catch(() => {});
+            }
+          }
+        }, 5000);
+      }
+      return;
+    }
+
+    if (command === 'restoreserver') {
+      if (!isGuildOwner(interaction)) {
+        await interaction.reply({ content: '❌ Nur der **Server-Inhaber mit der Krone** kann ein Backup wiederherstellen.', ephemeral: true });
+        return;
+      }
+      if (!interaction.options.getBoolean('bestaetigen')) {
+        await interaction.reply({ content: '❌ Abgebrochen. `bestaetigen` muss auf **true** stehen.', ephemeral: true });
+        return;
+      }
+
+      const backups = data.serverBackups?.[interaction.guild.id] || [];
+      const target = backups[0];
+      if (!target) {
+        await interaction.reply({ content: '❌ Für diesen Server existiert noch kein Backup.', ephemeral: true });
+        return;
+      }
+
+      const botMember = interaction.guild.members.me;
+      if (!botMember?.permissions.has(PermissionFlagsBits.Administrator)) {
+        await interaction.reply({ content: '❌ Der Bot braucht für die Wiederherstellung **Administrator**.', ephemeral: true });
+        return;
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+
+      // Aktuellen Stand separat sichern, ohne das Ziel-Backup zu überschreiben.
+      const preRestoreBackup = await captureServerBackup(interaction.guild, data, 'before-restore');
+      pushServerBackup(data, interaction.guild.id, preRestoreBackup);
+      saveData(data);
+
+      const keepChannelId = interaction.channelId;
+      const oldParentId = interaction.channel?.parentId || null;
+
+      await interaction.editReply({
+        content: `♻️ Stelle Backup \`${target.id}\` von <t:${Math.floor(target.createdAt / 1000)}:F> wieder her …`,
+      });
+
+      const deleted = await deleteExistingServerStructure(interaction.guild, keepChannelId);
+      const restored = await restoreServerBackup(interaction.guild, data, target);
+      saveData(data);
+
+      const newLogChannel = data.config.logChannelId
+        ? await interaction.guild.channels.fetch(data.config.logChannelId).catch(() => null)
+        : null;
+      if (newLogChannel?.isTextBased()) {
+        await newLogChannel.send({
+          embeds: [new EmbedBuilder()
+            .setColor(0x2ecc71)
+            .setTitle('♻️ Server-Backup wiederhergestellt')
+            .setDescription(`Backup \`${target.id}\` wurde vom Server-Inhaber <@${interaction.user.id}> wiederhergestellt.`)
+            .setTimestamp()],
+          allowedMentions: { parse: [] },
+        }).catch(() => {});
+      }
+
+      await interaction.editReply({
+        content: [
+          `✅ Backup \`${target.id}\` wurde wiederhergestellt.`,
+          `**Rollen rekonstruiert:** ${Object.keys(restored.roleIdMap).length - 1}`,
+          `**Channels rekonstruiert:** ${Object.keys(restored.channelIdMap).length}`,
+          deleted.skippedRoles.length ? `⚠️ ${deleted.skippedRoles.length} alte Rolle(n) konnten nicht gelöscht werden.` : null,
+          '',
+          `Der Zustand direkt vor der Wiederherstellung wurde zusätzlich als \`${preRestoreBackup.id}\` gesichert.`,
+        ].filter(Boolean).join('\n'),
+      }).catch(() => {});
+
+      const oldCommandChannel = await interaction.guild.channels.fetch(keepChannelId).catch(() => null);
+      if (oldCommandChannel && !Object.values(restored.channelIdMap).some(ch => ch.id === oldCommandChannel.id)) {
+        setTimeout(async () => {
+          await oldCommandChannel.delete('Restore abgeschlossen: letzter alter Channel').catch(() => {});
+          if (oldParentId) {
+            const oldParent = await interaction.guild.channels.fetch(oldParentId).catch(() => null);
+            if (oldParent?.type === ChannelType.GuildCategory && oldParent.children.cache.size === 0) {
+              await oldParent.delete('Restore abgeschlossen: leere alte Kategorie').catch(() => {});
+            }
+          }
+        }, 5000);
+      }
       return;
     }
 

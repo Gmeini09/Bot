@@ -43,3 +43,14 @@ Der Bot registriert die Slash-Commands beim Start automatisch. Die vorhandenen D
 - Clips werden wöchentlich ausgewertet.
 - Erfolge und Abzeichen werden automatisch freigeschaltet.
 - Alle Uhrzeiten verwenden standardmäßig `Europe/Vienna`. Das kann mit der Railway-Variable `COMMUNITY_TIMEZONE` geändert werden.
+
+## Server-Designer & Backup
+
+- `/setupserver design:1 bestaetigen:true` – Clean Community
+- `/setupserver design:2 bestaetigen:true` – Gambo / Szene
+- `/setupserver design:3 bestaetigen:true` – Minimal Elite
+- `/setupserver design:4 bestaetigen:true` – private UNFUGSTIFTER Edition (Whitelist erforderlich)
+- `/backupserver` – Rollen, Channels, Rechte und Bot-Channel-Konfiguration sichern
+- `/restoreserver bestaetigen:true` – letztes Backup rekonstruieren
+
+Diese drei Befehle sind nur für den **echten Server-Inhaber** verfügbar, nicht für normale Administratoren.
