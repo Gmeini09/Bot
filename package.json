@@ -1,6 +1,6 @@
 {
   "name": "community-allround-bot",
-  "version": "4.0.0",
+  "version": "3.1.0",
   "description": "Discord community allround bot with owner-only full server setup designs, backup/restore, socials, moderation, tickets, activity and automation",
   "main": "index.js",
   "scripts": {

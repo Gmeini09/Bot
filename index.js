@@ -594,109 +594,144 @@ const SERVER_SETUP_TEMPLATES = {
     ],
   },
   '2': {
-    name: 'Gambo / Szene',
-    color: 0xe74c3c,
+    name: 'Gambo / Szene • Redline',
+    color: 0xff2b2b,
     roles: [
-      setupRole('👑 Owner', 'owner', { permissions: ['Administrator'], hoist: true }),
-      setupRole('🔱 Leitung', 'management', { permissions: ['ManageGuild', 'ManageChannels', 'ManageRoles', 'ManageMessages', 'KickMembers', 'BanMembers'], hoist: true }),
-      setupRole('⚔️ Management', 'moderator', { permissions: ['ManageMessages', 'ModerateMembers', 'KickMembers'], hoist: true }),
-      setupRole('🧰 Support', 'support', { permissions: ['ManageMessages'], hoist: true }),
-      setupRole('🎯 Unfugstifter', 'elite', { hoist: true }),
-      setupRole('🎥 Content', 'creator', { hoist: true }),
-      setupRole('🤝 Partner', 'partner'),
-      setupRole('🔔 Ping', 'announcement'),
-      setupRole('✅ Verified', 'verified'),
-      setupRole('👤 Community', 'member'),
+      setupRole('👑・OWNER', 'owner', { permissions: ['Administrator'], hoist: true, color: 0xff2b2b }),
+      setupRole('♛・CO-OWNER', 'coowner', { permissions: ['Administrator'], hoist: true, color: 0xd91515 }),
+      setupRole('🔱・MANAGEMENT', 'management', { permissions: ['ManageGuild', 'ManageChannels', 'ManageRoles', 'ManageMessages', 'ModerateMembers', 'KickMembers', 'BanMembers'], hoist: true, color: 0xb31212 }),
+      setupRole('🛡️・MODERATION', 'moderator', { permissions: ['ManageMessages', 'ModerateMembers', 'KickMembers'], hoist: true, color: 0x8f1010 }),
+      setupRole('🎫・SUPPORT', 'support', { permissions: ['ManageMessages'], hoist: true, color: 0xff6b6b }),
+      setupRole('🎯・UNFUGSTIFTER', 'elite', { hoist: true, color: 0xff3b3b }),
+      setupRole('💀・ELITE PLAYER', 'eliteplayer', { hoist: true, color: 0xf2f3f5 }),
+      setupRole('🎥・CREATOR', 'creator', { hoist: true, color: 0x9b59b6 }),
+      setupRole('🤝・PARTNER', 'partner'),
+      setupRole('💎・BOOSTER', 'booster'),
+      setupRole('🚨・EVENT PING', 'eventping'),
+      setupRole('🎁・GIVEAWAY PING', 'giveawayping'),
+      setupRole('🔔・NEWS PING', 'announcement'),
+      setupRole('🔫・GAMBO', 'interest_gambo'),
+      setupRole('🎮・FIVEM', 'interest_fivem'),
+      setupRole('✅・VERIFIED', 'verified'),
+      setupRole('👤・COMMUNITY', 'member'),
     ],
     sections: [
-      { name: '╭・INFORMATION', key: 'start', channels: [
-        setupChannel('・start-here', 'welcome'),
-        setupChannel('・regeln', 'rules', 'text', { readOnly: true }),
-        setupChannel('・news', 'announcements', 'text', { readOnly: true }),
-        setupChannel('・verify', 'verification'),
+      { name: '╭━━〔 ENTRY 〕━━╮', key: 'start', channels: [
+        setupChannel('👋・willkommen', 'welcome', 'text', { readOnly: true, topic: 'Willkommen in der Community – hier beginnt dein Einstieg.' }),
+        setupChannel('📕・regelwerk', 'rules', 'text', { readOnly: true, topic: 'Die wichtigsten Community-Regeln auf einen Blick.' }),
+        setupChannel('📢・ankündigungen', 'announcements', 'text', { readOnly: true, topic: 'Offizielle News, Updates und wichtige Infos.' }),
+        setupChannel('✅・verifizierung', 'verification', 'text', { topic: 'Verifiziere dich, um Zugriff auf den Server zu erhalten.' }),
+        setupChannel('🏷️・rollen-auswahl', 'interests', 'text', { readOnly: true, topic: 'Wähle deine Interessen und Ping-Rollen.' }),
       ]},
-      { name: '├・SZENE', key: 'scene', channels: [
-        setupChannel('・chat', 'general'),
-        setupChannel('・gambo-clips', 'clips'),
-        setupChannel('・screens', 'media'),
-        setupChannel('・fight-talk', 'fighttalk'),
-        setupChannel('・mitspieler', 'lfg'),
-        setupChannel('・socials', 'socials'),
+      { name: '┣━━〔 GAMBO ZONE 〕━━┫', key: 'scene', channels: [
+        setupChannel('💬・main-chat', 'general', 'text', { topic: 'Der Hauptchat der Community.' }),
+        setupChannel('🎯・gambo-talk', 'fighttalk', 'text', { topic: 'Alles rund um Gambo, Fights, Setups und Szene-Talk.' }),
+        setupChannel('🎬・fight-clips', 'clips', 'text', { topic: 'Poste deine besten Clips und Highlights.' }),
+        setupChannel('📸・screenshots', 'media', 'text', { topic: 'Screenshots, Setups und Community-Momente.' }),
+        setupChannel('🏆・leaderboard', 'leaderboard', 'text', { readOnly: true, topic: 'Highlights, Rankings und Community-Erfolge.' }),
+        setupChannel('🔎・mitspieler-suche', 'lfg', 'text', { topic: 'Finde Mitspieler für FiveM, Gambo und andere Games.' }),
+        setupChannel('🗺️・server-talk', 'servertalk', 'text', { topic: 'Talk über Server, Fraktionen und aktuelle Szene-Themen.' }),
       ]},
-      { name: '├・COMMUNITY', key: 'community', channels: [
-        setupChannel('・events', 'events'),
-        setupChannel('・giveaways', 'giveaways'),
-        setupChannel('・vorschläge', 'suggestions'),
-        setupChannel('・abstimmungen', 'polls'),
-        setupChannel('・rollen', 'interests'),
-        setupChannel('・anonym', 'anonymous'),
+      { name: '┣━━〔 COMMUNITY 〕━━┫', key: 'community', channels: [
+        setupChannel('🌐・social-hub', 'socials', 'text', { readOnly: true, topic: 'Creator, Socials und Community-Profile.' }),
+        setupChannel('📅・events', 'events', 'text', { topic: 'Community-Events und gemeinsame Aktionen.' }),
+        setupChannel('🎁・giveaways', 'giveaways', 'text', { topic: 'Giveaways und Verlosungen.' }),
+        setupChannel('📊・abstimmungen', 'polls', 'text', { topic: 'Community-Abstimmungen und Entscheidungen.' }),
+        setupChannel('❓・frage-des-tages', 'questions', 'text', { topic: 'Tägliche Frage für mehr Aktivität.' }),
+        setupChannel('💡・vorschläge', 'suggestions', 'text', { topic: 'Ideen und Verbesserungsvorschläge.' }),
+        setupChannel('📮・anonym', 'anonymous', 'text', { topic: 'Anonyme Nachricht an das Team senden.' }),
       ]},
-      { name: '├・VOICE', key: 'voice', channels: [
-        setupChannel('➕・erstellen', 'tempvoice', 'voice'),
-        setupChannel('🔫・Gambo 1', 'gamingvoice', 'voice'),
-        setupChannel('🔫・Gambo 2', 'gamingvoice2', 'voice'),
-        setupChannel('💤・Chill', 'talkvoice', 'voice'),
+      { name: '┣━━〔 VOICE 〕━━┫', key: 'voice', channels: [
+        setupChannel('➕・eigenen-voice-erstellen', 'tempvoice', 'voice'),
+        setupChannel('🔫・Gambo 01', 'gamingvoice', 'voice'),
+        setupChannel('🔫・Gambo 02', 'gamingvoice2', 'voice'),
+        setupChannel('🎯・Warmup', 'warmupvoice', 'voice'),
+        setupChannel('💬・Chill Lounge', 'talkvoice', 'voice'),
+        setupChannel('💤・AFK', 'afkvoice', 'voice'),
       ]},
-      { name: '╰・SUPPORT', key: 'supportcat', channels: [
-        setupChannel('・ticket', 'tickets'),
-        setupChannel('・bewerbung', 'applications'),
+      { name: '┣━━〔 SUPPORT 〕━━┫', key: 'supportcat', channels: [
+        setupChannel('🎫・ticket-erstellen', 'tickets', 'text', { topic: 'Erstelle ein Ticket für Support oder Anliegen.' }),
+        setupChannel('📨・bewerbungen', 'applications', 'text', { topic: 'Bewerbungen für Team, Partner und Community.' }),
       ]},
-      { name: '🔒・INTERN', key: 'team', privateFor: ['owner', 'management', 'moderator', 'support'], channels: [
-        setupChannel('・leitung', 'teamchat'),
-        setupChannel('・logs', 'logs'),
-        setupChannel('・automod', 'automodlogs'),
-        setupChannel('・transkripte', 'transcripts'),
-        setupChannel('・social-audit', 'socialaudit'),
-        setupChannel('・anonymous-log', 'anonymousinbox'),
+      { name: '╰━━〔 STAFF ONLY 〕━━╯', key: 'team', privateFor: ['owner', 'coowner', 'management', 'moderator', 'support'], channels: [
+        setupChannel('👑・leitung', 'leadership'),
+        setupChannel('🛡️・team-chat', 'teamchat'),
+        setupChannel('📋・logs', 'logs'),
+        setupChannel('🤖・automod-logs', 'automodlogs'),
+        setupChannel('📄・ticket-transkripte', 'transcripts'),
+        setupChannel('🌐・social-audit', 'socialaudit'),
+        setupChannel('📥・anonyme-inbox', 'anonymousinbox'),
+        setupChannel('📨・bewerbungs-auswertung', 'applicationreview'),
       ]},
     ],
   },
   '3': {
-    name: 'Minimal Elite',
-    color: 0x2b2d31,
+    name: 'Minimal Elite • Obsidian',
+    color: 0x18191c,
     roles: [
-      setupRole('👑 OWNER', 'owner', { permissions: ['Administrator'], hoist: true }),
-      setupRole('◆ MANAGEMENT', 'management', { permissions: ['ManageGuild', 'ManageChannels', 'ManageRoles', 'ManageMessages', 'KickMembers', 'BanMembers'], hoist: true }),
-      setupRole('◆ TEAM', 'moderator', { permissions: ['ManageMessages', 'ModerateMembers'], hoist: true }),
-      setupRole('◆ SUPPORT', 'support', { permissions: ['ManageMessages'], hoist: true }),
-      setupRole('◆ CREATOR', 'creator'),
-      setupRole('◆ VERIFIED', 'verified'),
-      setupRole('◆ MEMBER', 'member'),
+      setupRole('OWNER', 'owner', { permissions: ['Administrator'], hoist: true, color: 0xf2f3f5 }),
+      setupRole('CO-OWNER', 'coowner', { permissions: ['Administrator'], hoist: true, color: 0xdbdee1 }),
+      setupRole('MANAGEMENT', 'management', { permissions: ['ManageGuild', 'ManageChannels', 'ManageRoles', 'ManageMessages', 'ModerateMembers', 'KickMembers', 'BanMembers'], hoist: true, color: 0xb5bac1 }),
+      setupRole('STAFF', 'moderator', { permissions: ['ManageMessages', 'ModerateMembers', 'KickMembers'], hoist: true, color: 0x949ba4 }),
+      setupRole('SUPPORT', 'support', { permissions: ['ManageMessages'], hoist: true, color: 0x80848e }),
+      setupRole('ELITE', 'elite', { hoist: true, color: 0xffffff }),
+      setupRole('CREATOR', 'creator', { hoist: true, color: 0xc7c9cc }),
+      setupRole('PARTNER', 'partner'),
+      setupRole('BOOSTER', 'booster'),
+      setupRole('EVENTS', 'eventping'),
+      setupRole('GIVEAWAYS', 'giveawayping'),
+      setupRole('NEWS', 'announcement'),
+      setupRole('GAMBO', 'interest_gambo'),
+      setupRole('FIVEM', 'interest_fivem'),
+      setupRole('VERIFIED', 'verified'),
+      setupRole('MEMBER', 'member'),
     ],
     sections: [
-      { name: '00 — START', key: 'start', channels: [
-        setupChannel('welcome', 'welcome'),
-        setupChannel('rules', 'rules', 'text', { readOnly: true }),
-        setupChannel('announcements', 'announcements', 'text', { readOnly: true }),
-        setupChannel('verify', 'verification'),
+      { name: '━━━ 01 / INFORMATION ━━━', key: 'start', channels: [
+        setupChannel('welcome', 'welcome', 'text', { readOnly: true, topic: 'Start here.' }),
+        setupChannel('rules', 'rules', 'text', { readOnly: true, topic: 'Community rules.' }),
+        setupChannel('announcements', 'announcements', 'text', { readOnly: true, topic: 'Official updates.' }),
+        setupChannel('verify', 'verification', 'text', { topic: 'Verification access.' }),
+        setupChannel('roles', 'interests', 'text', { readOnly: true, topic: 'Choose your roles.' }),
       ]},
-      { name: '01 — COMMUNITY', key: 'community', channels: [
+      { name: '━━━ 02 / COMMUNITY ━━━', key: 'community', channels: [
         setupChannel('general', 'general'),
         setupChannel('media', 'media'),
         setupChannel('clips', 'clips'),
         setupChannel('socials', 'socials'),
         setupChannel('suggestions', 'suggestions'),
+        setupChannel('polls', 'polls'),
+        setupChannel('daily-question', 'questions'),
         setupChannel('giveaways', 'giveaways'),
-        setupChannel('lfg', 'lfg'),
-        setupChannel('roles', 'interests'),
       ]},
-      { name: '02 — VOICE', key: 'voice', channels: [
-        setupChannel('Create Voice', 'tempvoice', 'voice'),
-        setupChannel('Gaming', 'gamingvoice', 'voice'),
-        setupChannel('Talk', 'talkvoice', 'voice'),
+      { name: '━━━ 03 / PLAY ━━━', key: 'play', channels: [
+        setupChannel('gambo', 'fighttalk'),
+        setupChannel('find-a-player', 'lfg'),
+        setupChannel('events', 'events'),
+        setupChannel('challenges', 'challenges'),
+        setupChannel('server-talk', 'servertalk'),
       ]},
-      { name: '03 — SUPPORT', key: 'supportcat', channels: [
+      { name: '━━━ 04 / VOICE ━━━', key: 'voice', channels: [
+        setupChannel('+ create', 'tempvoice', 'voice'),
+        setupChannel('squad 01', 'gamingvoice', 'voice'),
+        setupChannel('squad 02', 'gamingvoice2', 'voice'),
+        setupChannel('lounge', 'talkvoice', 'voice'),
+        setupChannel('afk', 'afkvoice', 'voice'),
+      ]},
+      { name: '━━━ 05 / SUPPORT ━━━', key: 'supportcat', channels: [
         setupChannel('ticket', 'tickets'),
         setupChannel('applications', 'applications'),
         setupChannel('anonymous', 'anonymous'),
       ]},
-      { name: '04 — STAFF', key: 'team', privateFor: ['owner', 'management', 'moderator', 'support'], channels: [
+      { name: '━━━ 06 / STAFF ━━━', key: 'team', privateFor: ['owner', 'coowner', 'management', 'moderator', 'support'], channels: [
+        setupChannel('leadership', 'leadership'),
         setupChannel('staff-chat', 'teamchat'),
         setupChannel('logs', 'logs'),
-        setupChannel('automod-logs', 'automodlogs'),
+        setupChannel('automod', 'automodlogs'),
         setupChannel('transcripts', 'transcripts'),
         setupChannel('social-audit', 'socialaudit'),
         setupChannel('anonymous-inbox', 'anonymousinbox'),
+        setupChannel('application-review', 'applicationreview'),
       ]},
     ],
   },
@@ -990,6 +1025,8 @@ function applySetupConfig(data, created, templateId) {
   c.challengeChannelId = channelMap.challenges?.id || channelMap.general?.id || null;
   c.anonymousInboxChannelId = channelMap.anonymousinbox?.id || channelMap.logs?.id || null;
   c.interestsChannelId = channelMap.interests?.id || null;
+  c.setupTemplateId = templateId;
+  c.setupThemeColor = SERVER_SETUP_TEMPLATES[templateId]?.color || 0x5865f2;
 
   data.socials.messageIds = [];
   data.interests.panelMessageId = null;
@@ -1002,25 +1039,26 @@ function applySetupConfig(data, created, templateId) {
   data.clips.submissions = {};
   data.clips.activeWeek = null;
 
-  if (templateId === '4') {
+  if (['2', '3', '4'].includes(templateId)) {
     data.automod.enabled = true;
-    data.dailyQuestions.enabled = Boolean(c.questionChannelId);
+    data.dailyQuestions.enabled = Boolean(channelMap.questions);
     data.dailyQuestions.hour = 12;
     data.dailyQuestions.questions = data.dailyQuestions.questions?.length ? data.dailyQuestions.questions : [...DEFAULT_DAILY_QUESTIONS];
-    data.communityPolls.enabled = Boolean(c.communityPollChannelId);
+    data.communityPolls.enabled = Boolean(channelMap.polls);
     data.communityPolls.cadence = 'weekly';
     data.communityPolls.hour = 18;
     data.communityPolls.weekday = 5;
     data.communityPolls.templates = data.communityPolls.templates?.length ? data.communityPolls.templates : [...DEFAULT_COMMUNITY_POLLS];
-    data.memberOfMonth.enabled = Boolean(c.memberOfMonthChannelId);
     data.clips.enabled = Boolean(c.clipChannelId);
-    data.clips.activeWeek = isoWeekKey();
+    data.clips.activeWeek = c.clipChannelId ? isoWeekKey() : null;
     data.interests.options = [
       roleMap.interest_fivem ? { label: 'FiveM', roleId: roleMap.interest_fivem.id } : null,
       roleMap.interest_gambo ? { label: 'Gambo', roleId: roleMap.interest_gambo.id } : null,
       roleMap.eventping ? { label: 'Events', roleId: roleMap.eventping.id } : null,
       roleMap.giveawayping ? { label: 'Giveaways', roleId: roleMap.giveawayping.id } : null,
+      roleMap.announcement ? { label: 'News', roleId: roleMap.announcement.id } : null,
     ].filter(Boolean);
+    data.memberOfMonth.enabled = templateId === '4' && Boolean(c.memberOfMonthChannelId);
   } else {
     data.interests.options = [];
   }
@@ -1028,6 +1066,73 @@ function applySetupConfig(data, created, templateId) {
 
 async function publishSetupPanels(guild, data, created, templateId) {
   const { channelMap } = created;
+  const template = SERVER_SETUP_TEMPLATES[templateId];
+  const color = template?.color || 0x5865f2;
+
+  if (channelMap.welcome?.isTextBased()) {
+    const embed = new EmbedBuilder().setColor(color).setTimestamp();
+    if (templateId === '2') {
+      embed
+        .setTitle(`🔥 ${guild.name.toUpperCase()} • REDLINE`)
+        .setDescription('**Willkommen in der Gambo- & Szene-Community.**\n\nVerifiziere dich, wähle deine Rollen und zeig im Community-Bereich, was du draufhast.')
+        .addFields(
+          { name: '01 • START', value: 'Regelwerk lesen und anschließend verifizieren.', inline: true },
+          { name: '02 • ROLLEN', value: 'FiveM, Gambo, Events und Ping-Rollen auswählen.', inline: true },
+          { name: '03 • SZENE', value: 'Clips, Screenshots, Mitspieler und Szene-Talk.', inline: true },
+        )
+        .setFooter({ text: 'GAMBO / SZENE • REDLINE EDITION' });
+    } else if (templateId === '3') {
+      embed
+        .setTitle(guild.name.toUpperCase())
+        .setDescription('**WELCOME.**\n\nClean structure. No clutter. Everything you need is separated into clear sections.')
+        .addFields(
+          { name: 'ACCESS', value: 'Read `rules` → verify → choose your roles.', inline: true },
+          { name: 'COMMUNITY', value: 'Chat, media, clips and socials.', inline: true },
+          { name: 'PLAY', value: 'Gambo, events and player search.', inline: true },
+        )
+        .setFooter({ text: 'MINIMAL ELITE • OBSIDIAN' });
+    } else {
+      embed.setTitle(`👋 Willkommen auf ${guild.name}`).setDescription('Bitte lies das Regelwerk und verifiziere dich, um loszulegen.');
+    }
+    await channelMap.welcome.send({ embeds: [embed], allowedMentions: { parse: [] } }).catch(() => {});
+  }
+
+  if (channelMap.rules?.isTextBased()) {
+    const rules = templateId === '3'
+      ? [
+          '**01**  Respect other members.',
+          '**02**  No spam, unnecessary pings or advertising.',
+          '**03**  Follow the rules of every FiveM server you play on.',
+          '**04**  Keep private/internal information private.',
+          '**05**  Staff decisions belong in support, not public chat.',
+        ].join('\n\n')
+      : [
+          '**1. Respekt** — Kein unnötiger Stress, Beleidigungen oder Provokationen gegen Community-Mitglieder.',
+          '**2. Kein Spam** — Keine Werbung, Mass-Pings oder Chat-Spam.',
+          '**3. Serverregeln gelten** — Auf jedem FiveM-Server gelten zusätzlich dessen eigene Regeln.',
+          '**4. Interne Sachen bleiben intern** — Keine Leaks aus Team- oder Community-Bereichen.',
+          '**5. Support statt Drama** — Probleme werden über Tickets und nicht im Main-Chat geklärt.',
+        ].join('\n\n');
+    await channelMap.rules.send({
+      embeds: [new EmbedBuilder()
+        .setColor(color)
+        .setTitle(templateId === '3' ? 'RULES' : '📕 COMMUNITY REGELWERK')
+        .setDescription(rules)
+        .setFooter({ text: 'Das Team kann das Regelwerk jederzeit ergänzen.' })],
+      allowedMentions: { parse: [] },
+    }).catch(() => {});
+  }
+
+  if (templateId === '2' && channelMap.leaderboard?.isTextBased()) {
+    await channelMap.leaderboard.send({
+      embeds: [new EmbedBuilder()
+        .setColor(color)
+        .setTitle('🏆 REDLINE • HALL OF FAME')
+        .setDescription('Hier könnt ihr besondere Community-Erfolge, Clip-Gewinner, Turniersieger oder interne Rankings festhalten.')
+        .setFooter({ text: 'Die Inhalte dieses Channels kann das Team frei pflegen.' })],
+      allowedMentions: { parse: [] },
+    }).catch(() => {});
+  }
 
   if (channelMap.verification?.isTextBased() && data.config.verifiedRoleId) {
     const row = new ActionRowBuilder().addComponents(
@@ -2573,8 +2678,8 @@ function buildCommands() {
         .setRequired(true)
         .addChoices(
           { name: 'Design 1 • Clean Community', value: '1' },
-          { name: 'Design 2 • Gambo / Szene', value: '2' },
-          { name: 'Design 3 • Minimal Elite', value: '3' },
+          { name: 'Design 2 • Gambo / Szene • Redline', value: '2' },
+          { name: 'Design 3 • Minimal Elite • Obsidian', value: '3' },
           { name: 'Design 4 • UNFUGSTIFTER Private Edition', value: '4' },
         ))
       .addBooleanOption(o => o

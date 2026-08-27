@@ -104,3 +104,10 @@ Für das vollständige Server-Setup braucht der Bot **Administrator**. Seine Bot
 Die Bot-Daten werden ab dieser Version pro Discord-Server getrennt unter `guilds.<SERVER_ID>` gespeichert. Dadurch überschreiben sich z. B. Verifizierungsrollen, Ticket-Kategorien, Socials-Channels oder Setup-Designs nicht mehr gegenseitig, wenn dieselbe Bot-Instanz auf mehreren Servern läuft.
 
 Beim ersten Start wird eine vorhandene alte Einzelserver-Konfiguration automatisch für den ersten verwendeten Server übernommen.
+
+## Design Update v5
+
+- Design 2 wurde zu **Gambo / Szene • Redline** ausgebaut: stärkere Rollen-Hierarchie, Gambo Zone, Hall of Fame, Server-Talk, mehr Voice-Bereiche und vollständiger Staff-Bereich.
+- Design 3 wurde zu **Minimal Elite • Obsidian** ausgebaut: reduziertes Schwarz/Weiß-Konzept, klare nummerierte Kategorien, Play-Bereich, zusätzliche Community-Funktionen und sauberer Staff-Bereich.
+- Beide Designs aktivieren nun AutoMod, Clips, Rollen-Auswahl, Polls und Frage-des-Tages automatisch, sofern die passenden Channels vorhanden sind.
+- Beide Designs erhalten beim Setup direkt ein passendes Welcome- und Rules-Panel.
