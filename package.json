@@ -1,7 +1,7 @@
 {
   "name": "community-allround-bot",
-  "version": "3.1.0",
-  "description": "Discord community allround bot with owner-only full server setup designs, backup/restore, socials, moderation, tickets, activity and automation",
+  "version": "3.2.0",
+  "description": "Discord community allround bot with server setup designs, coins, daily streaks, missions, seasons, shop, random drops, live activity, socials, moderation and tickets",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

@@ -1,39 +1,100 @@
-# Unfug Community Bot – All-in-One
+# Unfug Community Bot – All-in-One v6
 
-Diese Version enthält **alle bisherigen Funktionen in einer einzigen `index.js`**.
+Diese Version baut auf v5 auf und enthält zusätzlich ein vollständiges Engagement-System für größere Community-Discords.
 
-## Enthalten
+## Neu in v6
 
-- Socials-System inkl. mehreren Links, Rollen-Sortierung, Edit/Delete/MySocials
-- automatische Vorschlags-Panels aus normalen Nachrichten mit ✅ / ❌
-- Ticket-System
-- Verifizierung per Rechenaufgabe
-- Welcome / Leave
-- Moderation und Warnsystem
-- Logs
-- Ankündigungen und Abstimmungen
-- Giveaway-System mit Teilnahme-Button, automatischer Auslosung, End und Reroll
+### Daily + Streaks
+- `/daily`
+- tägliche Coins
+- Streak-Bonus
+- persönlicher Best-Streak
+- Season Points
 
-## Giveaway Commands
+### Coins
+- `/coins balance`
+- `/coins leaderboard`
+- Coins durch Daily, Missionen, Aktivität und Random Drops
+- Chat-Rewards besitzen einen Cooldown, damit Spam nicht belohnt wird
+- Voice-Rewards werden nach Voice-Sessions gutgeschrieben
 
-- `/giveaway start`
-- `/giveaway end`
-- `/giveaway reroll`
-- `/giveaway list`
+### Missionen
+- `/missions view`
+- `/missions claim`
 
-Die Dauer wird z. B. als `10m`, `2h`, `1d` angegeben.
+Tägliche Missionen:
+- 15 Nachrichten
+- 30 Minuten Voice
+- an einer Community-Umfrage teilnehmen
+- Daily abholen
 
-## Giveaway-Channel
+Missionen geben Coins und Season Points.
 
-Optional: `/setup channel` → `Giveaways` auswählen.
+### Community Shop
+- `/shop list`
+- `/shop buy`
+- `/shop add`
+- `/shop remove`
+
+Admins können Discord-Rollen als Shop-Items hinterlegen. Der Bot prüft die Rollen-Hierarchie und zieht Coins erst nach erfolgreicher Vergabe ab.
+
+### Seasons
+- `/season`
+- `/seasonleaderboard`
+- automatische monatliche Season über die konfigurierte Community-Zeitzone
+- Season Points durch Daily, Missionen, Chat, Voice und Drops
+
+### Random Drops
+- automatische `UNFUG DROP`-Events im Activity-Hub
+- erster Klick gewinnt zufällig 100–300 Coins
+- Drop läuft nach 5 Minuten ab
+- automatische Drops haben einen Mindestabstand, damit der Channel nicht zugespammt wird
+- `/engagement drop` startet als Admin einen Drop manuell
+
+### Live Activity Panel
+- zeigt heutige Nachrichten, Voice-Zeit, neue Mitglieder und aktuell verbundene Voice-Mitglieder
+- zeigt Top 3 Aktivität, Season und Coins
+- aktualisiert sich automatisch
+- `/engagement setup channel:#channel` kann das System manuell einrichten
+- `/engagement status` zeigt den aktuellen Zustand
+
+## Server-Designs
+
+- `/setupserver design:1 bestaetigen:true` – Clean Community
+- `/setupserver design:2 bestaetigen:true` – Gambo / Szene • Redline
+- `/setupserver design:3 bestaetigen:true` – Minimal Elite • Obsidian
+- `/setupserver design:4 bestaetigen:true` – UNFUGSTIFTER Private Edition
+
+Alle vier Designs erhalten jetzt einen eigenen Activity-Hub. Beim vollständigen Setup werden Coins, Missionen, Seasons, Live-Panel und Random Drops automatisch aktiviert.
+
+**Wichtig:** `/setupserver`, `/backupserver` und `/restoreserver` funktionieren ausschließlich für den aktuellen Discord-Server-Inhaber. Normale Administratorrechte reichen dafür nicht.
+
+Vor jedem vollständigen Setup wird automatisch ein Struktur-Backup erstellt.
+
+## Design 4 freischalten
+
+Railway Variable:
+
+`PREMIUM_GUILD_IDS=SERVER_ID_1,SERVER_ID_2`
+
+Optional:
+
+`MASTER_USER_IDS=DEINE_DISCORD_USER_ID`
+
+Auch ein Master-User muss auf dem jeweiligen Discord der echte Server-Inhaber sein.
 
 ## Railway
 
 Pflichtvariable:
 
-- `DISCORD_TOKEN`
+`DISCORD_TOKEN`
 
-Empfohlen: Railway Volume auf `/data`, damit Socials, Warnungen, Einstellungen und Giveaways Deployments überleben.
+Empfohlen:
+
+- Railway Volume auf `/data`
+- `COMMUNITY_TIMEZONE=Europe/Vienna`
+
+So bleiben Daten nach Deployments erhalten und Dailys/Seasons verwenden die richtige Zeitzone.
 
 ## Discord Developer Portal
 
@@ -42,72 +103,12 @@ Unter **Bot → Privileged Gateway Intents** aktivieren:
 - Server Members Intent
 - Message Content Intent
 
-## GitHub Update
+Der Bot benötigt für `/setupserver` Administratorrechte. Für Shop-Rollen muss seine Bot-Rolle über den Rollen liegen, die im Shop vergeben werden sollen.
 
-Die vorhandene `index.js` im Repo vollständig durch diese Version ersetzen und committen. Railway deployt danach neu.
+## GitHub / Railway Update
 
-## Eigene Embeds
-
-`/embed` öffnet ein Formular für eigene Discord-Embed-Nachrichten.
-
-Optionen beim Command:
-- `channel` – Ziel-Channel (optional)
-- `everyone` – optional @everyone
-
-Im Formular:
-- Titel
-- Nachricht
-- Farbe (z. B. `schwarz`, `rot`, `lila` oder `#5865F2`)
-- Footer (optional)
-- Bild-URL (optional)
-
-Berechtigung: dieselbe Berechtigung wie `/announce` (Announcement-Rolle bzw. Server verwalten/Admin).
-
-
-## Unban All
-
-`/unbanall` entbannt nach einer Sicherheitsabfrage alle gebannten Nutzer. Benötigt **Mitglieder bannen** oder Administrator.
-
-## Komplettes Server-Setup (v4)
-
-Neu sind drei öffentliche Server-Designs und eine private Edition:
-
-- `/setupserver design:1 bestaetigen:true` – Clean Community
-- `/setupserver design:2 bestaetigen:true` – Gambo / Szene
-- `/setupserver design:3 bestaetigen:true` – Minimal Elite
-- `/setupserver design:4 bestaetigen:true` – UNFUGSTIFTER Private Edition
-
-**Wichtig:** `/setupserver`, `/backupserver` und `/restoreserver` funktionieren ausschließlich für den aktuellen Discord-Server-Inhaber (Krone). Administrator oder „Server verwalten“ reicht dafür nicht.
-
-Vor jedem vollständigen Setup wird automatisch ein Struktur-Backup erstellt. Zusätzlich kann mit `/backupserver` jederzeit manuell gesichert werden. `/restoreserver bestaetigen:true` stellt das zuletzt vorhandene Backup wieder her.
-
-Discord lässt Rollen oberhalb der Bot-Rolle und verwaltete Integrations-/Bot-Rollen nicht löschen. Der Bot meldet solche Rollen nach dem Setup.
-
-### Design 4 freischalten
-
-Design 4 ist zusätzlich geschützt. Trage bei Railway unter **Variables** die Server-IDs ein, die Design 4 nutzen dürfen:
-
-`PREMIUM_GUILD_IDS=SERVER_ID_1,SERVER_ID_2`
-
-Optional kannst du deine eigene Discord-User-ID als Master hinterlegen:
-
-`MASTER_USER_IDS=DEINE_DISCORD_USER_ID`
-
-Auch ein Master-User muss auf dem jeweiligen Discord der echte Server-Inhaber sein, um `/setupserver` auszuführen.
-
-### Benötigte Bot-Rechte
-
-Für das vollständige Server-Setup braucht der Bot **Administrator**. Seine Bot-Rolle sollte möglichst ganz oben stehen, damit alte Rollen gelöscht und neue Rollen verwaltet werden können.
-
-## Mehrere Discord-Server gleichzeitig
-
-Die Bot-Daten werden ab dieser Version pro Discord-Server getrennt unter `guilds.<SERVER_ID>` gespeichert. Dadurch überschreiben sich z. B. Verifizierungsrollen, Ticket-Kategorien, Socials-Channels oder Setup-Designs nicht mehr gegenseitig, wenn dieselbe Bot-Instanz auf mehreren Servern läuft.
-
-Beim ersten Start wird eine vorhandene alte Einzelserver-Konfiguration automatisch für den ersten verwendeten Server übernommen.
-
-## Design Update v5
-
-- Design 2 wurde zu **Gambo / Szene • Redline** ausgebaut: stärkere Rollen-Hierarchie, Gambo Zone, Hall of Fame, Server-Talk, mehr Voice-Bereiche und vollständiger Staff-Bereich.
-- Design 3 wurde zu **Minimal Elite • Obsidian** ausgebaut: reduziertes Schwarz/Weiß-Konzept, klare nummerierte Kategorien, Play-Bereich, zusätzliche Community-Funktionen und sauberer Staff-Bereich.
-- Beide Designs aktivieren nun AutoMod, Clips, Rollen-Auswahl, Polls und Frage-des-Tages automatisch, sofern die passenden Channels vorhanden sind.
-- Beide Designs erhalten beim Setup direkt ein passendes Welcome- und Rules-Panel.
+1. Inhalt dieses Ordners in dein GitHub-Repository übernehmen.
+2. Commit + Push.
+3. Railway startet bei aktivem GitHub-Deploy automatisch neu.
+4. Im Railway-Log auf `✅ Eingeloggt als ...` und die Command-Registrierung achten.
+5. Auf einem Testserver zuerst `/engagement status` bzw. `/setupserver` testen.

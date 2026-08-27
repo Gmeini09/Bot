@@ -131,7 +131,7 @@ const BADGES = {
 
 function defaultData() {
   return {
-    version: 8,
+    version: 9,
     config: {
       welcomeChannelId: null,
       leaveChannelId: null,
@@ -166,6 +166,7 @@ function defaultData() {
       challengeChannelId: null,
       anonymousInboxChannelId: null,
       interestsChannelId: null,
+      engagementChannelId: null,
     },
     socials: {
       messageIds: [],
@@ -253,6 +254,16 @@ function defaultData() {
     },
     serverBackups: {},
     setupHistory: {},
+    engagement: {
+      enabled: false,
+      wallets: {},
+      shop: {},
+      missions: { users: {} },
+      seasons: {},
+      stats: { days: {} },
+      drop: { activeId: null, messageId: null, channelId: null, reward: 0, expiresAt: 0, lastDropAt: 0, claimedBy: null },
+      activityPanelMessageId: null,
+    },
   };
 }
 
@@ -357,7 +368,25 @@ function normalizeData(raw) {
   };
   base.serverBackups = raw?.serverBackups && typeof raw.serverBackups === 'object' ? raw.serverBackups : {};
   base.setupHistory = raw?.setupHistory && typeof raw.setupHistory === 'object' ? raw.setupHistory : {};
-  base.version = 8;
+  base.engagement = {
+    ...base.engagement,
+    ...(raw?.engagement && typeof raw.engagement === 'object' ? raw.engagement : {}),
+    wallets: raw?.engagement?.wallets && typeof raw.engagement.wallets === 'object' ? raw.engagement.wallets : {},
+    shop: raw?.engagement?.shop && typeof raw.engagement.shop === 'object' ? raw.engagement.shop : {},
+    missions: {
+      users: raw?.engagement?.missions?.users && typeof raw.engagement.missions.users === 'object' ? raw.engagement.missions.users : {},
+    },
+    seasons: raw?.engagement?.seasons && typeof raw.engagement.seasons === 'object' ? raw.engagement.seasons : {},
+    stats: {
+      days: raw?.engagement?.stats?.days && typeof raw.engagement.stats.days === 'object' ? raw.engagement.stats.days : {},
+    },
+    drop: {
+      ...base.engagement.drop,
+      ...(raw?.engagement?.drop && typeof raw.engagement.drop === 'object' ? raw.engagement.drop : {}),
+    },
+    activityPanelMessageId: raw?.engagement?.activityPanelMessageId || null,
+  };
+  base.version = 9;
   return base;
 }
 
@@ -424,7 +453,7 @@ function saveData(data) {
   const cleanGuildData = JSON.parse(JSON.stringify(data));
   delete cleanGuildData.guilds;
   root.guilds[guildId] = cleanGuildData;
-  root.version = Math.max(Number(root.version) || 0, Number(cleanGuildData.version) || 0, 8);
+  root.version = Math.max(Number(root.version) || 0, Number(cleanGuildData.version) || 0, 9);
   writeDataFile(root);
 }
 
@@ -572,6 +601,7 @@ const SERVER_SETUP_TEMPLATES = {
         setupChannel('🎉・giveaways', 'giveaways'),
         setupChannel('🎮・mitspieler', 'lfg'),
         setupChannel('📊・umfragen', 'polls'),
+        setupChannel('⚡・activity-hub', 'activity', 'text', { readOnly: true, topic: 'Live-Aktivität, Coins, Seasons und Community-Fortschritt.' }),
       ]},
       { name: '━━ VOICE ━━', key: 'voice', channels: [
         setupChannel('➕・Voice erstellen', 'tempvoice', 'voice'),
@@ -640,6 +670,7 @@ const SERVER_SETUP_TEMPLATES = {
         setupChannel('❓・frage-des-tages', 'questions', 'text', { topic: 'Tägliche Frage für mehr Aktivität.' }),
         setupChannel('💡・vorschläge', 'suggestions', 'text', { topic: 'Ideen und Verbesserungsvorschläge.' }),
         setupChannel('📮・anonym', 'anonymous', 'text', { topic: 'Anonyme Nachricht an das Team senden.' }),
+        setupChannel('⚡・activity-hub', 'activity', 'text', { readOnly: true, topic: 'Live-Stats, Coins, Missionen und Season-Fortschritt.' }),
       ]},
       { name: '┣━━〔 VOICE 〕━━┫', key: 'voice', channels: [
         setupChannel('➕・eigenen-voice-erstellen', 'tempvoice', 'voice'),
@@ -703,6 +734,7 @@ const SERVER_SETUP_TEMPLATES = {
         setupChannel('polls', 'polls'),
         setupChannel('daily-question', 'questions'),
         setupChannel('giveaways', 'giveaways'),
+        setupChannel('activity', 'activity', 'text', { readOnly: true, topic: 'Live stats, coins, missions and season progress.' }),
       ]},
       { name: '━━━ 03 / PLAY ━━━', key: 'play', channels: [
         setupChannel('gambo', 'fighttalk'),
@@ -776,6 +808,7 @@ const SERVER_SETUP_TEMPLATES = {
         setupChannel('❓・frage-des-tages', 'questions'),
         setupChannel('🏆・mitglied-des-monats', 'membermonth'),
         setupChannel('🤝・challenges', 'challenges'),
+        setupChannel('⚡・activity-hub', 'activity', 'text', { readOnly: true, topic: 'Live-Aktivität, Coins, Missionen, Drops und Seasons.' }),
       ]},
       { name: '╠══〔 GAMBO / FIVEM 〕══╣', key: 'gambo', channels: [
         setupChannel('🎯・gambo-talk', 'fighttalk'),
@@ -1025,6 +1058,7 @@ function applySetupConfig(data, created, templateId) {
   c.challengeChannelId = channelMap.challenges?.id || channelMap.general?.id || null;
   c.anonymousInboxChannelId = channelMap.anonymousinbox?.id || channelMap.logs?.id || null;
   c.interestsChannelId = channelMap.interests?.id || null;
+  c.engagementChannelId = channelMap.activity?.id || channelMap.general?.id || null;
   c.setupTemplateId = templateId;
   c.setupThemeColor = SERVER_SETUP_TEMPLATES[templateId]?.color || 0x5865f2;
 
@@ -1038,6 +1072,9 @@ function applySetupConfig(data, created, templateId) {
   data.games.quizzes = {};
   data.clips.submissions = {};
   data.clips.activeWeek = null;
+  data.engagement.activityPanelMessageId = null;
+  data.engagement.drop = { activeId: null, messageId: null, channelId: null, reward: 0, expiresAt: 0, lastDropAt: 0, claimedBy: null };
+  data.engagement.enabled = Boolean(c.engagementChannelId);
 
   if (['2', '3', '4'].includes(templateId)) {
     data.automod.enabled = true;
@@ -1190,6 +1227,10 @@ async function publishSetupPanels(guild, data, created, templateId) {
         .setTimestamp()],
     }).catch(() => {});
   }
+
+  if (channelMap.activity?.isTextBased() && data.engagement.enabled) {
+    await updateActivityPanel(guild, data, true).catch(() => {});
+  }
 }
 
 function remapId(value, roleIdMap, channelIdMap) {
@@ -1271,10 +1312,13 @@ async function restoreServerBackup(guild, data, backup) {
 
   data.socials.messageIds = [];
   data.interests.panelMessageId = null;
+  data.engagement.activityPanelMessageId = null;
+  data.engagement.enabled = Boolean(data.config.engagementChannelId);
   saveData(data);
 
   if (data.config.socialsChannelId) await updateSocialPanel(guild, data).catch(() => {});
   if (data.config.interestsChannelId) await updateInterestPanel(guild, data).catch(() => {});
+  if (data.config.engagementChannelId) await updateActivityPanel(guild, data, true).catch(() => {});
 
   const ownerMember = await guild.members.fetch(guild.ownerId).catch(() => null);
   if (ownerMember && botMember) {
@@ -2593,6 +2637,256 @@ async function handleCommunityGameMessage(message, data) {
   return false;
 }
 
+
+// ============================================================
+// ENGAGEMENT • COINS / DAILY / MISSIONS / SEASONS / DROPS
+// ============================================================
+
+const ENGAGEMENT_MESSAGE_COOLDOWN_MS = 2 * 60 * 1000;
+const RANDOM_DROP_MIN_GAP_MS = 2 * 60 * 60 * 1000;
+const RANDOM_DROP_EXPIRE_MS = 5 * 60 * 1000;
+
+const DAILY_MISSIONS = {
+  messages: { label: 'Chat Aktiv', emoji: '💬', target: 15, reward: 100, season: 20, unit: 'Nachrichten' },
+  voice: { label: 'Voice Aktiv', emoji: '🎧', target: 30 * 60 * 1000, reward: 125, season: 25, unit: 'Voice' },
+  poll: { label: 'Mitbestimmen', emoji: '📊', target: 1, reward: 50, season: 10, unit: 'Abstimmung' },
+  daily: { label: 'Daily sichern', emoji: '🔥', target: 1, reward: 50, season: 10, unit: 'Daily' },
+};
+
+function shiftDateKey(dateKey, days) {
+  const d = new Date(`${dateKey}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function ensureWallet(data, userId) {
+  if (!data.engagement.wallets[userId]) {
+    data.engagement.wallets[userId] = {
+      coins: 0,
+      lifetime: 0,
+      spent: 0,
+      streak: 0,
+      bestStreak: 0,
+      lastDailyDate: null,
+      lastMessageRewardAt: 0,
+    };
+  }
+  return data.engagement.wallets[userId];
+}
+
+function seasonKey() {
+  return localDateInfo().month;
+}
+
+function addCoins(data, userId, amount) {
+  const value = Math.max(0, Math.floor(Number(amount) || 0));
+  const wallet = ensureWallet(data, userId);
+  wallet.coins += value;
+  wallet.lifetime += value;
+  return wallet;
+}
+
+function addSeasonPoints(data, userId, amount) {
+  const key = seasonKey();
+  if (!data.engagement.seasons[key]) data.engagement.seasons[key] = { users: {}, createdAt: Date.now() };
+  const season = data.engagement.seasons[key];
+  season.users[userId] = (season.users[userId] || 0) + Math.max(0, Math.floor(Number(amount) || 0));
+  return season.users[userId];
+}
+
+function ensureDailyStats(data, timestamp = Date.now()) {
+  const key = localDateInfo(timestamp).date;
+  if (!data.engagement.stats.days[key]) {
+    data.engagement.stats.days[key] = { messages: 0, voiceMs: 0, joins: 0, coinsAwarded: 0 };
+  }
+  return data.engagement.stats.days[key];
+}
+
+function ensureMissionRecord(data, userId) {
+  const date = localDateInfo().date;
+  const current = data.engagement.missions.users[userId];
+  if (!current || current.date !== date) {
+    data.engagement.missions.users[userId] = {
+      date,
+      messages: 0,
+      voiceMs: 0,
+      pollVotes: 0,
+      dailyClaimed: 0,
+      claimed: [],
+    };
+  }
+  return data.engagement.missions.users[userId];
+}
+
+function missionProgress(record, key) {
+  if (key === 'messages') return record.messages || 0;
+  if (key === 'voice') return record.voiceMs || 0;
+  if (key === 'poll') return record.pollVotes || 0;
+  if (key === 'daily') return record.dailyClaimed || 0;
+  return 0;
+}
+
+function missionProgressText(record, key) {
+  const def = DAILY_MISSIONS[key];
+  const current = missionProgress(record, key);
+  if (key === 'voice') return `${Math.min(30, Math.floor(current / 60000))}/30 Min`;
+  return `${Math.min(def.target, current)}/${def.target}`;
+}
+
+function seasonLeaderboard(data) {
+  const season = data.engagement.seasons[seasonKey()] || { users: {} };
+  return Object.entries(season.users || {})
+    .map(([userId, points]) => ({ userId, points: Number(points) || 0 }))
+    .filter(entry => entry.points > 0)
+    .sort((a, b) => b.points - a.points);
+}
+
+function coinLeaderboard(data) {
+  return Object.entries(data.engagement.wallets || {})
+    .map(([userId, wallet]) => ({ userId, coins: Number(wallet.coins) || 0, lifetime: Number(wallet.lifetime) || 0 }))
+    .filter(entry => entry.lifetime > 0)
+    .sort((a, b) => b.coins - a.coins || b.lifetime - a.lifetime);
+}
+
+function recordEngagementMessage(message, data) {
+  if (!data.engagement.enabled) return;
+  const mission = ensureMissionRecord(data, message.author.id);
+  mission.messages++;
+  const stats = ensureDailyStats(data, message.createdTimestamp);
+  stats.messages++;
+
+  const wallet = ensureWallet(data, message.author.id);
+  if (Date.now() - (wallet.lastMessageRewardAt || 0) >= ENGAGEMENT_MESSAGE_COOLDOWN_MS) {
+    wallet.lastMessageRewardAt = Date.now();
+    addCoins(data, message.author.id, 2);
+    addSeasonPoints(data, message.author.id, 1);
+    stats.coinsAwarded += 2;
+  }
+  saveData(data);
+}
+
+function recordEngagementVoice(data, userId, duration) {
+  if (!data.engagement.enabled || !duration) return;
+  const mission = ensureMissionRecord(data, userId);
+  mission.voiceMs += duration;
+  const stats = ensureDailyStats(data);
+  stats.voiceMs += duration;
+  const fiveMinuteBlocks = Math.floor(duration / (5 * 60 * 1000));
+  if (fiveMinuteBlocks > 0) {
+    addCoins(data, userId, fiveMinuteBlocks * 3);
+    addSeasonPoints(data, userId, fiveMinuteBlocks * 2);
+    stats.coinsAwarded += fiveMinuteBlocks * 3;
+  }
+}
+
+function activityPanelPayload(guild, data) {
+  const today = ensureDailyStats(data);
+  const activeVoice = guild.members.cache.filter(member => !member.user.bot && member.voice.channelId).size;
+  const topActivity = activityLeaderboard(data, 'month').slice(0, 3);
+  const topSeason = seasonLeaderboard(data).slice(0, 3);
+  const topCoins = coinLeaderboard(data).slice(0, 3);
+  const line = (entries, valueFn) => entries.length
+    ? entries.map((entry, index) => `**${index + 1}.** <@${entry.userId}> • ${valueFn(entry)}`).join('\n')
+    : '*Noch keine Daten.*';
+
+  return {
+    embeds: [new EmbedBuilder()
+      .setColor(data.config.setupThemeColor || 0x8b5cf6)
+      .setTitle('⚡ COMMUNITY LIVE')
+      .setDescription('Aktivität, Coins und Season-Fortschritt werden automatisch aktualisiert.')
+      .addFields(
+        { name: '📅 Heute', value: `💬 **${today.messages || 0}** Nachrichten\n🎧 **${formatLongDuration(today.voiceMs || 0)}** Voice\n👋 **${today.joins || 0}** neue Member`, inline: true },
+        { name: '🔊 Jetzt im Voice', value: `**${activeVoice}** Mitglieder`, inline: true },
+        { name: '🔥 Season', value: `**${seasonKey()}**`, inline: true },
+        { name: '🏆 Aktivität • Monat', value: line(topActivity, e => `${e.score} Punkte`) },
+        { name: '⚡ Season Top 3', value: line(topSeason, e => `${e.points} SP`), inline: true },
+        { name: '🪙 Coins Top 3', value: line(topCoins, e => `${e.coins} Coins`), inline: true },
+      )
+      .setFooter({ text: 'Daily • Missionen • Coins • Shop • Seasons • Random Drops' })
+      .setTimestamp()],
+    allowedMentions: { parse: [] },
+  };
+}
+
+async function updateActivityPanel(guild, data, forceCreate = false) {
+  if (!data.engagement.enabled || !data.config.engagementChannelId) return null;
+  const channel = await guild.channels.fetch(data.config.engagementChannelId).catch(() => null);
+  if (!channel?.isTextBased()) return null;
+  let message = null;
+  if (data.engagement.activityPanelMessageId && !forceCreate) {
+    message = await channel.messages.fetch(data.engagement.activityPanelMessageId).catch(() => null);
+  }
+  if (message) {
+    await message.edit(activityPanelPayload(guild, data)).catch(() => {});
+  } else {
+    message = await channel.send(activityPanelPayload(guild, data)).catch(() => null);
+    if (message) data.engagement.activityPanelMessageId = message.id;
+  }
+  saveData(data);
+  return message;
+}
+
+async function expireRandomDrop(guild, data) {
+  const drop = data.engagement.drop;
+  if (!drop?.activeId || drop.claimedBy || drop.expiresAt > Date.now()) return false;
+  const channel = drop.channelId ? await guild.channels.fetch(drop.channelId).catch(() => null) : null;
+  const message = channel?.isTextBased() && drop.messageId ? await channel.messages.fetch(drop.messageId).catch(() => null) : null;
+  if (message) {
+    const disabled = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`coin_drop:${drop.activeId}`).setLabel('Drop abgelaufen').setEmoji('💨').setStyle(ButtonStyle.Secondary).setDisabled(true),
+    );
+    await message.edit({ components: [disabled] }).catch(() => {});
+  }
+  data.engagement.drop.activeId = null;
+  data.engagement.drop.messageId = null;
+  data.engagement.drop.channelId = null;
+  data.engagement.drop.reward = 0;
+  data.engagement.drop.expiresAt = 0;
+  saveData(data);
+  return true;
+}
+
+async function createRandomDrop(guild, data, manual = false) {
+  if (!data.engagement.enabled || !data.config.engagementChannelId) return null;
+  await expireRandomDrop(guild, data);
+  if (data.engagement.drop.activeId) return null;
+  if (!manual && Date.now() - (data.engagement.drop.lastDropAt || 0) < RANDOM_DROP_MIN_GAP_MS) return null;
+  if (!manual && Math.random() > 0.22) return null;
+
+  const channel = await guild.channels.fetch(data.config.engagementChannelId).catch(() => null);
+  if (!channel?.isTextBased()) return null;
+  const id = createShortId('drop_');
+  const reward = 100 + Math.floor(Math.random() * 201);
+  const expiresAt = Date.now() + RANDOM_DROP_EXPIRE_MS;
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`coin_drop:${id}`).setLabel(`${reward} Coins sichern`).setEmoji('⚡').setStyle(ButtonStyle.Success),
+  );
+  const message = await channel.send({
+    embeds: [new EmbedBuilder()
+      .setColor(0xf1c40f)
+      .setTitle('⚡ UNFUG DROP')
+      .setDescription(`Wer zuerst klickt, bekommt **${reward} Coins**.\nDer Drop verschwindet <t:${Math.floor(expiresAt / 1000)}:R>.`)
+      .setFooter({ text: 'First come, first served.' })],
+    components: [row],
+    allowedMentions: { parse: [] },
+  }).catch(() => null);
+  if (!message) return null;
+
+  data.engagement.drop = { activeId: id, messageId: message.id, channelId: channel.id, reward, expiresAt, lastDropAt: Date.now(), claimedBy: null };
+  saveData(data);
+  return message;
+}
+
+async function checkEngagementAutomation(clientInstance) {
+  for (const guild of clientInstance.guilds.cache.values()) {
+    const data = loadData(guild.id);
+    if (!data.engagement.enabled) continue;
+    await expireRandomDrop(guild, data).catch(() => {});
+    await updateActivityPanel(guild, data).catch(() => {});
+    await createRandomDrop(guild, data, false).catch(() => {});
+  }
+}
+
 async function checkCommunityAutomation(clientInstance) {
   const nowInfo = localDateInfo();
   const currentWeek = isoWeekKey();
@@ -2668,6 +2962,49 @@ function buildCommands() {
       .setName('avatar')
       .setDescription('Zeigt das Profilbild eines Mitglieds.')
       .addUserOption(o => o.setName('user').setDescription('Mitglied').setRequired(false)),
+
+    new SlashCommandBuilder()
+      .setName('daily')
+      .setDescription('Holt deine tägliche Coin-Belohnung und erhöht deinen Streak.'),
+    new SlashCommandBuilder()
+      .setName('coins')
+      .setDescription('Coins und Coin-Ranking.')
+      .addSubcommand(s => s.setName('balance').setDescription('Zeigt einen Coin-Stand.').addUserOption(o => o.setName('user').setDescription('Mitglied').setRequired(false)))
+      .addSubcommand(s => s.setName('leaderboard').setDescription('Zeigt die reichsten Community-Mitglieder.')),
+    new SlashCommandBuilder()
+      .setName('missions')
+      .setDescription('Tägliche Community-Missionen.')
+      .addSubcommand(s => s.setName('view').setDescription('Zeigt deine heutigen Missionen.'))
+      .addSubcommand(s => s.setName('claim').setDescription('Holt die Belohnung einer fertigen Mission.').addStringOption(o => o.setName('mission').setDescription('Mission').setRequired(true).addChoices(
+        { name: 'Chat Aktiv', value: 'messages' },
+        { name: 'Voice Aktiv', value: 'voice' },
+        { name: 'Mitbestimmen', value: 'poll' },
+        { name: 'Daily sichern', value: 'daily' },
+      ))),
+    new SlashCommandBuilder()
+      .setName('season')
+      .setDescription('Zeigt Season-Punkte und Platzierung.')
+      .addUserOption(o => o.setName('user').setDescription('Mitglied').setRequired(false)),
+    new SlashCommandBuilder()
+      .setName('seasonleaderboard')
+      .setDescription('Zeigt die aktuelle Season-Bestenliste.'),
+    new SlashCommandBuilder()
+      .setName('shop')
+      .setDescription('Community-Shop für Coin-Belohnungen.')
+      .addSubcommand(s => s.setName('list').setDescription('Zeigt alle Shop-Items.'))
+      .addSubcommand(s => s.setName('buy').setDescription('Kauft ein Shop-Item.').addStringOption(o => o.setName('id').setDescription('Item-ID').setRequired(true)))
+      .addSubcommand(s => s.setName('add').setDescription('Fügt eine Discord-Rolle zum Shop hinzu.')
+        .addStringOption(o => o.setName('id').setDescription('Kurze Item-ID, z. B. vip').setRequired(true).setMaxLength(24))
+        .addStringOption(o => o.setName('name').setDescription('Anzeigename').setRequired(true).setMaxLength(60))
+        .addIntegerOption(o => o.setName('preis').setDescription('Preis in Coins').setRequired(true).setMinValue(1).setMaxValue(1000000))
+        .addRoleOption(o => o.setName('rolle').setDescription('Rolle, die der Käufer erhält').setRequired(true)))
+      .addSubcommand(s => s.setName('remove').setDescription('Entfernt ein Shop-Item.').addStringOption(o => o.setName('id').setDescription('Item-ID').setRequired(true))),
+    new SlashCommandBuilder()
+      .setName('engagement')
+      .setDescription('Richtet Coins, Drops und Live-Aktivität ein.')
+      .addSubcommand(s => s.setName('setup').setDescription('Aktiviert das Engagement-System in einem Channel.').addChannelOption(o => o.setName('channel').setDescription('Activity-Hub').setRequired(true).addChannelTypes(ChannelType.GuildText)))
+      .addSubcommand(s => s.setName('status').setDescription('Zeigt den Status des Engagement-Systems.'))
+      .addSubcommand(s => s.setName('drop').setDescription('Startet manuell einen Random Drop.')),
 
     new SlashCommandBuilder()
       .setName('setupserver')
@@ -3168,6 +3505,10 @@ client.once(Events.ClientReady, async readyClient => {
   // Fragen, Umfragen, Mitglied des Monats und Clip der Woche automatisch ausführen.
   await checkCommunityAutomation(readyClient);
   setInterval(() => checkCommunityAutomation(readyClient).catch(() => {}), COMMUNITY_CHECK_INTERVAL_MS);
+
+  // Coins, Live-Aktivität, Missionen und Random Drops.
+  await checkEngagementAutomation(readyClient);
+  setInterval(() => checkEngagementAutomation(readyClient).catch(() => {}), 15 * 60 * 1000);
 });
 
 // ============================================================
@@ -3176,6 +3517,10 @@ client.once(Events.ClientReady, async readyClient => {
 
 client.on(Events.GuildMemberAdd, async member => {
   const data = loadData(member.guild.id);
+  if (data.engagement.enabled && !member.user.bot) {
+    ensureDailyStats(data, Date.now()).joins++;
+    saveData(data);
+  }
 
   const usedInvite = await detectUsedInvite(member.guild).catch(() => null);
   if (usedInvite?.inviter?.id) {
@@ -3270,7 +3615,10 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   if (oldState.channelId !== newState.channelId && !newState.member?.user.bot) {
     if (oldState.channelId) {
       const duration = finishVoiceSession(data, newState.member.id);
-      if (duration) await checkAndAwardBadges(data, newState.member.id);
+      if (duration) {
+        recordEngagementVoice(data, newState.member.id, duration);
+        await checkAndAwardBadges(data, newState.member.id);
+      }
     }
     if (newState.channelId) startVoiceSession(data, newState.member, newState.channelId);
     saveData(data);
@@ -3331,6 +3679,7 @@ client.on(Events.MessageCreate, async message => {
   if (await handleAutomodMessage(message, data)) return;
 
   await recordCommunityMessage(message, data).catch(error => console.error('❌ Community-Aktivität Fehler:', error));
+  recordEngagementMessage(message, data);
   await awardMessageXp(message, data).catch(error => console.error('❌ Level-System Fehler:', error));
 
   if (await handleCommunityGameMessage(message, data)) return;
@@ -3603,6 +3952,31 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
+      if (interaction.customId.startsWith('coin_drop:')) {
+        const dropId = interaction.customId.split(':')[1];
+        const drop = data.engagement.drop;
+        if (!drop?.activeId || drop.activeId !== dropId || drop.claimedBy || drop.expiresAt <= Date.now()) {
+          await interaction.reply({ content: '💨 Dieser Drop ist bereits weg oder abgelaufen.', ephemeral: true });
+          return;
+        }
+        drop.claimedBy = interaction.user.id;
+        const reward = Number(drop.reward) || 0;
+        addCoins(data, interaction.user.id, reward);
+        addSeasonPoints(data, interaction.user.id, Math.max(5, Math.floor(reward / 10)));
+        ensureDailyStats(data).coinsAwarded += reward;
+        drop.activeId = null;
+        saveData(data);
+        const disabled = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`coin_drop:${dropId}`).setLabel(`Gesichert von ${interaction.user.username}`.slice(0, 80)).setEmoji('✅').setStyle(ButtonStyle.Secondary).setDisabled(true),
+        );
+        await interaction.update({
+          embeds: [new EmbedBuilder().setColor(0x2ecc71).setTitle('⚡ DROP GESICHERT').setDescription(`<@${interaction.user.id}> war am schnellsten und bekommt **${reward} Coins**!`)],
+          components: [disabled],
+          allowedMentions: { users: [interaction.user.id] },
+        });
+        return;
+      }
+
       if (interaction.customId.startsWith('giveaway_join:')) {
         if (!interaction.inGuild()) return;
         const messageId = interaction.customId.split(':')[1];
@@ -3730,6 +4104,10 @@ client.on(Events.InteractionCreate, async interaction => {
         }
         const previous = poll.votes[interaction.user.id];
         poll.votes[interaction.user.id] = index;
+        if (data.engagement.enabled) {
+          const mission = ensureMissionRecord(data, interaction.user.id);
+          mission.pollVotes = Math.max(1, mission.pollVotes || 0);
+        }
         saveData(data);
         await interaction.update(communityPollPayload(poll));
         await interaction.followUp({
@@ -4177,6 +4555,7 @@ client.on(Events.InteractionCreate, async interaction => {
           { name: '🏆 Level & Invites', value: '`/rank` `/leaderboard` `/levelrole` `/levelsystem` `/invites` `/inviteleaderboard`' },
           { name: '📅 Events & Team', value: '`/event` `/duty` `/dutystats` `/dutyleaderboard`' },
           { name: '💬 Community-Aktivität', value: '`/frage` `/communitypoll` `/memberofthemonth` `/rep` `/reps` `/communityrank` `/communityleaderboard`' },
+          { name: '⚡ Coins & Aktivität', value: '`/daily` `/coins` `/missions` `/shop` `/season` `/seasonleaderboard` `/engagement`' },
           { name: '🎮 Gemeinsam', value: '`/clip` `/mitspieler` `/challenge` `/game` `/badges`' },
           { name: '👤 Profile & Willkommen', value: '`/profil` `/profilset` `/interessen` `/anonymouspanel` `/anonymousinfo`' },
           { name: '🧩 Eigene Commands', value: '`/customcommand` oder gespeicherte Befehle mit `!name`' },
@@ -4234,6 +4613,240 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
+
+    if (command === 'daily') {
+      if (!data.engagement.enabled) {
+        await interaction.reply({ content: '❌ Das Engagement-System ist noch nicht aktiviert. Ein Admin kann `/engagement setup` nutzen.', ephemeral: true });
+        return;
+      }
+      const wallet = ensureWallet(data, interaction.user.id);
+      const today = localDateInfo().date;
+      if (wallet.lastDailyDate === today) {
+        await interaction.reply({ content: `🔥 Du hast dein Daily heute bereits abgeholt. Aktueller Streak: **${wallet.streak || 0} Tage**.`, ephemeral: true });
+        return;
+      }
+      const yesterday = shiftDateKey(today, -1);
+      wallet.streak = wallet.lastDailyDate === yesterday ? (wallet.streak || 0) + 1 : 1;
+      wallet.bestStreak = Math.max(wallet.bestStreak || 0, wallet.streak);
+      wallet.lastDailyDate = today;
+      const reward = 75 + Math.min(150, Math.max(0, wallet.streak - 1) * 10);
+      addCoins(data, interaction.user.id, reward);
+      addSeasonPoints(data, interaction.user.id, 10);
+      const mission = ensureMissionRecord(data, interaction.user.id);
+      mission.dailyClaimed = 1;
+      ensureDailyStats(data).coinsAwarded += reward;
+      saveData(data);
+      await interaction.reply({
+        embeds: [new EmbedBuilder()
+          .setColor(0xf1c40f)
+          .setTitle('🔥 DAILY ABGEHOLT')
+          .setDescription(`Du bekommst **${reward} Coins** + **10 Season Points**.`)
+          .addFields(
+            { name: 'Streak', value: `🔥 **${wallet.streak} Tage**`, inline: true },
+            { name: 'Bestwert', value: `🏆 **${wallet.bestStreak} Tage**`, inline: true },
+            { name: 'Kontostand', value: `🪙 **${wallet.coins} Coins**`, inline: true },
+          )],
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (command === 'coins') {
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'balance') {
+        const user = interaction.options.getUser('user') || interaction.user;
+        const wallet = ensureWallet(data, user.id);
+        const season = data.engagement.seasons[seasonKey()]?.users?.[user.id] || 0;
+        await interaction.reply({ embeds: [new EmbedBuilder()
+          .setColor(0xf1c40f)
+          .setTitle(`🪙 Wallet • ${user.username}`)
+          .setThumbnail(user.displayAvatarURL({ size: 256 }))
+          .addFields(
+            { name: 'Coins', value: `**${wallet.coins}**`, inline: true },
+            { name: 'Lifetime', value: `**${wallet.lifetime}**`, inline: true },
+            { name: 'Season Points', value: `**${season}**`, inline: true },
+            { name: 'Daily Streak', value: `🔥 **${wallet.streak || 0} Tage**`, inline: true },
+          )] });
+        return;
+      }
+      const top = coinLeaderboard(data).slice(0, 10);
+      const text = top.length ? top.map((entry, index) => `**${index + 1}.** <@${entry.userId}> • 🪙 **${entry.coins}**`).join('\n') : '*Noch keine Coins verdient.*';
+      await interaction.reply({ embeds: [new EmbedBuilder().setColor(0xf1c40f).setTitle('🪙 Coin Leaderboard').setDescription(text)], allowedMentions: { parse: [] } });
+      return;
+    }
+
+    if (command === 'missions') {
+      if (!data.engagement.enabled) {
+        await interaction.reply({ content: '❌ Das Engagement-System ist noch nicht aktiviert.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      const record = ensureMissionRecord(data, interaction.user.id);
+      if (sub === 'view') {
+        const lines = Object.entries(DAILY_MISSIONS).map(([key, def]) => {
+          const done = missionProgress(record, key) >= def.target;
+          const claimed = record.claimed.includes(key);
+          return `${claimed ? '✅' : done ? '🟢' : '▫️'} ${def.emoji} **${def.label}** • ${missionProgressText(record, key)} • 🪙 ${def.reward} / ⚡ ${def.season} SP`;
+        });
+        await interaction.reply({ embeds: [new EmbedBuilder()
+          .setColor(0x8b5cf6)
+          .setTitle('🎯 Tägliche Missionen')
+          .setDescription(lines.join('\n') + '\n\nFertige Missionen mit `/missions claim` abholen.')
+          .setFooter({ text: `Reset täglich • ${localDateInfo().date}` })], ephemeral: true });
+        return;
+      }
+      const key = interaction.options.getString('mission');
+      const def = DAILY_MISSIONS[key];
+      if (!def) {
+        await interaction.reply({ content: '❌ Unbekannte Mission.', ephemeral: true });
+        return;
+      }
+      if (record.claimed.includes(key)) {
+        await interaction.reply({ content: '✅ Diese Mission hast du heute bereits abgeholt.', ephemeral: true });
+        return;
+      }
+      if (missionProgress(record, key) < def.target) {
+        await interaction.reply({ content: `❌ Noch nicht fertig: **${missionProgressText(record, key)}**.`, ephemeral: true });
+        return;
+      }
+      record.claimed.push(key);
+      const wallet = addCoins(data, interaction.user.id, def.reward);
+      addSeasonPoints(data, interaction.user.id, def.season);
+      ensureDailyStats(data).coinsAwarded += def.reward;
+      saveData(data);
+      await interaction.reply({ content: `✅ **${def.label}** abgeschlossen: +**${def.reward} Coins** und +**${def.season} Season Points**.\n🪙 Neuer Stand: **${wallet.coins} Coins**`, ephemeral: true });
+      return;
+    }
+
+    if (command === 'season' || command === 'seasonleaderboard') {
+      const top = seasonLeaderboard(data);
+      if (command === 'seasonleaderboard') {
+        const text = top.length ? top.slice(0, 10).map((entry, index) => `**${index + 1}.** <@${entry.userId}> • ⚡ **${entry.points} SP**`).join('\n') : '*Noch keine Season-Punkte gesammelt.*';
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle(`⚡ Season ${seasonKey()}`).setDescription(text)], allowedMentions: { parse: [] } });
+        return;
+      }
+      const user = interaction.options.getUser('user') || interaction.user;
+      const points = data.engagement.seasons[seasonKey()]?.users?.[user.id] || 0;
+      const place = top.findIndex(entry => entry.userId === user.id) + 1;
+      await interaction.reply({ embeds: [new EmbedBuilder()
+        .setColor(0x8b5cf6)
+        .setTitle(`⚡ Season • ${user.username}`)
+        .setDescription(`**Season:** ${seasonKey()}\n**Punkte:** ${points} SP\n**Platz:** ${place ? `#${place}` : 'Noch nicht platziert'}`)
+        .setThumbnail(user.displayAvatarURL({ size: 256 }))] });
+      return;
+    }
+
+    if (command === 'shop') {
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'list') {
+        const items = Object.values(data.engagement.shop || {}).sort((a, b) => a.price - b.price);
+        const text = items.length ? items.map(item => `• \`${item.id}\` • **${item.name}** • 🪙 ${item.price} • <@&${item.roleId}>`).join('\n') : '*Der Shop ist noch leer. Admins können mit `/shop add` Rollen hinzufügen.*';
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor(0xf1c40f).setTitle('🛒 Community Shop').setDescription(text)], allowedMentions: { parse: [] } });
+        return;
+      }
+      if (sub === 'add' || sub === 'remove') {
+        if (!canSetup(interaction.member)) {
+          await interaction.reply({ content: '❌ Du brauchst **Server verwalten** oder Administrator.', ephemeral: true });
+          return;
+        }
+        const id = interaction.options.getString('id').trim().toLowerCase();
+        if (!/^[a-z0-9_-]{1,24}$/.test(id)) {
+          await interaction.reply({ content: '❌ Die Item-ID darf nur `a-z`, Zahlen, `_` und `-` enthalten.', ephemeral: true });
+          return;
+        }
+        if (sub === 'remove') {
+          if (!data.engagement.shop[id]) {
+            await interaction.reply({ content: '❌ Dieses Shop-Item gibt es nicht.', ephemeral: true });
+            return;
+          }
+          delete data.engagement.shop[id];
+          saveData(data);
+          await interaction.reply({ content: `✅ Shop-Item \`${id}\` entfernt.`, ephemeral: true });
+          return;
+        }
+        const role = interaction.options.getRole('rolle');
+        const botMember = interaction.guild.members.me;
+        if (role.managed || role.id === interaction.guild.id || !botMember || botMember.roles.highest.comparePositionTo(role) <= 0) {
+          await interaction.reply({ content: '❌ Der Bot kann diese Rolle nicht vergeben. Schiebe die Bot-Rolle höher.', ephemeral: true });
+          return;
+        }
+        data.engagement.shop[id] = {
+          id,
+          name: interaction.options.getString('name').trim(),
+          price: interaction.options.getInteger('preis'),
+          roleId: role.id,
+          createdBy: interaction.user.id,
+          createdAt: Date.now(),
+        };
+        saveData(data);
+        await interaction.reply({ content: `✅ **${data.engagement.shop[id].name}** für **${data.engagement.shop[id].price} Coins** zum Shop hinzugefügt.`, ephemeral: true });
+        return;
+      }
+      const id = interaction.options.getString('id').trim().toLowerCase();
+      const item = data.engagement.shop[id];
+      if (!item) {
+        await interaction.reply({ content: '❌ Dieses Shop-Item gibt es nicht.', ephemeral: true });
+        return;
+      }
+      const role = await interaction.guild.roles.fetch(item.roleId).catch(() => null);
+      if (!role) {
+        await interaction.reply({ content: '❌ Die Rolle dieses Shop-Items existiert nicht mehr.', ephemeral: true });
+        return;
+      }
+      if (interaction.member.roles.cache.has(role.id)) {
+        await interaction.reply({ content: '❌ Du besitzt diese Rolle bereits.', ephemeral: true });
+        return;
+      }
+      const botMember = interaction.guild.members.me;
+      if (role.managed || !botMember || botMember.roles.highest.comparePositionTo(role) <= 0) {
+        await interaction.reply({ content: '❌ Der Bot kann diese Rolle aktuell nicht vergeben.', ephemeral: true });
+        return;
+      }
+      const wallet = ensureWallet(data, interaction.user.id);
+      if (wallet.coins < item.price) {
+        await interaction.reply({ content: `❌ Du brauchst **${item.price} Coins**, hast aber nur **${wallet.coins}**.`, ephemeral: true });
+        return;
+      }
+      await interaction.member.roles.add(role, `Shop-Kauf: ${item.name}`).catch(() => null);
+      if (!interaction.member.roles.cache.has(role.id)) await interaction.member.fetch().catch(() => {});
+      if (!interaction.member.roles.cache.has(role.id)) {
+        await interaction.reply({ content: '❌ Die Rolle konnte nicht vergeben werden. Es wurden keine Coins abgezogen.', ephemeral: true });
+        return;
+      }
+      wallet.coins -= item.price;
+      wallet.spent = (wallet.spent || 0) + item.price;
+      saveData(data);
+      await interaction.reply({ content: `🛒 Gekauft: **${item.name}** für **${item.price} Coins**. Neuer Stand: **${wallet.coins} Coins**.`, ephemeral: true });
+      return;
+    }
+
+    if (command === 'engagement') {
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'status') {
+        await interaction.reply({ embeds: [new EmbedBuilder()
+          .setColor(data.engagement.enabled ? 0x2ecc71 : 0xe74c3c)
+          .setTitle('⚡ Engagement-System')
+          .setDescription(`**Status:** ${data.engagement.enabled ? 'Aktiv' : 'Aus'}\n**Channel:** ${data.config.engagementChannelId ? `<#${data.config.engagementChannelId}>` : 'Nicht gesetzt'}\n**Wallets:** ${Object.keys(data.engagement.wallets || {}).length}\n**Shop-Items:** ${Object.keys(data.engagement.shop || {}).length}\n**Season:** ${seasonKey()}`)], ephemeral: true });
+        return;
+      }
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Du brauchst **Server verwalten** oder Administrator.', ephemeral: true });
+        return;
+      }
+      if (sub === 'setup') {
+        const channel = interaction.options.getChannel('channel');
+        data.config.engagementChannelId = channel.id;
+        data.engagement.enabled = true;
+        data.engagement.activityPanelMessageId = null;
+        saveData(data);
+        await updateActivityPanel(interaction.guild, data, true);
+        await interaction.reply({ content: `✅ Engagement-System aktiviert in <#${channel.id}>.\nDaily, Coins, Missionen, Seasons, Shop, Live-Panel und Random Drops sind jetzt aktiv.`, ephemeral: true });
+        return;
+      }
+      const drop = await createRandomDrop(interaction.guild, data, true);
+      await interaction.reply({ content: drop ? `✅ Random Drop gestartet: ${drop.url}` : '⚠️ Es läuft bereits ein Drop oder der Activity-Channel fehlt.', ephemeral: true });
+      return;
+    }
 
     if (command === 'backupserver') {
       if (!isGuildOwner(interaction)) {

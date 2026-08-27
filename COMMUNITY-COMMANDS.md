@@ -1,56 +1,73 @@
-# Neue Community-Funktionen
+# Unfug Community Bot v6 – Commands
 
-Der Bot registriert die Slash-Commands beim Start automatisch. Die vorhandenen Daten aus `data.json` bleiben erhalten und werden auf die neue Datenversion erweitert.
+## Coins & Aktivität
 
-## Schnell einrichten
+- `/daily` – tägliche Coins + Streak
+- `/coins balance [user]` – Coin-Stand anzeigen
+- `/coins leaderboard` – Coin-Bestenliste
+- `/missions view` – tägliche Missionen anzeigen
+- `/missions claim mission:<...>` – fertige Mission abholen
+- `/season [user]` – aktuelle Season-Punkte und Platzierung
+- `/seasonleaderboard` – Season Top 10
 
-- `/frage setup` – tägliche Frage und Uhrzeit festlegen
-- `/communitypoll setup` – tägliche oder wöchentliche Umfragen aktivieren
-- `/memberofthemonth setup` – Monatsauszeichnung und optionale Rolle festlegen
-- `/clip setup` – Channel für den Clip der Woche festlegen
-- `/mitspieler setup` – Channel für Mitspielersuchen festlegen
-- `/anonymouspanel` – Panel und Team-Inbox für anonyme Nachrichten erstellen
-- `/interessen add` – Interessenrolle hinzufügen
-- `/interessen panel` – Willkommens- und Interessenpanel erstellen
+## Shop
 
-## Befehle für Mitglieder
+- `/shop list` – alle Shop-Items
+- `/shop buy id:<id>` – Rolle mit Coins kaufen
+- `/shop add id:<id> name:<name> preis:<coins> rolle:<rolle>` – Shop-Rolle hinzufügen
+- `/shop remove id:<id>` – Shop-Item entfernen
+
+`/shop add` und `/shop remove` benötigen Server-verwalten oder Administrator.
+
+## Engagement Setup
+
+- `/engagement setup channel:<channel>` – Coins, Missionen, Seasons, Live-Panel und Drops aktivieren
+- `/engagement status` – Status anzeigen
+- `/engagement drop` – manuellen Coin-Drop starten
+
+Beim `/setupserver` wird das Engagement-System automatisch mit dem neuen Activity-Hub verbunden.
+
+## Server Designer & Backup
+
+- `/setupserver design:1 bestaetigen:true` – Clean Community
+- `/setupserver design:2 bestaetigen:true` – Gambo / Szene • Redline
+- `/setupserver design:3 bestaetigen:true` – Minimal Elite • Obsidian
+- `/setupserver design:4 bestaetigen:true` – private UNFUGSTIFTER Edition
+- `/backupserver`
+- `/restoreserver bestaetigen:true`
+
+Diese drei Server-Struktur-Befehle sind nur für den echten Server-Inhaber verfügbar.
+
+## Bereits vorhandene Community-Funktionen
 
 - `/rep`, `/reps`
 - `/communityrank`, `/communityleaderboard`
-- `/clip submit`, `/clip top`
+- `/clip submit`, `/clip top`, `/clip finish`
 - `/mitspieler create`, `/mitspieler list`, `/mitspieler close`
-- `/challenge list`
-- `/game status`, `/badges`
+- `/challenge create`, `/challenge list`, `/challenge end`
+- `/game start`, `/game stop`, `/game quiz`, `/game leaderboard`, `/game status`
+- `/badges`
 - `/profil`, `/profilset`
-
-## Team-Befehle
-
-- `/clear anzahl:1–100` – mehrere Nachrichten gleichzeitig löschen
-- `/frage add`, `/frage remove`, `/frage post`, `/frage status`
-- `/communitypoll add`, `/communitypoll remove`, `/communitypoll post`, `/communitypoll status`
-- `/memberofthemonth run`
-- `/clip finish`
-- `/challenge create`, `/challenge end`
-- `/game start`, `/game stop`, `/game quiz`, `/game leaderboard`
-- `/anonymousinfo`
-- `/interessen add`, `/interessen remove`, `/interessen list`, `/interessen panel`
+- `/frage ...`
+- `/communitypoll ...`
+- `/memberofthemonth ...`
+- `/anonymouspanel`, `/anonymousinfo`
+- `/interessen ...`
 
 ## Automatik
 
-- Aktivität aus Textchat und Voice wird dauerhaft gespeichert.
-- Das Mitglied des Monats wird anhand gemeinsamer Community-Punkte ausgewählt.
-- Community-Punkte: 1 Punkt pro Nachricht und 1 Punkt pro 5 Voice-Minuten.
-- Clips werden wöchentlich ausgewertet.
-- Erfolge und Abzeichen werden automatisch freigeschaltet.
-- Alle Uhrzeiten verwenden standardmäßig `Europe/Vienna`. Das kann mit der Railway-Variable `COMMUNITY_TIMEZONE` geändert werden.
-
-## Server-Designer & Backup
-
-- `/setupserver design:1 bestaetigen:true` – Clean Community
-- `/setupserver design:2 bestaetigen:true` – Gambo / Szene
-- `/setupserver design:3 bestaetigen:true` – Minimal Elite
-- `/setupserver design:4 bestaetigen:true` – private UNFUGSTIFTER Edition (Whitelist erforderlich)
-- `/backupserver` – Rollen, Channels, Rechte und Bot-Channel-Konfiguration sichern
-- `/restoreserver bestaetigen:true` – letztes Backup rekonstruieren
-
-Diese drei Befehle sind nur für den **echten Server-Inhaber** verfügbar, nicht für normale Administratoren.
+- Text- und Voice-Aktivität
+- XP / Level
+- Coins mit Chat-Cooldown
+- Voice-Coin-Rewards
+- tägliche Missionen
+- monatliche Seasons
+- Live Activity Panel
+- Random Coin Drops
+- Frage des Tages
+- Community-Umfragen
+- Mitglied des Monats
+- Clip der Woche
+- Giveaways
+- AutoMod
+- Invite-Tracking
