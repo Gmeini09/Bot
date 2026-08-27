@@ -160,4 +160,4 @@ Der Bot benötigt für `/setupserver` Administratorrechte. Für Shop-Rollen muss
 4. Im Railway-Log auf `✅ Eingeloggt als ...` und die Command-Registrierung achten.
 5. Auf einem Testserver zuerst `/engagement status` bzw. `/setupserver` testen.
 
-Webhook Test
+Webhook Testing
