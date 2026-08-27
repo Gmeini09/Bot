@@ -1,7 +1,7 @@
 {
   "name": "community-allround-bot",
-  "version": "3.3.0",
-  "description": "Discord community allround bot with server setup designs, editable rulebook, coins, daily streaks, missions, seasons, shop, random drops, live activity, socials, moderation and tickets",
+  "version": "3.4.0",
+  "description": "Discord community allround bot with automatic GitHub push changelogs, server setup designs, editable rulebook, engagement, moderation and tickets",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

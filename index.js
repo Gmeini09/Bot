@@ -19,6 +19,8 @@ const {
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
+const crypto = require('crypto');
 
 // ============================================================
 // KONFIGURATION
@@ -44,6 +46,10 @@ const config = {
     '1531994256107901150',
     '1531994258691588177',
   ]),
+  changelogChannelId: process.env.CHANGELOG_CHANNEL_ID || '1542411163630051358',
+  githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET || '',
+  githubRepo: process.env.GITHUB_REPO || 'Gmeini09/Bot',
+  port: Number(process.env.PORT || 3000),
 };
 
 if (!config.token) {
@@ -3558,6 +3564,195 @@ function buildCommands() {
       .setDescription('Setzt den Social-Audit-Channel.')
       .addChannelOption(o => o.setName('channel').setDescription('Audit-Channel').setRequired(true).addChannelTypes(ChannelType.GuildText)),
   ].map(command => command.toJSON());
+}
+
+// ============================================================
+// GITHUB CHANGELOG WEBHOOK
+// ============================================================
+
+const githubDeliveries = new Set();
+
+function safeEqualText(a, b) {
+  try {
+    const left = Buffer.from(String(a || ''), 'utf8');
+    const right = Buffer.from(String(b || ''), 'utf8');
+    return left.length === right.length && crypto.timingSafeEqual(left, right);
+  } catch {
+    return false;
+  }
+}
+
+function verifyGithubSignature(rawBody, signature) {
+  if (!config.githubWebhookSecret) return false;
+  const expected = `sha256=${crypto
+    .createHmac('sha256', config.githubWebhookSecret)
+    .update(rawBody)
+    .digest('hex')}`;
+  return safeEqualText(expected, signature);
+}
+
+function githubCommitLine(commit, repoFullName) {
+  const sha = String(commit?.id || '').slice(0, 7) || 'commit';
+  const firstLine = String(commit?.message || 'Ohne Commit-Nachricht').split(/\r?\n/)[0].slice(0, 160);
+  const author = commit?.author?.username || commit?.author?.name || 'Unbekannt';
+  const url = commit?.url || (commit?.id ? `https://github.com/${repoFullName}/commit/${commit.id}` : null);
+  const shaText = url ? `[${sha}](${url})` : `\`${sha}\``;
+  return `${shaText} • ${firstLine} — **${String(author).slice(0, 80)}**`;
+}
+
+async function postGithubChangelog(payload) {
+  if (!client.isReady()) throw new Error('DISCORD_NOT_READY');
+
+  const repoFullName = payload?.repository?.full_name || 'Unbekanntes Repository';
+  if (config.githubRepo && repoFullName.toLowerCase() !== config.githubRepo.toLowerCase()) {
+    return { ignored: true, reason: 'REPOSITORY_FILTER' };
+  }
+
+  const channel = await client.channels.fetch(config.changelogChannelId).catch(() => null);
+  if (!channel?.isTextBased()) throw new Error('CHANGELOG_CHANNEL_NOT_FOUND');
+
+  const branch = String(payload?.ref || '').replace('refs/heads/', '') || 'unbekannt';
+  const commits = Array.isArray(payload?.commits) ? payload.commits : [];
+  const pusher = payload?.pusher?.name || payload?.sender?.login || 'Unbekannt';
+  const compareUrl = payload?.compare || payload?.repository?.html_url || null;
+  const shown = commits.slice(-8).map(commit => githubCommitLine(commit, repoFullName));
+  const hidden = Math.max(0, commits.length - shown.length);
+
+  let description;
+  if (payload?.deleted) {
+    description = `🗑️ Branch **${branch}** wurde gelöscht.`;
+  } else if (payload?.created && commits.length === 0) {
+    description = `🌱 Branch **${branch}** wurde erstellt.`;
+  } else if (shown.length) {
+    description = shown.join('\n');
+    if (hidden) description += `\n\n*… und ${hidden} weitere Commits.*`;
+  } else {
+    description = '*Push empfangen, aber GitHub hat keine einzelnen Commits mitgesendet.*';
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x8b5cf6)
+    .setAuthor({ name: 'GitHub • Automatischer Changelog' })
+    .setTitle(`🚀 ${repoFullName} • ${branch}`)
+    .setDescription(description.slice(0, 4096))
+    .addFields(
+      { name: 'Commits', value: String(commits.length), inline: true },
+      { name: 'Push von', value: String(pusher).slice(0, 1024), inline: true },
+      { name: 'Force Push', value: payload?.forced ? 'Ja' : 'Nein', inline: true },
+    )
+    .setTimestamp();
+
+  if (payload?.after && payload.after !== '0000000000000000000000000000000000000000') {
+    embed.setFooter({ text: `HEAD ${String(payload.after).slice(0, 7)} • automatisch von GitHub` });
+  } else {
+    embed.setFooter({ text: 'Automatisch von GitHub' });
+  }
+  if (compareUrl) embed.setURL(compareUrl);
+
+  await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+  return { ignored: false };
+}
+
+function startGithubWebhookServer() {
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+
+    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: true, botReady: client.isReady(), githubWebhook: Boolean(config.githubWebhookSecret) }));
+      return;
+    }
+
+    if (req.method !== 'POST' || url.pathname !== '/github-webhook') {
+      res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: 'NOT_FOUND' }));
+      return;
+    }
+
+    if (!config.githubWebhookSecret) {
+      res.writeHead(503, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: 'GITHUB_WEBHOOK_SECRET_NOT_CONFIGURED' }));
+      return;
+    }
+
+    const chunks = [];
+    let size = 0;
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > 2 * 1024 * 1024) {
+        res.writeHead(413, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: 'PAYLOAD_TOO_LARGE' }));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on('end', async () => {
+      if (res.writableEnded) return;
+      const rawBody = Buffer.concat(chunks);
+      const signature = req.headers['x-hub-signature-256'];
+      if (!verifyGithubSignature(rawBody, signature)) {
+        res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: 'INVALID_SIGNATURE' }));
+        return;
+      }
+
+      const deliveryId = String(req.headers['x-github-delivery'] || '');
+      if (deliveryId && githubDeliveries.has(deliveryId)) {
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, duplicate: true }));
+        return;
+      }
+
+      let payload;
+      try {
+        payload = JSON.parse(rawBody.toString('utf8'));
+      } catch {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: 'INVALID_JSON' }));
+        return;
+      }
+
+      const event = String(req.headers['x-github-event'] || '');
+      if (event === 'ping') {
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, message: 'pong' }));
+        return;
+      }
+
+      if (event !== 'push') {
+        res.writeHead(202, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, ignored: true, event }));
+        return;
+      }
+
+      try {
+        const result = await postGithubChangelog(payload);
+        if (deliveryId) {
+          githubDeliveries.add(deliveryId);
+          if (githubDeliveries.size > 200) githubDeliveries.delete(githubDeliveries.values().next().value);
+        }
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, ...result }));
+      } catch (error) {
+        console.error('❌ GitHub Changelog Webhook:', error);
+        res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: error.message || 'INTERNAL_ERROR' }));
+      }
+    });
+  });
+
+  server.listen(config.port, '0.0.0.0', () => {
+    console.log(`🌐 Webserver läuft auf Port ${config.port}.`);
+    console.log('🔗 GitHub Webhook Endpoint: /github-webhook');
+    console.log(`📝 Changelog-Channel: ${config.changelogChannelId}`);
+    if (!config.githubWebhookSecret) {
+      console.warn('⚠️ GITHUB_WEBHOOK_SECRET fehlt. GitHub Push-Changelogs bleiben deaktiviert, bis die Variable gesetzt ist.');
+    }
+  });
+
+  return server;
 }
 
 // ============================================================
@@ -7088,4 +7283,5 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 });
 
+startGithubWebhookServer();
 client.login(config.token);

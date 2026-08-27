@@ -1,7 +1,42 @@
-# Unfug Community Bot – All-in-One v7
+# Unfug Community Bot – All-in-One v8
 
-Diese Version baut auf v6 auf und ergänzt das Engagement-System um ein vollständiges, editierbares Regelwerk-System.
+Diese Version baut auf v7 auf und ergänzt den Bot um automatische GitHub-Push-Changelogs.
 
+
+## Neu in v8 – automatische GitHub Changelogs
+
+Bei **jedem Push** auf dein GitHub-Repository postet der Bot automatisch einen Changelog in Discord.
+
+Standard-Zielchannel:
+
+`1542411163630051358`
+
+### Railway Variablen
+
+Pflicht:
+
+- `GITHUB_WEBHOOK_SECRET=DEIN_LANGES_ZUFAELLIGES_SECRET`
+
+Optional, bereits passend voreingestellt:
+
+- `CHANGELOG_CHANNEL_ID=1542411163630051358`
+- `GITHUB_REPO=Gmeini09/Bot`
+
+Railway stellt `PORT` automatisch bereit. Der Bot startet zusätzlich zu Discord einen kleinen HTTP-Webserver.
+
+### GitHub Webhook einmalig einrichten
+
+1. Railway → Bot-Service → **Settings / Networking** → öffentliche Domain erzeugen.
+2. GitHub → Repository → **Settings → Webhooks → Add webhook**.
+3. Payload URL: `https://DEINE-RAILWAY-DOMAIN/github-webhook`
+4. Content type: `application/json`
+5. Secret: exakt derselbe Wert wie `GITHUB_WEBHOOK_SECRET` bei Railway.
+6. **Just the push event** auswählen.
+7. Webhook aktivieren und speichern.
+
+Der Discord-Post enthält Repository, Branch, Commit-Anzahl, Pusher, Commit-Nachrichten und Commit-Links. Der Webhook prüft GitHubs `sha256`-Signatur und verwirft ungültige Requests. Doppelte GitHub-Deliveries werden nicht doppelt gepostet.
+
+Healthcheck: `https://DEINE-RAILWAY-DOMAIN/health`
 
 ## Neu in v7 – `/regelwerk`
 

@@ -81,3 +81,10 @@ Diese drei Server-Struktur-Befehle sind nur für den echten Server-Inhaber verf�
 - Giveaways
 - AutoMod
 - Invite-Tracking
+
+
+## GitHub / Changelog
+
+- Automatischer Changelog bei jedem GitHub-`push` über `/github-webhook`
+- Ziel-Channel: `1542411163630051358`
+- Kein Slash-Command nötig; GitHub löst den Post automatisch aus
