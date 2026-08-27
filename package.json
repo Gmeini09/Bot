@@ -1,7 +1,7 @@
 {
   "name": "community-allround-bot",
-  "version": "3.4.0",
-  "description": "Discord community allround bot with automatic GitHub push changelogs, server setup designs, editable rulebook, engagement, moderation and tickets",
+  "version": "4.0.0",
+  "description": "Discord community allround bot with complete server setup, GitHub changelogs, anti-nuke, self-healing, ticket 2.0, temp voice controls, moderation cases and owner dashboard",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

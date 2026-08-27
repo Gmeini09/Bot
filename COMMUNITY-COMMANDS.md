@@ -1,90 +1,78 @@
-# Unfug Community Bot v7 – Commands
+# Unfug Community Bot v10 – Commands
 
+## Server Management
+
+- `/setupserver design:<1-4> bestaetigen:true` – erstellt den kompletten Discord inklusive Rollen, Channels, Permissions, Panels und Bot-Verknüpfungen
+- `/backupserver` – Serverstruktur sichern
+- `/restoreserver bestaetigen:true` – letztes Backup wiederherstellen
+- `/servercheck` – Server- und Bot-Konfiguration prüfen
+- `/permissionscan` – kritische Rollenrechte anzeigen
+- `/dashboard` – Owner Dashboard
+
+## Security
+
+- `/antinuke enable`
+- `/antinuke disable`
+- `/antinuke status`
+- `/antinuke whitelist user:<user>`
+- `/antinuke unwhitelist user:<user>`
+- `/selfheal enable`
+- `/selfheal disable`
+- `/selfheal status`
+- `/automod ...`
+
+## Tickets 2.0
+
+Das Ticket-Panel bietet automatisch:
+
+- Support
+- Kauf
+- Partnerschaft
+- Report
+- Entbannung
+
+Commands:
+
+- `/ticket add user:<user>`
+- `/ticket remove user:<user>`
+- `/ticket close`
+- `/ticket priority stufe:<Normal|Wichtig|Dringend>`
+- `/ticket info`
+
+## Temp Voice 2.0
+
+- `/tempvoice setup ...`
+- `/tempvoice disable`
+- `/tempvoice status`
+- `/voice name`
+- `/voice limit`
+- `/voice lock`
+- `/voice unlock`
+- `/voice permit`
+- `/voice reject`
+- `/voice transfer user:<user>`
+- `/voice panel`
+
+## Mod-Cases
+
+Warn, Timeout, Kick und Ban erhalten automatisch eine Case-ID.
+
+- `/case user user:<user>` – Akte eines Users
+- `/case view id:<id>` – einzelnen Case anzeigen
+- `/case note id:<id> text:<text>` – interne Notiz hinzufügen
 
 ## Regelwerk
 
-- `/regelwerk anzeigen` – aktuelles Regelwerk anzeigen
-- `/regelwerk bearbeiten` – Regelwerk per Modal bearbeiten
-- `/regelwerk posten [channel]` – Regelwerk posten bzw. vorhandenen Post aktualisieren
-- `/regelwerk reset` – Design-Standard wiederherstellen
-
-`bearbeiten`, `posten` und `reset` benötigen Server-verwalten oder Administrator.
-
-## Coins & Aktivität
-
-- `/daily` – tägliche Coins + Streak
-- `/coins balance [user]` – Coin-Stand anzeigen
-- `/coins leaderboard` – Coin-Bestenliste
-- `/missions view` – tägliche Missionen anzeigen
-- `/missions claim mission:<...>` – fertige Mission abholen
-- `/season [user]` – aktuelle Season-Punkte und Platzierung
-- `/seasonleaderboard` – Season Top 10
-
-## Shop
-
-- `/shop list` – alle Shop-Items
-- `/shop buy id:<id>` – Rolle mit Coins kaufen
-- `/shop add id:<id> name:<name> preis:<coins> rolle:<rolle>` – Shop-Rolle hinzufügen
-- `/shop remove id:<id>` – Shop-Item entfernen
-
-`/shop add` und `/shop remove` benötigen Server-verwalten oder Administrator.
-
-## Engagement Setup
-
-- `/engagement setup channel:<channel>` – Coins, Missionen, Seasons, Live-Panel und Drops aktivieren
-- `/engagement status` – Status anzeigen
-- `/engagement drop` – manuellen Coin-Drop starten
-
-Beim `/setupserver` wird das Engagement-System automatisch mit dem neuen Activity-Hub verbunden.
-
-## Server Designer & Backup
-
-- `/setupserver design:1 bestaetigen:true` – Clean Community
-- `/setupserver design:2 bestaetigen:true` – Gambo / Szene • Redline
-- `/setupserver design:3 bestaetigen:true` – Minimal Elite • Obsidian
-- `/setupserver design:4 bestaetigen:true` – private UNFUGSTIFTER Edition
-- `/backupserver`
-- `/restoreserver bestaetigen:true`
-
-Diese drei Server-Struktur-Befehle sind nur für den echten Server-Inhaber verfügbar.
-
-## Bereits vorhandene Community-Funktionen
-
-- `/rep`, `/reps`
-- `/communityrank`, `/communityleaderboard`
-- `/clip submit`, `/clip top`, `/clip finish`
-- `/mitspieler create`, `/mitspieler list`, `/mitspieler close`
-- `/challenge create`, `/challenge list`, `/challenge end`
-- `/game start`, `/game stop`, `/game quiz`, `/game leaderboard`, `/game status`
-- `/badges`
-- `/profil`, `/profilset`
-- `/frage ...`
-- `/communitypoll ...`
-- `/memberofthemonth ...`
-- `/anonymouspanel`, `/anonymousinfo`
-- `/interessen ...`
-
-## Automatik
-
-- Text- und Voice-Aktivität
-- XP / Level
-- Coins mit Chat-Cooldown
-- Voice-Coin-Rewards
-- tägliche Missionen
-- monatliche Seasons
-- Live Activity Panel
-- Random Coin Drops
-- Frage des Tages
-- Community-Umfragen
-- Mitglied des Monats
-- Clip der Woche
-- Giveaways
-- AutoMod
-- Invite-Tracking
-
+- `/regelwerk anzeigen`
+- `/regelwerk bearbeiten`
+- `/regelwerk posten [channel]`
+- `/regelwerk reset`
 
 ## GitHub / Changelog
 
-- Automatischer Changelog bei jedem GitHub-`push` über `/github-webhook`
-- Ziel-Channel: `1542411163630051358`
-- Kein Slash-Command nötig; GitHub löst den Post automatisch aus
+- Jeder GitHub Push an den eingerichteten Webhook wird automatisch im Changelog-Channel gepostet.
+- Das v9 Monospace-Design mit `(+)` Einträgen und optionalem `@everyone` bleibt erhalten.
+
+## Weitere Systeme
+
+Daily, Coins, Missionen, Seasons, Shop, Activity Hub, Giveaways, Level, Invites, Events, Duty, Bewerbungen, Socials, Clips, Mitspielersuche, Challenges, Community-Umfragen, Mitglied des Monats, Profile, Badges, Interessen, anonyme Nachrichten und Custom Commands bleiben enthalten.

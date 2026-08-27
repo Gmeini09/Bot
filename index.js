@@ -1,5 +1,6 @@
 const {
   ActionRowBuilder,
+  AuditLogEvent,
   AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
@@ -77,6 +78,9 @@ const messageRateLimits = new Map();
 const joinBursts = new Map();
 const inviteCache = new Map();
 const challengeRateLimits = new Map();
+const antiNukeActions = new Map();
+const serverMaintenanceGuilds = new Set();
+const selfHealLocks = new Set();
 
 const DEFAULT_DAILY_QUESTIONS = [
   'Was war heute dein lustigster Moment?',
@@ -137,7 +141,7 @@ const BADGES = {
 
 function defaultData() {
   return {
-    version: 9,
+    version: 10,
     config: {
       welcomeChannelId: null,
       rulesChannelId: null,
@@ -180,6 +184,12 @@ function defaultData() {
       members: [],
     },
     warnings: {},
+    modCases: { nextId: 1, items: {} },
+    tickets: { nextId: 1, records: {} },
+    security: {
+      antiNuke: { enabled: false, threshold: 6, windowMs: 10000, whitelist: [] },
+      selfHealing: { enabled: false },
+    },
     giveaways: {},
     applications: {},
     automod: {
@@ -321,6 +331,25 @@ function normalizeData(raw) {
 
   base.config = { ...base.config, ...(raw?.config || {}) };
   base.warnings = raw?.warnings && typeof raw.warnings === 'object' ? raw.warnings : {};
+  base.modCases = {
+    nextId: Number(raw?.modCases?.nextId || 1),
+    items: raw?.modCases?.items && typeof raw.modCases.items === 'object' ? raw.modCases.items : {},
+  };
+  base.tickets = {
+    nextId: Number(raw?.tickets?.nextId || 1),
+    records: raw?.tickets?.records && typeof raw.tickets.records === 'object' ? raw.tickets.records : {},
+  };
+  base.security = {
+    antiNuke: {
+      ...base.security.antiNuke,
+      ...(raw?.security?.antiNuke && typeof raw.security.antiNuke === 'object' ? raw.security.antiNuke : {}),
+      whitelist: Array.isArray(raw?.security?.antiNuke?.whitelist) ? raw.security.antiNuke.whitelist : [],
+    },
+    selfHealing: {
+      ...base.security.selfHealing,
+      ...(raw?.security?.selfHealing && typeof raw.security.selfHealing === 'object' ? raw.security.selfHealing : {}),
+    },
+  };
   base.giveaways = raw?.giveaways && typeof raw.giveaways === 'object' ? raw.giveaways : {};
   base.applications = raw?.applications && typeof raw.applications === 'object' ? raw.applications : {};
   base.automod = { ...base.automod, ...(raw?.automod && typeof raw.automod === 'object' ? raw.automod : {}) };
@@ -1211,6 +1240,8 @@ function applySetupConfig(data, created, templateId) {
   data.engagement.activityPanelMessageId = null;
   data.engagement.drop = { activeId: null, messageId: null, channelId: null, reward: 0, expiresAt: 0, lastDropAt: 0, claimedBy: null };
   data.engagement.enabled = Boolean(c.engagementChannelId);
+  data.security.antiNuke.enabled = true;
+  data.security.selfHealing.enabled = true;
 
   if (['2', '3', '4'].includes(templateId)) {
     data.automod.enabled = true;
@@ -1299,16 +1330,7 @@ async function publishSetupPanels(guild, data, created, templateId) {
   }
 
   if (channelMap.tickets?.isTextBased()) {
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('ticket_create').setLabel('Ticket erstellen').setEmoji('🎫').setStyle(ButtonStyle.Primary),
-    );
-    await channelMap.tickets.send({
-      embeds: [new EmbedBuilder()
-        .setColor(SERVER_SETUP_TEMPLATES[templateId].color)
-        .setTitle('🎫 Support')
-        .setDescription('Benötigst du Hilfe? Drücke unten auf **Ticket erstellen**.')],
-      components: [row],
-    }).catch(() => {});
+    await channelMap.tickets.send(ticketPanelPayload(SERVER_SETUP_TEMPLATES[templateId].color)).catch(() => {});
   }
 
   if (channelMap.anonymous?.isTextBased()) {
@@ -3059,6 +3081,268 @@ async function checkCommunityAutomation(clientInstance) {
   }
 }
 
+
+const DANGEROUS_PERMISSION_FLAGS = [
+  PermissionFlagsBits.Administrator,
+  PermissionFlagsBits.ManageGuild,
+  PermissionFlagsBits.ManageRoles,
+  PermissionFlagsBits.ManageChannels,
+  PermissionFlagsBits.BanMembers,
+  PermissionFlagsBits.KickMembers,
+  PermissionFlagsBits.ManageWebhooks,
+];
+
+const TICKET_TYPES = {
+  support: { label: 'Support', emoji: '🎫', color: 0x5865f2, description: 'Technische Fragen, Hilfe und allgemeiner Support.' },
+  kauf: { label: 'Kauf', emoji: '🛒', color: 0x2ecc71, description: 'Fragen zu Käufen, Bots, Designs oder Bestellungen.' },
+  partner: { label: 'Partnerschaft', emoji: '🤝', color: 0x9b59b6, description: 'Partnerschafts- und Kooperationsanfragen.' },
+  report: { label: 'Report', emoji: '🚨', color: 0xe74c3c, description: 'Melde ein Problem oder einen Nutzer vertraulich an das Team.' },
+  unban: { label: 'Entbannung', emoji: '🔓', color: 0xf1c40f, description: 'Stelle eine Entbannungs- oder Sanktionsanfrage.' },
+};
+
+function ticketPanelPayload(color = 0x111111) {
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ticket_create:support').setLabel('Support').setEmoji('🎫').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('ticket_create:kauf').setLabel('Kauf').setEmoji('🛒').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('ticket_create:partner').setLabel('Partner').setEmoji('🤝').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('ticket_create:report').setLabel('Report').setEmoji('🚨').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('ticket_create:unban').setLabel('Entbannung').setEmoji('🔓').setStyle(ButtonStyle.Secondary),
+  );
+  return {
+    embeds: [new EmbedBuilder()
+      .setColor(color)
+      .setTitle('🎫 Support Center')
+      .setDescription('Wähle unten die passende **Ticket-Kategorie**. Der Bot erstellt automatisch einen privaten Bereich für dich und das zuständige Team.')
+      .addFields(
+        { name: '🎫 Support', value: 'Allgemeine Hilfe', inline: true },
+        { name: '🛒 Kauf', value: 'Bestellungen & Shop', inline: true },
+        { name: '🤝 Partner', value: 'Partnerschaften', inline: true },
+        { name: '🚨 Report', value: 'Vertrauliche Meldung', inline: true },
+        { name: '🔓 Entbannung', value: 'Sanktionsanfrage', inline: true },
+      )],
+    components: [row],
+  };
+}
+
+function createModCase(data, { type, userId, moderatorId, reason = 'Kein Grund angegeben', duration = null, metadata = {} }) {
+  const id = Number(data.modCases?.nextId || 1);
+  if (!data.modCases) data.modCases = { nextId: 1, items: {} };
+  if (!data.modCases.items) data.modCases.items = {};
+  data.modCases.items[String(id)] = {
+    id,
+    type,
+    userId: String(userId),
+    moderatorId: String(moderatorId),
+    reason,
+    duration,
+    metadata,
+    createdAt: Date.now(),
+  };
+  data.modCases.nextId = id + 1;
+  return data.modCases.items[String(id)];
+}
+
+function antiNukeWhitelisted(guild, data, userId) {
+  if (!userId) return true;
+  if (userId === guild.ownerId || userId === client.user?.id) return true;
+  return Array.isArray(data.security?.antiNuke?.whitelist) && data.security.antiNuke.whitelist.includes(userId);
+}
+
+async function latestAuditExecutor(guild, auditType, targetId = null) {
+  const logs = await guild.fetchAuditLogs({ type: auditType, limit: 5 }).catch(() => null);
+  if (!logs) return null;
+  const now = Date.now();
+  const entry = logs.entries.find(e => {
+    if (now - e.createdTimestamp > 8000) return false;
+    if (targetId && e.target?.id && e.target.id !== targetId) return false;
+    return Boolean(e.executorId);
+  });
+  return entry || null;
+}
+
+async function punishAntiNukeActor(guild, data, userId, actionLabel, count) {
+  if (antiNukeWhitelisted(guild, data, userId)) return;
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return;
+  const removable = member.roles.cache.filter(role =>
+    role.id !== guild.id &&
+    !role.managed &&
+    role.editable &&
+    DANGEROUS_PERMISSION_FLAGS.some(flag => role.permissions.has(flag))
+  );
+  if (removable.size) await member.roles.remove(removable, `Anti-Nuke ausgelöst: ${actionLabel}`).catch(() => {});
+  const owner = await guild.fetchOwner().catch(() => null);
+  const description = `<@${userId}> hat in kurzer Zeit **${count} kritische Aktionen** ausgelöst.\n**Letzte Aktion:** ${actionLabel}\n**Reaktion:** gefährliche, vom Bot entfernbare Rollen wurden vom Account entfernt.`;
+  await sendAutomodAlert(guild, data, '🚨 Anti-Nuke ausgelöst', description).catch(() => {});
+  await owner?.send({ embeds: [new EmbedBuilder().setColor(0xe74c3c).setTitle(`🚨 Anti-Nuke • ${guild.name}`).setDescription(description).setTimestamp()] }).catch(() => {});
+}
+
+async function recordAntiNukeAction(guild, data, executorId, label) {
+  const settings = data.security?.antiNuke;
+  if (!settings?.enabled || !executorId || antiNukeWhitelisted(guild, data, executorId)) return;
+  const key = `${guild.id}:${executorId}`;
+  const now = Date.now();
+  const history = (antiNukeActions.get(key) || []).filter(ts => now - ts <= Number(settings.windowMs || 20000));
+  history.push(now);
+  antiNukeActions.set(key, history);
+  if (history.length >= Number(settings.threshold || 4)) {
+    antiNukeActions.set(key, []);
+    await punishAntiNukeActor(guild, data, executorId, label, history.length);
+  }
+}
+
+function configFieldForChannelId(data, channelId) {
+  const fields = [
+    'welcomeChannelId','rulesChannelId','logChannelId','suggestionsChannelId','giveawayChannelId','socialsChannelId',
+    'ticketCategoryId','applicationReviewChannelId','ticketTranscriptChannelId','automodLogChannelId','tempVoiceLobbyId',
+    'tempVoiceCategoryId','questionChannelId','communityPollChannelId','memberOfMonthChannelId','clipChannelId','lfgChannelId',
+    'challengeChannelId','anonymousInboxChannelId','interestsChannelId','engagementChannelId',
+  ];
+  return fields.find(field => data.config?.[field] === channelId) || null;
+}
+
+const SELF_HEAL_CHANNEL_KEYS = {
+  welcomeChannelId: 'welcome', rulesChannelId: 'rules', logChannelId: 'logs', suggestionsChannelId: 'suggestions',
+  giveawayChannelId: 'giveaways', socialsChannelId: 'socials', ticketCategoryId: 'category_supportcat',
+  applicationReviewChannelId: 'applications', ticketTranscriptChannelId: 'transcripts', automodLogChannelId: 'automodlogs',
+  tempVoiceLobbyId: 'tempvoice', tempVoiceCategoryId: 'category_voice', questionChannelId: 'questions',
+  communityPollChannelId: 'polls', memberOfMonthChannelId: 'membermonth', clipChannelId: 'clips', lfgChannelId: 'lfg',
+  challengeChannelId: 'challenges', anonymousInboxChannelId: 'anonymousinbox', interestsChannelId: 'interests', engagementChannelId: 'activity',
+};
+
+function templateChannelDefinition(templateId, key) {
+  const template = SERVER_SETUP_TEMPLATES[templateId];
+  if (!template) return null;
+  if (key.startsWith('category_')) {
+    const sectionKey = key.replace('category_', '');
+    const section = template.sections.find(s => s.key === sectionKey);
+    return section ? { isCategory: true, section } : null;
+  }
+  for (const section of template.sections) {
+    const def = section.channels.find(ch => ch.key === key);
+    if (def) return { isCategory: false, section, def };
+  }
+  return null;
+}
+
+async function selfHealDeletedChannel(channel) {
+  const guild = channel.guild;
+  if (!guild || serverMaintenanceGuilds.has(guild.id)) return;
+  const data = loadData(guild.id);
+  if (!data.security?.selfHealing?.enabled) return;
+  const field = configFieldForChannelId(data, channel.id);
+  if (!field) return;
+  const healKey = `${guild.id}:${field}`;
+  if (selfHealLocks.has(healKey)) return;
+  selfHealLocks.add(healKey);
+  try {
+    const templateId = data.config.setupTemplateId || '1';
+    const key = SELF_HEAL_CHANNEL_KEYS[field];
+    const info = templateChannelDefinition(templateId, key);
+    if (!info) return;
+    let created;
+    if (info.isCategory) {
+      created = await guild.channels.create({ name: info.section.name, type: ChannelType.GuildCategory, permissionOverwrites: [...channel.permissionOverwrites.cache.values()].map(overwrite => ({ id: overwrite.id, type: overwrite.type, allow: overwrite.allow.bitfield, deny: overwrite.deny.bitfield })), reason: 'Self-Healing: kritische Kategorie wiederhergestellt' });
+    } else {
+      const type = info.def.type === 'voice' ? ChannelType.GuildVoice : ChannelType.GuildText;
+      let parentId = channel.parentId || null;
+      if (parentId && !guild.channels.cache.has(parentId)) parentId = null;
+      if (!parentId) {
+        const category = guild.channels.cache.find(ch => ch.type === ChannelType.GuildCategory && ch.name === info.section.name);
+        parentId = category?.id || null;
+      }
+      created = await guild.channels.create({
+        name: info.def.name,
+        type,
+        parent: parentId || undefined,
+        topic: type === ChannelType.GuildText ? (info.def.topic || null) : undefined,
+        permissionOverwrites: [...channel.permissionOverwrites.cache.values()].map(overwrite => ({ id: overwrite.id, type: overwrite.type, allow: overwrite.allow.bitfield, deny: overwrite.deny.bitfield })),
+        reason: 'Self-Healing: kritischer Channel wiederhergestellt',
+      });
+    }
+    data.config[field] = created.id;
+    if (field === 'rulesChannelId' && created.isTextBased()) await publishRulebookMessage(guild, data, created, { forceNew: true }).catch(() => {});
+    if (field === 'engagementChannelId' && created.isTextBased()) await updateActivityPanel(guild, data).catch(() => {});
+    saveData(data);
+    await sendAutomodAlert(guild, data, '🩺 Self-Healing', `Der kritische Bereich **${channel.name}** wurde gelöscht und automatisch als <#${created.id}> wiederhergestellt.`).catch(() => {});
+  } finally {
+    setTimeout(() => selfHealLocks.delete(healKey), 3000);
+  }
+}
+
+function serverCheckReport(guild, data) {
+  const ok = [];
+  const warn = [];
+  const bot = guild.members.me;
+  if (bot?.permissions.has(PermissionFlagsBits.Administrator)) ok.push('Bot besitzt Administrator.');
+  else warn.push('Bot besitzt **kein Administrator** – Setup/Backup/Self-Healing können eingeschränkt sein.');
+
+  const checks = [
+    ['Regelwerk', data.config.rulesChannelId], ['Logs', data.config.logChannelId], ['Tickets', data.config.ticketCategoryId],
+    ['Verifizierung', data.config.verifiedRoleId], ['Support-Rolle', data.config.supportRoleId], ['Temp-Voice Lobby', data.config.tempVoiceLobbyId],
+    ['Activity Hub', data.config.engagementChannelId],
+  ];
+  for (const [label, id] of checks) {
+    const exists = id && (guild.channels.cache.has(id) || guild.roles.cache.has(id));
+    (exists ? ok : warn).push(`${exists ? '✅' : '❌'} ${label}${exists ? '' : ' fehlt oder ist nicht mehr gültig'}`);
+  }
+
+  const staffIds = [data.config.logChannelId, data.config.automodLogChannelId, data.config.ticketTranscriptChannelId, data.config.anonymousInboxChannelId].filter(Boolean);
+  for (const id of staffIds) {
+    const ch = guild.channels.cache.get(id);
+    if (!ch) continue;
+    const everyoneOverwrite = ch.permissionOverwrites?.cache?.get(guild.id);
+    if (!everyoneOverwrite?.deny?.has(PermissionFlagsBits.ViewChannel)) warn.push(`⚠️ <#${id}> ist möglicherweise für @everyone sichtbar.`);
+  }
+  const staleTemp = Object.keys(data.tempVoices || {}).filter(id => !guild.channels.cache.has(id));
+  if (staleTemp.length) warn.push(`⚠️ ${staleTemp.length} veraltete Temp-Voice-Einträge gefunden.`);
+
+  return { ok, warn };
+}
+
+function dashboardPayload(guild, data) {
+  const anti = data.security?.antiNuke?.enabled;
+  const heal = data.security?.selfHealing?.enabled;
+  const auto = data.automod?.enabled;
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('dashboard_servercheck').setLabel('Server Check').setEmoji('🩺').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('dashboard_backup').setLabel('Backup').setEmoji('💾').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('dashboard_permissions').setLabel('Permissions').setEmoji('🔎').setStyle(ButtonStyle.Secondary),
+  );
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('dashboard_antinuke').setLabel(`Anti-Nuke: ${anti ? 'AN' : 'AUS'}`).setEmoji('🛡️').setStyle(anti ? ButtonStyle.Success : ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('dashboard_selfheal').setLabel(`Self-Heal: ${heal ? 'AN' : 'AUS'}`).setEmoji('🩺').setStyle(heal ? ButtonStyle.Success : ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('dashboard_automod').setLabel(`AutoMod: ${auto ? 'AN' : 'AUS'}`).setEmoji('🤖').setStyle(auto ? ButtonStyle.Success : ButtonStyle.Danger),
+  );
+  return {
+    embeds: [new EmbedBuilder().setColor(0x111111).setTitle(`👑 Owner Dashboard • ${guild.name}`).setDescription(
+      `**Mitglieder:** ${guild.memberCount}\n**Channels:** ${guild.channels.cache.size}\n**Rollen:** ${guild.roles.cache.size}\n\n` +
+      `🛡️ Anti-Nuke: **${anti ? 'Aktiv' : 'Inaktiv'}**\n🩺 Self-Healing: **${heal ? 'Aktiv' : 'Inaktiv'}**\n🤖 AutoMod: **${auto ? 'Aktiv' : 'Inaktiv'}**`
+    ).setTimestamp()],
+    components: [row1, row2],
+    ephemeral: true,
+  };
+}
+
+function permissionsReport(guild) {
+  const roles = guild.roles.cache
+    .filter(role => role.id !== guild.id && DANGEROUS_PERMISSION_FLAGS.some(flag => role.permissions.has(flag)))
+    .sort((a, b) => b.position - a.position)
+    .first(25);
+  const text = roles.length ? roles.map(role => {
+    const flags = [];
+    if (role.permissions.has(PermissionFlagsBits.Administrator)) flags.push('ADMIN');
+    if (role.permissions.has(PermissionFlagsBits.ManageGuild)) flags.push('SERVER');
+    if (role.permissions.has(PermissionFlagsBits.ManageRoles)) flags.push('ROLLEN');
+    if (role.permissions.has(PermissionFlagsBits.ManageChannels)) flags.push('CHANNELS');
+    if (role.permissions.has(PermissionFlagsBits.BanMembers)) flags.push('BAN');
+    if (role.permissions.has(PermissionFlagsBits.KickMembers)) flags.push('KICK');
+    if (role.permissions.has(PermissionFlagsBits.ManageWebhooks)) flags.push('WEBHOOKS');
+    return `<@&${role.id}> • \`${flags.join(', ')}\` • ${role.members.size} Member`;
+  }).join('\n') : '*Keine Rollen mit kritischen Berechtigungen gefunden.*';
+  return new EmbedBuilder().setColor(0xf1c40f).setTitle('🔎 Permission Scanner').setDescription(text).setFooter({ text: 'Prüfe besonders Administrator- und Manage-Roles-Rechte.' });
+}
+
 // ============================================================
 // SLASH COMMANDS
 // ============================================================
@@ -3160,6 +3444,36 @@ function buildCommands() {
         .setRequired(true)),
 
     new SlashCommandBuilder()
+      .setName('servercheck')
+      .setDescription('Prüft den Discord und die Bot-Konfiguration auf Probleme.'),
+    new SlashCommandBuilder()
+      .setName('permissionscan')
+      .setDescription('Zeigt Rollen mit kritischen Discord-Berechtigungen.'),
+    new SlashCommandBuilder()
+      .setName('dashboard')
+      .setDescription('Öffnet das Owner-Dashboard für den Server.'),
+    new SlashCommandBuilder()
+      .setName('antinuke')
+      .setDescription('Verwaltet den Anti-Nuke-Schutz.')
+      .addSubcommand(s => s.setName('enable').setDescription('Aktiviert Anti-Nuke.'))
+      .addSubcommand(s => s.setName('disable').setDescription('Deaktiviert Anti-Nuke.'))
+      .addSubcommand(s => s.setName('status').setDescription('Zeigt Anti-Nuke-Status.'))
+      .addSubcommand(s => s.setName('whitelist').setDescription('Fügt einen Nutzer zur Anti-Nuke-Whitelist hinzu.').addUserOption(o => o.setName('user').setDescription('Nutzer').setRequired(true)))
+      .addSubcommand(s => s.setName('unwhitelist').setDescription('Entfernt einen Nutzer von der Anti-Nuke-Whitelist.').addUserOption(o => o.setName('user').setDescription('Nutzer').setRequired(true))),
+    new SlashCommandBuilder()
+      .setName('selfheal')
+      .setDescription('Verwaltet die automatische Wiederherstellung kritischer Bereiche.')
+      .addSubcommand(s => s.setName('enable').setDescription('Aktiviert Self-Healing.'))
+      .addSubcommand(s => s.setName('disable').setDescription('Deaktiviert Self-Healing.'))
+      .addSubcommand(s => s.setName('status').setDescription('Zeigt den Self-Healing-Status.')),
+    new SlashCommandBuilder()
+      .setName('case')
+      .setDescription('Zeigt die Moderationsakte eines Nutzers oder einen Case.')
+      .addSubcommand(s => s.setName('user').setDescription('Zeigt Cases eines Nutzers.').addUserOption(o => o.setName('user').setDescription('Nutzer').setRequired(true)))
+      .addSubcommand(s => s.setName('view').setDescription('Zeigt einen einzelnen Case.').addIntegerOption(o => o.setName('id').setDescription('Case-ID').setRequired(true).setMinValue(1)))
+      .addSubcommand(s => s.setName('note').setDescription('Fügt einem Case eine interne Notiz hinzu.').addIntegerOption(o => o.setName('id').setDescription('Case-ID').setRequired(true).setMinValue(1)).addStringOption(o => o.setName('text').setDescription('Interne Notiz').setRequired(true).setMaxLength(500))),
+
+    new SlashCommandBuilder()
       .setName('setup')
       .setDescription('Richtet den Community-Bot ein.')
       .addSubcommand(s => s
@@ -3216,7 +3530,11 @@ function buildCommands() {
       .setDescription('Verwaltet ein Ticket.')
       .addSubcommand(s => s.setName('add').setDescription('Fügt ein Mitglied zum Ticket hinzu.').addUserOption(o => o.setName('user').setDescription('Mitglied').setRequired(true)))
       .addSubcommand(s => s.setName('remove').setDescription('Entfernt ein Mitglied aus dem Ticket.').addUserOption(o => o.setName('user').setDescription('Mitglied').setRequired(true)))
-      .addSubcommand(s => s.setName('close').setDescription('Schließt das aktuelle Ticket.')),
+      .addSubcommand(s => s.setName('close').setDescription('Schließt das aktuelle Ticket.'))
+      .addSubcommand(s => s.setName('priority').setDescription('Setzt die Ticket-Priorität.').addStringOption(o => o.setName('stufe').setDescription('Priorität').setRequired(true).addChoices(
+        { name: 'Normal', value: 'normal' }, { name: 'Wichtig', value: 'wichtig' }, { name: 'Dringend', value: 'dringend' }
+      )))
+      .addSubcommand(s => s.setName('info').setDescription('Zeigt Ticket-Infos.')),
 
     new SlashCommandBuilder()
       .setName('announce')
@@ -3386,7 +3704,9 @@ function buildCommands() {
       .addSubcommand(s => s.setName('lock').setDescription('Sperrt deinen Raum.'))
       .addSubcommand(s => s.setName('unlock').setDescription('Öffnet deinen Raum.'))
       .addSubcommand(s => s.setName('permit').setDescription('Erlaubt einer Person den Zutritt.').addUserOption(o => o.setName('user').setDescription('Person').setRequired(true)))
-      .addSubcommand(s => s.setName('reject').setDescription('Entfernt und sperrt eine Person.').addUserOption(o => o.setName('user').setDescription('Person').setRequired(true))),
+      .addSubcommand(s => s.setName('reject').setDescription('Entfernt und sperrt eine Person.').addUserOption(o => o.setName('user').setDescription('Person').setRequired(true)))
+      .addSubcommand(s => s.setName('transfer').setDescription('Überträgt den Raum an eine andere Person.').addUserOption(o => o.setName('user').setDescription('Neuer Besitzer').setRequired(true)))
+      .addSubcommand(s => s.setName('panel').setDescription('Zeigt das Temp-Voice Kontrollpanel.')),
 
     // Level und Einladungen
     new SlashCommandBuilder().setName('rank').setDescription('Zeigt den Level-Rang.').addUserOption(o => o.setName('user').setDescription('Mitglied').setRequired(false)),
@@ -3797,6 +4117,7 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildInvites,
+    GatewayIntentBits.GuildModeration,
   ],
   partials: [Partials.Message, Partials.Channel, Partials.GuildMember],
 });
@@ -3904,6 +4225,10 @@ client.on(Events.GuildMemberAdd, async member => {
 
 client.on(Events.GuildMemberRemove, async member => {
   const data = loadData(member.guild.id);
+  if (!serverMaintenanceGuilds.has(member.guild.id) && data.security?.antiNuke?.enabled) {
+    const kickEntry = await latestAuditExecutor(member.guild, AuditLogEvent.MemberKick, member.id);
+    if (kickEntry?.executorId) await recordAntiNukeAction(member.guild, data, kickEntry.executorId, `Kick: ${member.user.tag}`).catch(() => {});
+  }
 
   const inviterId = data.inviteMembers[member.id];
   if (inviterId) {
@@ -4122,12 +4447,111 @@ client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
 // INTERACTIONS
 // ============================================================
 
+client.on(Events.ChannelDelete, async channel => {
+  if (!channel.guild) return;
+  const data = loadData(channel.guild.id);
+  if (!serverMaintenanceGuilds.has(channel.guild.id) && data.security?.antiNuke?.enabled) {
+    const entry = await latestAuditExecutor(channel.guild, AuditLogEvent.ChannelDelete, channel.id);
+    if (entry?.executorId) await recordAntiNukeAction(channel.guild, data, entry.executorId, `Channel gelöscht: ${channel.name}`).catch(() => {});
+  }
+  await selfHealDeletedChannel(channel).catch(error => console.error('❌ Self-Healing Channel:', error));
+});
+
+client.on(Events.GuildRoleDelete, async role => {
+  if (serverMaintenanceGuilds.has(role.guild.id)) return;
+  const data = loadData(role.guild.id);
+  if (data.security?.antiNuke?.enabled) {
+    const entry = await latestAuditExecutor(role.guild, AuditLogEvent.RoleDelete, role.id);
+    if (entry?.executorId) await recordAntiNukeAction(role.guild, data, entry.executorId, `Rolle gelöscht: ${role.name}`).catch(() => {});
+  }
+});
+
+client.on(Events.GuildBanAdd, async ban => {
+  const data = loadData(ban.guild.id);
+  if (!data.security?.antiNuke?.enabled) return;
+  const entry = await latestAuditExecutor(ban.guild, AuditLogEvent.MemberBanAdd, ban.user.id);
+  if (entry?.executorId) await recordAntiNukeAction(ban.guild, data, entry.executorId, `Ban: ${ban.user.tag}`).catch(() => {});
+});
+
+client.on(Events.WebhooksUpdate, async channel => {
+  const guild = channel.guild;
+  if (!guild || serverMaintenanceGuilds.has(guild.id)) return;
+  const data = loadData(guild.id);
+  if (!data.security?.antiNuke?.enabled) return;
+  const entries = await Promise.all([
+    latestAuditExecutor(guild, AuditLogEvent.WebhookCreate),
+    latestAuditExecutor(guild, AuditLogEvent.WebhookUpdate),
+    latestAuditExecutor(guild, AuditLogEvent.WebhookDelete),
+  ]);
+  const latest = entries.filter(Boolean).sort((a,b) => b.createdTimestamp-a.createdTimestamp)[0];
+  if (latest?.executorId) await recordAntiNukeAction(guild, data, latest.executorId, `Webhook geändert in #${channel.name}`).catch(() => {});
+});
+
 client.on(Events.InteractionCreate, async interaction => {
   try {
     const data = interaction.guildId ? loadData(interaction.guildId) : loadData();
 
     // ---------- BUTTONS ----------
     if (interaction.isButton()) {
+      if (interaction.customId.startsWith('dashboard_')) {
+        if (!interaction.inGuild() || interaction.user.id !== interaction.guild.ownerId) {
+          await interaction.reply({ content: '❌ Nur der Server-Inhaber kann das Owner-Dashboard verwenden.', ephemeral: true });
+          return;
+        }
+        const action = interaction.customId.replace('dashboard_', '');
+        if (action === 'servercheck') {
+          const report = serverCheckReport(interaction.guild, data);
+          await interaction.reply({ embeds: [new EmbedBuilder().setColor(report.warn.length ? 0xf1c40f : 0x2ecc71).setTitle('🩺 Server Check').setDescription(`**OK**\n${report.ok.slice(0, 12).join('\n') || '—'}\n\n**Hinweise**\n${report.warn.slice(0, 15).join('\n') || '✅ Keine Probleme gefunden.'}`)], ephemeral: true });
+          return;
+        }
+        if (action === 'permissions') {
+          await interaction.reply({ embeds: [permissionsReport(interaction.guild)], ephemeral: true, allowedMentions: { parse: [] } });
+          return;
+        }
+        if (action === 'backup') {
+          const backup = await captureServerBackup(interaction.guild, data, 'dashboard');
+          pushServerBackup(data, interaction.guild.id, backup);
+          saveData(data);
+          await interaction.reply({ content: `✅ Backup \`${backup.id}\` erstellt.`, ephemeral: true });
+          return;
+        }
+        if (action === 'antinuke') data.security.antiNuke.enabled = !data.security.antiNuke.enabled;
+        if (action === 'selfheal') data.security.selfHealing.enabled = !data.security.selfHealing.enabled;
+        if (action === 'automod') data.automod.enabled = !data.automod.enabled;
+        saveData(data);
+        const updatedDashboard = dashboardPayload(interaction.guild, data);
+        delete updatedDashboard.ephemeral;
+        await interaction.update(updatedDashboard);
+        return;
+      }
+
+      if (interaction.customId.startsWith('voicepanel_')) {
+        const voiceChannel = interaction.member.voice.channel;
+        const tempEntry = voiceChannel ? data.tempVoices[voiceChannel.id] : null;
+        if (!voiceChannel || !tempEntry || tempEntry.ownerId !== interaction.user.id) {
+          await interaction.reply({ content: '❌ Du musst Besitzer deines temporären Sprachkanals sein.', ephemeral: true });
+          return;
+        }
+        const action = interaction.customId.replace('voicepanel_', '');
+        if (action === 'lock' || action === 'unlock') {
+          await voiceChannel.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: action === 'lock' ? false : null });
+        } else if (action === 'plus') {
+          await voiceChannel.setUserLimit(Math.min(99, (voiceChannel.userLimit || 0) + 1));
+        } else if (action === 'minus') {
+          await voiceChannel.setUserLimit(Math.max(0, (voiceChannel.userLimit || 0) - 1));
+        }
+        await interaction.update({
+          embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle(`🎧 Voice Control • ${voiceChannel.name}`).setDescription(`**Limit:** ${voiceChannel.userLimit || 'Unbegrenzt'}\n**Besitzer:** <@${tempEntry.ownerId}>`)],
+          components: [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('voicepanel_lock').setLabel('Lock').setEmoji('🔒').setStyle(ButtonStyle.Danger),
+            new ButtonBuilder().setCustomId('voicepanel_unlock').setLabel('Unlock').setEmoji('🔓').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('voicepanel_plus').setLabel('+1 Limit').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('voicepanel_minus').setLabel('-1 Limit').setStyle(ButtonStyle.Secondary),
+          )],
+        });
+        return;
+      }
+
       if (interaction.customId === 'verify_start') {
         const a = Math.floor(Math.random() * 20) + 1;
         const b = Math.floor(Math.random() * 20) + 1;
@@ -4145,8 +4569,10 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      if (interaction.customId === 'ticket_create') {
+      if (interaction.customId === 'ticket_create' || interaction.customId.startsWith('ticket_create:')) {
         if (!interaction.inGuild()) return;
+        const ticketType = interaction.customId.includes(':') ? interaction.customId.split(':')[1] : 'support';
+        const typeInfo = TICKET_TYPES[ticketType] || TICKET_TYPES.support;
         const existing = interaction.guild.channels.cache.find(ch => ch.topic?.startsWith(`ticket-owner:${interaction.user.id}`));
         if (existing) {
           await interaction.reply({ content: `❌ Du hast bereits ein Ticket: <#${existing.id}>`, ephemeral: true });
@@ -4162,10 +4588,10 @@ client.on(Events.InteractionCreate, async interaction => {
         }
 
         const channel = await interaction.guild.channels.create({
-          name: `ticket-${sanitizeChannelName(interaction.user.username)}`,
+          name: `${ticketType}-${sanitizeChannelName(interaction.user.username)}`,
           type: ChannelType.GuildText,
           parent: data.config.ticketCategoryId || undefined,
-          topic: `ticket-owner:${interaction.user.id}|created:${Date.now()}`,
+          topic: `ticket-owner:${interaction.user.id}|type:${ticketType}|created:${Date.now()}`,
           permissionOverwrites: overwrites,
         });
 
@@ -4173,14 +4599,19 @@ client.on(Events.InteractionCreate, async interaction => {
           new ButtonBuilder().setCustomId('ticket_claim').setLabel('Übernehmen').setEmoji('🙋').setStyle(ButtonStyle.Primary),
           new ButtonBuilder().setCustomId('ticket_close').setLabel('Schließen').setEmoji('🔒').setStyle(ButtonStyle.Danger),
         );
+        const ticketId = Number(data.tickets?.nextId || 1);
+        if (!data.tickets) data.tickets = { nextId: 1, records: {} };
+        data.tickets.records[String(ticketId)] = { id: ticketId, channelId: channel.id, ownerId: interaction.user.id, type: ticketType, priority: 'normal', status: 'open', createdAt: Date.now(), claimedBy: null };
+        data.tickets.nextId = ticketId + 1;
+        saveData(data);
         await channel.send({
           content: `<@${interaction.user.id}>${data.config.supportRoleId ? ` • <@&${data.config.supportRoleId}>` : ''}`,
-          embeds: [new EmbedBuilder().setColor(0x111111).setTitle('🎫 Support Ticket').setDescription('Beschreibe hier dein Anliegen. Das Team kümmert sich darum.')],
+          embeds: [new EmbedBuilder().setColor(typeInfo.color).setTitle(`${typeInfo.emoji} ${typeInfo.label} Ticket • #${ticketId}`).setDescription(`${typeInfo.description}\n\n**Bitte beschreibe dein Anliegen möglichst vollständig.**`).addFields({ name: 'Priorität', value: '🟢 Normal', inline: true }, { name: 'Status', value: 'Offen', inline: true })],
           components: [row],
           allowedMentions: { users: [interaction.user.id], roles: data.config.supportRoleId ? [data.config.supportRoleId] : [] },
         });
-        await interaction.reply({ content: `✅ Ticket erstellt: <#${channel.id}>`, ephemeral: true });
-        await logEvent(interaction.guild, data, '🎫 Ticket erstellt', `<@${interaction.user.id}> hat <#${channel.id}> erstellt.`);
+        await interaction.reply({ content: `✅ **${typeInfo.label}-Ticket #${ticketId}** erstellt: <#${channel.id}>`, ephemeral: true });
+        await logEvent(interaction.guild, data, '🎫 Ticket erstellt', `<@${interaction.user.id}> hat **${typeInfo.label}-Ticket #${ticketId}** in <#${channel.id}> erstellt.`);
         return;
       }
 
@@ -4195,6 +4626,8 @@ client.on(Events.InteractionCreate, async interaction => {
             new ButtonBuilder().setCustomId('ticket_close').setLabel('Schließen').setEmoji('🔒').setStyle(ButtonStyle.Danger),
           )],
         });
+        const record = Object.values(data.tickets?.records || {}).find(t => t.channelId === interaction.channelId && t.status === 'open');
+        if (record) { record.claimedBy = interaction.user.id; saveData(data); }
         await interaction.followUp({ content: `✅ <@${interaction.user.id}> hat das Ticket übernommen.` });
         return;
       }
@@ -4238,7 +4671,9 @@ client.on(Events.InteractionCreate, async interaction => {
             ephemeral: true,
           }).catch(() => {});
         }
-        await logEvent(interaction.guild, data, '🔒 Ticket geschlossen', `<#${interaction.channel.id}> wurde von <@${interaction.user.id}> geschlossen.`);
+        const record = Object.values(data.tickets?.records || {}).find(t => t.channelId === interaction.channelId && t.status === 'open');
+        if (record) { record.status = 'closed'; record.closedAt = Date.now(); record.closedBy = interaction.user.id; saveData(data); }
+        await logEvent(interaction.guild, data, '🔒 Ticket geschlossen', `<#${interaction.channel.id}> wurde von <@${interaction.user.id}> geschlossen.${record ? `\n**Ticket:** #${record.id}` : ''}`);
         setTimeout(() => interaction.channel.delete(`Ticket geschlossen von ${interaction.user.tag}`).catch(() => {}), 5000);
         return;
       }
@@ -4939,7 +5374,7 @@ client.on(Events.InteractionCreate, async interaction => {
           { name: '📣 Community', value: '`/regelwerk` `/announce` `/embed` `/poll` `/suggest` `/giveaway`' },
           { name: 'ℹ️ Info', value: '`/serverinfo` `/userinfo` `/avatar` `/ping`' },
           { name: '📨 Bewerbungen & Rollen', value: '`/applicationpanel` `/applicationlist` `/rolepanel`' },
-          { name: '🛡️ Schutz & Voice', value: '`/automod` `/tempvoice` `/voice`' },
+          { name: '🛡️ Schutz & Voice', value: '`/automod` `/antinuke` `/selfheal` `/servercheck` `/permissionscan` `/tempvoice` `/voice`' },
           { name: '🏆 Level & Invites', value: '`/rank` `/leaderboard` `/levelrole` `/levelsystem` `/invites` `/inviteleaderboard`' },
           { name: '📅 Events & Team', value: '`/event` `/duty` `/dutystats` `/dutyleaderboard`' },
           { name: '💬 Community-Aktivität', value: '`/frage` `/communitypoll` `/memberofthemonth` `/rep` `/reps` `/communityrank` `/communityleaderboard`' },
@@ -4947,7 +5382,7 @@ client.on(Events.InteractionCreate, async interaction => {
           { name: '🎮 Gemeinsam', value: '`/clip` `/mitspieler` `/challenge` `/game` `/badges`' },
           { name: '👤 Profile & Willkommen', value: '`/profil` `/profilset` `/interessen` `/anonymouspanel` `/anonymousinfo`' },
           { name: '🧩 Eigene Commands', value: '`/customcommand` oder gespeicherte Befehle mit `!name`' },
-          { name: '⚙️ Einrichtung', value: '`/setupserver` `/backupserver` `/restoreserver` `/setup channel` `/setup role` `/setup tickets` `/setup show`' },
+          { name: '⚙️ Einrichtung', value: '`/dashboard` `/setupserver` `/backupserver` `/restoreserver` `/setup channel` `/setup role` `/setup tickets` `/setup show`' },
         );
       await interaction.reply({ embeds: [embed], ephemeral: true });
       return;
@@ -5325,6 +5760,98 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
+    if (command === 'servercheck') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Du brauchst **Server verwalten** oder Administrator.', ephemeral: true });
+        return;
+      }
+      const report = serverCheckReport(interaction.guild, data);
+      await interaction.reply({ embeds: [new EmbedBuilder().setColor(report.warn.length ? 0xf1c40f : 0x2ecc71).setTitle('🩺 Server Check').setDescription(`**OK**\n${report.ok.slice(0, 12).join('\n') || '—'}\n\n**Hinweise**\n${report.warn.slice(0, 15).join('\n') || '✅ Keine Probleme gefunden.'}`)], ephemeral: true });
+      return;
+    }
+
+    if (command === 'permissionscan') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+        return;
+      }
+      await interaction.reply({ embeds: [permissionsReport(interaction.guild)], ephemeral: true, allowedMentions: { parse: [] } });
+      return;
+    }
+
+    if (command === 'dashboard') {
+      if (!isGuildOwner(interaction)) {
+        await interaction.reply({ content: '❌ Nur der **Server-Inhaber mit der Krone** kann das Dashboard öffnen.', ephemeral: true });
+        return;
+      }
+      await interaction.reply(dashboardPayload(interaction.guild, data));
+      return;
+    }
+
+    if (command === 'antinuke') {
+      if (!isGuildOwner(interaction)) {
+        await interaction.reply({ content: '❌ Nur der Server-Inhaber kann Anti-Nuke verwalten.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'enable') data.security.antiNuke.enabled = true;
+      if (sub === 'disable') data.security.antiNuke.enabled = false;
+      if (sub === 'whitelist' || sub === 'unwhitelist') {
+        const user = interaction.options.getUser('user');
+        const list = new Set(data.security.antiNuke.whitelist || []);
+        if (sub === 'whitelist') list.add(user.id); else list.delete(user.id);
+        data.security.antiNuke.whitelist = [...list];
+      }
+      saveData(data);
+      await interaction.reply({ embeds: [new EmbedBuilder().setColor(data.security.antiNuke.enabled ? 0x2ecc71 : 0xe74c3c).setTitle('🛡️ Anti-Nuke').setDescription(`**Status:** ${data.security.antiNuke.enabled ? 'Aktiv' : 'Inaktiv'}\n**Limit:** ${data.security.antiNuke.threshold} kritische Aktionen / ${Math.round(data.security.antiNuke.windowMs / 1000)}s\n**Whitelist:** ${(data.security.antiNuke.whitelist || []).length}`)], ephemeral: true });
+      return;
+    }
+
+    if (command === 'selfheal') {
+      if (!isGuildOwner(interaction)) {
+        await interaction.reply({ content: '❌ Nur der Server-Inhaber kann Self-Healing verwalten.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'enable') data.security.selfHealing.enabled = true;
+      if (sub === 'disable') data.security.selfHealing.enabled = false;
+      saveData(data);
+      await interaction.reply({ content: `🩺 Self-Healing ist **${data.security.selfHealing.enabled ? 'aktiviert' : 'deaktiviert'}**.`, ephemeral: true });
+      return;
+    }
+
+    if (command === 'case') {
+      if (!canModerate(interaction.member, data)) {
+        await interaction.reply({ content: '❌ Du darfst keine Moderationsakten sehen.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'user') {
+        const user = interaction.options.getUser('user');
+        const cases = Object.values(data.modCases?.items || {}).filter(c => c.userId === user.id).sort((a,b) => b.id-a.id).slice(0, 15);
+        const text = cases.length ? cases.map(c => `**#${c.id}** • ${c.type} • ${c.reason} • <@${c.moderatorId}> • <t:${Math.floor(c.createdAt/1000)}:d>`).join('\n') : '*Keine Cases vorhanden.*';
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor(0xe67e22).setTitle(`📜 Mod-Akte • ${user.tag}`).setDescription(text)], ephemeral: true, allowedMentions: { parse: [] } });
+        return;
+      }
+      const id = interaction.options.getInteger('id');
+      const item = data.modCases?.items?.[String(id)];
+      if (!item) {
+        await interaction.reply({ content: '❌ Case nicht gefunden.', ephemeral: true });
+        return;
+      }
+      if (sub === 'note') {
+        item.notes = Array.isArray(item.notes) ? item.notes : [];
+        item.notes.push({ text: interaction.options.getString('text'), moderatorId: interaction.user.id, createdAt: Date.now() });
+        saveData(data);
+      }
+      const notes = (item.notes || []).slice(-5).map(n => `• ${n.text} — <@${n.moderatorId}>`).join('\n') || '—';
+      await interaction.reply({ embeds: [new EmbedBuilder().setColor(0xe67e22).setTitle(`📜 Case #${item.id} • ${item.type}`).addFields(
+        { name: 'Nutzer', value: `<@${item.userId}>`, inline: true }, { name: 'Moderator', value: `<@${item.moderatorId}>`, inline: true },
+        { name: 'Grund', value: item.reason || '—' }, { name: 'Notizen', value: notes }
+      ).setTimestamp(item.createdAt)], ephemeral: true, allowedMentions: { parse: [] } });
+      return;
+    }
+
     if (command === 'backupserver') {
       if (!isGuildOwner(interaction)) {
         await interaction.reply({ content: '❌ Nur der **Server-Inhaber mit der Krone** kann ein Server-Backup erstellen.', ephemeral: true });
@@ -5393,8 +5920,10 @@ client.on(Events.InteractionCreate, async interaction => {
         content: `⚠️ Backup **${backup.id}** wurde erstellt.\nJetzt wird **Design ${templateId} – ${template.name}** aufgebaut. Alte Channels und löschbare Rollen werden entfernt.`,
       });
 
+      serverMaintenanceGuilds.add(interaction.guild.id);
       const deleted = await deleteExistingServerStructure(interaction.guild, keepChannelId);
       const created = await createTemplateStructure(interaction.guild, template);
+      serverMaintenanceGuilds.delete(interaction.guild.id);
       applySetupConfig(data, created, templateId);
 
       data.setupHistory[interaction.guild.id] = {
@@ -5485,8 +6014,10 @@ client.on(Events.InteractionCreate, async interaction => {
         content: `♻️ Stelle Backup \`${target.id}\` von <t:${Math.floor(target.createdAt / 1000)}:F> wieder her …`,
       });
 
+      serverMaintenanceGuilds.add(interaction.guild.id);
       const deleted = await deleteExistingServerStructure(interaction.guild, keepChannelId);
       const restored = await restoreServerBackup(interaction.guild, data, target);
+      serverMaintenanceGuilds.delete(interaction.guild.id);
       saveData(data);
 
       const newLogChannel = data.config.logChannelId
@@ -5628,9 +6159,8 @@ client.on(Events.InteractionCreate, async interaction => {
         await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
         return;
       }
-      const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('ticket_create').setLabel('Ticket erstellen').setEmoji('🎫').setStyle(ButtonStyle.Primary));
-      await interaction.channel.send({ embeds: [new EmbedBuilder().setColor(0x111111).setTitle('🎫 Support').setDescription('Benötigst du Hilfe? Drücke unten auf **Ticket erstellen**.')], components: [row] });
-      await interaction.reply({ content: '✅ Ticket-Panel erstellt.', ephemeral: true });
+      await interaction.channel.send(ticketPanelPayload(0x111111));
+      await interaction.reply({ content: '✅ Ticket-Panel 2.0 erstellt.', ephemeral: true });
       return;
     }
 
@@ -5704,11 +6234,14 @@ client.on(Events.InteractionCreate, async interaction => {
         await interaction.reply({ content: '❌ Dieser Befehl funktioniert nur in einem Ticket.', ephemeral: true });
         return;
       }
-      if (!canManageTickets(interaction.member, data)) {
-        await interaction.reply({ content: '❌ Du darfst Tickets nicht verwalten.', ephemeral: true });
+      const sub = interaction.options.getSubcommand();
+      const ticketOwner = ticketOwnerId(interaction.channel);
+      const teamAccess = canManageTickets(interaction.member, data);
+      const ownerAccess = ticketOwner === interaction.user.id && ['close', 'info'].includes(sub);
+      if (!teamAccess && !ownerAccess) {
+        await interaction.reply({ content: '❌ Du darfst diese Ticket-Funktion nicht verwenden.', ephemeral: true });
         return;
       }
-      const sub = interaction.options.getSubcommand();
       if (sub === 'add') {
         const user = interaction.options.getUser('user');
         await interaction.channel.permissionOverwrites.edit(user.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
@@ -5727,6 +6260,35 @@ client.on(Events.InteractionCreate, async interaction => {
           new ButtonBuilder().setCustomId('ticket_close_cancel').setLabel('Abbrechen').setStyle(ButtonStyle.Secondary),
         );
         await interaction.reply({ content: 'Ticket wirklich schließen?', components: [row], ephemeral: true });
+        return;
+      }
+      const record = Object.values(data.tickets?.records || {}).find(t => t.channelId === interaction.channelId && t.status === 'open');
+      if (sub === 'priority') {
+        if (!canManageTickets(interaction.member, data)) {
+          await interaction.reply({ content: '❌ Nur das Support-Team kann die Priorität ändern.', ephemeral: true });
+          return;
+        }
+        if (!record) {
+          await interaction.reply({ content: '❌ Ticket-Datensatz nicht gefunden.', ephemeral: true });
+          return;
+        }
+        record.priority = interaction.options.getString('stufe');
+        saveData(data);
+        const labels = { normal: '🟢 Normal', wichtig: '🟠 Wichtig', dringend: '🔴 Dringend' };
+        await interaction.reply({ content: `✅ Priorität auf **${labels[record.priority]}** gesetzt.` });
+        return;
+      }
+      if (sub === 'info') {
+        if (!record) {
+          await interaction.reply({ content: '❌ Ticket-Datensatz nicht gefunden.', ephemeral: true });
+          return;
+        }
+        const typeInfo = TICKET_TYPES[record.type] || TICKET_TYPES.support;
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor(typeInfo.color).setTitle(`${typeInfo.emoji} Ticket #${record.id}`).addFields(
+          { name: 'Typ', value: typeInfo.label, inline: true }, { name: 'Priorität', value: record.priority || 'normal', inline: true },
+          { name: 'Ersteller', value: `<@${record.ownerId}>`, inline: true }, { name: 'Übernommen von', value: record.claimedBy ? `<@${record.claimedBy}>` : 'Noch niemand', inline: true },
+          { name: 'Erstellt', value: `<t:${Math.floor(record.createdAt/1000)}:F>` }
+        )], ephemeral: true, allowedMentions: { parse: [] } });
         return;
       }
     }
@@ -5841,6 +6403,30 @@ client.on(Events.InteractionCreate, async interaction => {
         const targetMember = await interaction.guild.members.fetch(user.id).catch(() => null);
         if (targetMember?.voice.channelId === voiceChannel.id) await targetMember.voice.setChannel(null).catch(() => {});
         await interaction.reply({ content: `✅ <@${user.id}> wurde aus deinem Raum entfernt und gesperrt.`, ephemeral: true });
+        return;
+      }
+      if (sub === 'transfer') {
+        const target = interaction.options.getUser('user');
+        const targetMember = await interaction.guild.members.fetch(target.id).catch(() => null);
+        if (!targetMember || targetMember.voice.channelId !== voiceChannel.id) {
+          await interaction.reply({ content: '❌ Der neue Besitzer muss sich in deinem Voice-Channel befinden.', ephemeral: true });
+          return;
+        }
+        tempEntry.ownerId = target.id;
+        await voiceChannel.permissionOverwrites.edit(interaction.user.id, { ManageChannels: null, MoveMembers: null });
+        await voiceChannel.permissionOverwrites.edit(target.id, { ViewChannel: true, Connect: true, ManageChannels: true, MoveMembers: true });
+        saveData(data);
+        await interaction.reply({ content: `👑 Der Voice-Channel gehört jetzt <@${target.id}>.` });
+        return;
+      }
+      if (sub === 'panel') {
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('voicepanel_lock').setLabel('Lock').setEmoji('🔒').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('voicepanel_unlock').setLabel('Unlock').setEmoji('🔓').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId('voicepanel_plus').setLabel('+1 Limit').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId('voicepanel_minus').setLabel('-1 Limit').setStyle(ButtonStyle.Secondary),
+        );
+        await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x8b5cf6).setTitle(`🎧 Voice Control • ${voiceChannel.name}`).setDescription(`**Limit:** ${voiceChannel.userLimit || 'Unbegrenzt'}\n**Besitzer:** <@${tempEntry.ownerId}>`)], components: [row], ephemeral: true });
         return;
       }
     }
@@ -7025,8 +7611,9 @@ client.on(Events.InteractionCreate, async interaction => {
       const reason = interaction.options.getString('grund');
       if (!data.warnings[user.id]) data.warnings[user.id] = [];
       data.warnings[user.id].push({ reason, moderatorId: interaction.user.id, createdAt: new Date().toISOString() });
+      const modCase = createModCase(data, { type: 'WARN', userId: user.id, moderatorId: interaction.user.id, reason });
       saveData(data);
-      await interaction.reply({ content: `⚠️ <@${user.id}> wurde verwarnt. **Grund:** ${reason}` });
+      await interaction.reply({ content: `⚠️ <@${user.id}> wurde verwarnt. **Grund:** ${reason} • Case **#${modCase.id}**` });
       await logEvent(interaction.guild, data, '⚠️ Verwarnung', `<@${user.id}> wurde von <@${interaction.user.id}> verwarnt.\n**Grund:** ${reason}`);
       return;
     }
@@ -7058,7 +7645,9 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
       await member.timeout(minutes * 60 * 1000, reason);
-      await interaction.reply({ content: `⏳ <@${user.id}> hat **${minutes} Minuten** Timeout.` });
+      const modCase = createModCase(data, { type: 'TIMEOUT', userId: user.id, moderatorId: interaction.user.id, reason, duration: `${minutes}m` });
+      saveData(data);
+      await interaction.reply({ content: `⏳ <@${user.id}> hat **${minutes} Minuten** Timeout. • Case **#${modCase.id}**` });
       await logEvent(interaction.guild, data, '⏳ Timeout', `<@${user.id}> • ${minutes} Minuten • ${reason}`);
       return;
     }
@@ -7084,7 +7673,9 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
       await member.kick(reason);
-      await interaction.reply({ content: `👢 **${user.tag}** wurde gekickt.` });
+      const modCase = createModCase(data, { type: 'KICK', userId: user.id, moderatorId: interaction.user.id, reason });
+      saveData(data);
+      await interaction.reply({ content: `👢 **${user.tag}** wurde gekickt. • Case **#${modCase.id}**` });
       await logEvent(interaction.guild, data, '👢 Kick', `**${user.tag}** wurde von <@${interaction.user.id}> gekickt.\n**Grund:** ${reason}`);
       return;
     }
@@ -7093,7 +7684,9 @@ client.on(Events.InteractionCreate, async interaction => {
       const user = interaction.options.getUser('user');
       const reason = interaction.options.getString('grund') || 'Kein Grund angegeben';
       await interaction.guild.members.ban(user.id, { reason });
-      await interaction.reply({ content: `🔨 **${user.tag}** wurde gebannt.` });
+      const modCase = createModCase(data, { type: 'BAN', userId: user.id, moderatorId: interaction.user.id, reason });
+      saveData(data);
+      await interaction.reply({ content: `🔨 **${user.tag}** wurde gebannt. • Case **#${modCase.id}**` });
       await logEvent(interaction.guild, data, '🔨 Ban', `**${user.tag}** (${user.id}) wurde von <@${interaction.user.id}> gebannt.\n**Grund:** ${reason}`);
       return;
     }
