@@ -3591,13 +3591,37 @@ function verifyGithubSignature(rawBody, signature) {
   return safeEqualText(expected, signature);
 }
 
-function githubCommitLine(commit, repoFullName) {
-  const sha = String(commit?.id || '').slice(0, 7) || 'commit';
-  const firstLine = String(commit?.message || 'Ohne Commit-Nachricht').split(/\r?\n/)[0].slice(0, 160);
-  const author = commit?.author?.username || commit?.author?.name || 'Unbekannt';
-  const url = commit?.url || (commit?.id ? `https://github.com/${repoFullName}/commit/${commit.id}` : null);
-  const shaText = url ? `[${sha}](${url})` : `\`${sha}\``;
-  return `${shaText} • ${firstLine} — **${String(author).slice(0, 80)}**`;
+function formatChangelogDate(payload) {
+  const timestamp = payload?.head_commit?.timestamp || payload?.repository?.pushed_at || Date.now();
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return new Date().toLocaleDateString('de-DE', { timeZone: COMMUNITY_TIMEZONE });
+  return date.toLocaleDateString('de-DE', {
+    timeZone: COMMUNITY_TIMEZONE,
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  });
+}
+
+function githubChangelogLine(commit) {
+  const firstLine = String(commit?.message || 'Änderungen ohne Beschreibung')
+    .split(/\r?\n/)[0]
+    .replace(/^[-*+]\s*/, '')
+    .trim()
+    .slice(0, 180);
+  return `(+) ${firstLine || 'Änderungen ohne Beschreibung'}`;
+}
+
+function truncateChangelogLines(lines, maxLength = 3600) {
+  const result = [];
+  let length = 0;
+  for (const line of lines) {
+    const next = length + line.length + 1;
+    if (next > maxLength) break;
+    result.push(line);
+    length = next;
+  }
+  return result;
 }
 
 async function postGithubChangelog(payload) {
@@ -3613,43 +3637,49 @@ async function postGithubChangelog(payload) {
 
   const branch = String(payload?.ref || '').replace('refs/heads/', '') || 'unbekannt';
   const commits = Array.isArray(payload?.commits) ? payload.commits : [];
-  const pusher = payload?.pusher?.name || payload?.sender?.login || 'Unbekannt';
   const compareUrl = payload?.compare || payload?.repository?.html_url || null;
-  const shown = commits.slice(-8).map(commit => githubCommitLine(commit, repoFullName));
-  const hidden = Math.max(0, commits.length - shown.length);
+  const dateText = formatChangelogDate(payload);
 
-  let description;
+  let changeLines = commits.map(githubChangelogLine);
   if (payload?.deleted) {
-    description = `🗑️ Branch **${branch}** wurde gelöscht.`;
+    changeLines = [`(-) Branch ${branch} gelöscht`];
   } else if (payload?.created && commits.length === 0) {
-    description = `🌱 Branch **${branch}** wurde erstellt.`;
-  } else if (shown.length) {
-    description = shown.join('\n');
-    if (hidden) description += `\n\n*… und ${hidden} weitere Commits.*`;
-  } else {
-    description = '*Push empfangen, aber GitHub hat keine einzelnen Commits mitgesendet.*';
+    changeLines = [`(+) Branch ${branch} erstellt`];
+  } else if (!changeLines.length) {
+    changeLines = ['(+) Repository aktualisiert'];
   }
+
+  const shown = truncateChangelogLines(changeLines, 3400);
+  const hidden = Math.max(0, changeLines.length - shown.length);
+  if (hidden) shown.push(`(+) ... und ${hidden} weitere Änderung${hidden === 1 ? '' : 'en'}`);
+
+  // Bewusst wie die Vorlage: reduziertes, dunkles Embed + Monospace-Changelog.
+  const description = [
+    `Changelogs ${dateText}`,
+    '',
+    ...shown.flatMap((line, index) => index === shown.length - 1 ? [line] : [line, '']),
+  ].join('\n');
 
   const embed = new EmbedBuilder()
-    .setColor(0x8b5cf6)
-    .setAuthor({ name: 'GitHub • Automatischer Changelog' })
-    .setTitle(`🚀 ${repoFullName} • ${branch}`)
-    .setDescription(description.slice(0, 4096))
-    .addFields(
-      { name: 'Commits', value: String(commits.length), inline: true },
-      { name: 'Push von', value: String(pusher).slice(0, 1024), inline: true },
-      { name: 'Force Push', value: payload?.forced ? 'Ja' : 'Nein', inline: true },
-    )
-    .setTimestamp();
+    .setColor(0x0b0b14)
+    .setDescription(`\`\`\`text\n${description}\n\`\`\``);
 
-  if (payload?.after && payload.after !== '0000000000000000000000000000000000000000') {
-    embed.setFooter({ text: `HEAD ${String(payload.after).slice(0, 7)} • automatisch von GitHub` });
-  } else {
-    embed.setFooter({ text: 'Automatisch von GitHub' });
-  }
   if (compareUrl) embed.setURL(compareUrl);
 
-  await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+  await channel.send({
+    embeds: [embed],
+    allowedMentions: { parse: [] },
+  });
+
+  // Wie im Referenzbild steht der @everyone-Ping als eigene Nachricht direkt darunter.
+  const pingEveryone = String(process.env.CHANGELOG_PING_EVERYONE ?? 'true').toLowerCase() !== 'false';
+  if (pingEveryone) {
+    await channel.send({
+      content: '@everyone',
+      allowedMentions: { parse: ['everyone'] },
+    });
+  }
+
   return { ignored: false };
 }
 
