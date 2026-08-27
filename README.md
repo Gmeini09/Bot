@@ -41,3 +41,6 @@ Der Bot benötigt für `/setupserver` Administratorrechte. Für Shop-Rollen muss
 3. Railway startet bei aktivem GitHub-Deploy automatisch neu.
 4. Im Railway-Log auf `✅ Eingeloggt als ...` und die Command-Registrierung achten.
 5. Auf einem Testserver zuerst `/engagement status` bzw. `/setupserver` testen.
+
+
+webhock Test 
