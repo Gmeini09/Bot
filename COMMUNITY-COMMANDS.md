@@ -1,78 +1,66 @@
-# Unfug Community Bot v10 – Commands
+# Unfug Community Bot v11 – Command Übersicht
 
-## Server Management
+## Permanente Commandlisten
 
-- `/setupserver design:<1-4> bestaetigen:true` – erstellt den kompletten Discord inklusive Rollen, Channels, Permissions, Panels und Bot-Verknüpfungen
-- `/backupserver` – Serverstruktur sichern
-- `/restoreserver bestaetigen:true` – letztes Backup wiederherstellen
-- `/servercheck` – Server- und Bot-Konfiguration prüfen
-- `/permissionscan` – kritische Rollenrechte anzeigen
-- `/dashboard` – Owner Dashboard
+- `/command user [channel]` – erstellt/aktualisiert das permanente User-Command-Embed.
+- `/command team [channel]` – erstellt/aktualisiert das permanente Team-Command-Embed.
+- Nach einem Bot-Neustart/Deployment werden gespeicherte Command-Embeds automatisch aktualisiert.
+- `/setupserver` erstellt passende Channels und postet beide Listen automatisch.
+
+## Management Pro
+
+- `/analytics zeitraum:<Heute|7 Tage|30 Tage>`
+- `/weeklyreport setup channel:<channel>`
+- `/weeklyreport status`
+- `/weeklyreport post`
+- `/weeklyreport disable`
+- `/staffstats`
+- `/modules status`
+- `/modules enable modul:<...>`
+- `/modules disable modul:<...>`
+- `/ticketsla status`
+- `/ticketsla set minuten:<5-1440>`
+- `/ticketsla enable`
+- `/ticketsla disable`
+- `/botstatus`
+- `/autobackup enable [stunde]`
+- `/autobackup status`
+- `/autobackup disable`
+
+## Server Setup
+
+- `/setupserver design:<1-4> modus:neu bestaetigen:true` – kompletter Neuaufbau mit Backup.
+- `/setupserver design:<1-4> modus:update bestaetigen:true` – ergänzt fehlende Design-/Bot-Bestandteile ohne absichtliches Löschen.
+- `/backupserver`
+- `/restoreserver bestaetigen:true`
+- `/servercheck`
+- `/permissionscan`
+- `/dashboard`
 
 ## Security
 
-- `/antinuke enable`
-- `/antinuke disable`
-- `/antinuke status`
-- `/antinuke whitelist user:<user>`
-- `/antinuke unwhitelist user:<user>`
-- `/selfheal enable`
-- `/selfheal disable`
-- `/selfheal status`
+- `/antinuke enable|disable|status|whitelist|unwhitelist`
+- `/selfheal enable|disable|status`
 - `/automod ...`
+- `/case user|view|note`
+- `/warn`, `/warnings`, `/clearwarnings`, `/timeout`, `/untimeout`, `/kick`, `/ban`, `/unban`, `/unbanall`
 
-## Tickets 2.0
+## Tickets / Support
 
-Das Ticket-Panel bietet automatisch:
+- `/ticketpanel`
+- `/ticket add|remove|close|priority|info`
+- `/applicationpanel`
+- `/applicationlist`
+- Ticket-Typen: Support, Kauf, Partnerschaft, Report und Entbannung.
 
-- Support
-- Kauf
-- Partnerschaft
-- Report
-- Entbannung
+## User Commands (Auswahl)
 
-Commands:
+- Allgemein: `/help`, `/ping`, `/serverinfo`, `/userinfo`, `/avatar`, `/regelwerk anzeigen`
+- Aktivität: `/daily`, `/coins`, `/missions`, `/season`, `/seasonleaderboard`, `/shop`
+- Community: `/rank`, `/leaderboard`, `/invites`, `/inviteleaderboard`, `/rep`, `/reps`, `/communityrank`, `/communityleaderboard`
+- Gemeinsam: `/event`, `/clip`, `/mitspieler`, `/challenge`, `/game`, `/badges`
+- Profil/Socials: `/profil`, `/profilset`, `/interessen`, `/mysocials`, `/socialinfo`, `/sociallist`
 
-- `/ticket add user:<user>`
-- `/ticket remove user:<user>`
-- `/ticket close`
-- `/ticket priority stufe:<Normal|Wichtig|Dringend>`
-- `/ticket info`
+## Weitere bestehende Systeme
 
-## Temp Voice 2.0
-
-- `/tempvoice setup ...`
-- `/tempvoice disable`
-- `/tempvoice status`
-- `/voice name`
-- `/voice limit`
-- `/voice lock`
-- `/voice unlock`
-- `/voice permit`
-- `/voice reject`
-- `/voice transfer user:<user>`
-- `/voice panel`
-
-## Mod-Cases
-
-Warn, Timeout, Kick und Ban erhalten automatisch eine Case-ID.
-
-- `/case user user:<user>` – Akte eines Users
-- `/case view id:<id>` – einzelnen Case anzeigen
-- `/case note id:<id> text:<text>` – interne Notiz hinzufügen
-
-## Regelwerk
-
-- `/regelwerk anzeigen`
-- `/regelwerk bearbeiten`
-- `/regelwerk posten [channel]`
-- `/regelwerk reset`
-
-## GitHub / Changelog
-
-- Jeder GitHub Push an den eingerichteten Webhook wird automatisch im Changelog-Channel gepostet.
-- Das v9 Monospace-Design mit `(+)` Einträgen und optionalem `@everyone` bleibt erhalten.
-
-## Weitere Systeme
-
-Daily, Coins, Missionen, Seasons, Shop, Activity Hub, Giveaways, Level, Invites, Events, Duty, Bewerbungen, Socials, Clips, Mitspielersuche, Challenges, Community-Umfragen, Mitglied des Monats, Profile, Badges, Interessen, anonyme Nachrichten und Custom Commands bleiben enthalten.
+Regelwerk, Giveaways, Level, Events, Duty, Custom Commands, Frage des Tages, Community-Polls, Mitglied des Monats, Clips, Mitspielersuche, Challenges, Profile, Badges, Interessen, anonyme Nachrichten, Socials, Temp Voice, Engagement/Coins/Missionen/Seasons sowie GitHub Push-Changelogs bleiben enthalten.

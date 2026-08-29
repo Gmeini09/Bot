@@ -69,6 +69,7 @@ const VERIFY_TTL_MS = 5 * 60 * 1000;
 const XP_COOLDOWN_MS = 60 * 1000;
 const EVENT_CHECK_INTERVAL_MS = 30 * 1000;
 const COMMUNITY_CHECK_INTERVAL_MS = 60 * 1000;
+const MANAGEMENT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const REP_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const COMMUNITY_TIMEZONE = process.env.COMMUNITY_TIMEZONE || 'Europe/Vienna';
 const verifyChallenges = new Map();
@@ -141,7 +142,7 @@ const BADGES = {
 
 function defaultData() {
   return {
-    version: 10,
+    version: 11,
     config: {
       welcomeChannelId: null,
       rulesChannelId: null,
@@ -178,6 +179,11 @@ function defaultData() {
       anonymousInboxChannelId: null,
       interestsChannelId: null,
       engagementChannelId: null,
+      commandUserChannelId: null,
+      commandUserMessageId: null,
+      commandTeamChannelId: null,
+      commandTeamMessageId: null,
+      analyticsChannelId: null,
     },
     socials: {
       messageIds: [],
@@ -289,6 +295,30 @@ function defaultData() {
       stats: { days: {} },
       drop: { activeId: null, messageId: null, channelId: null, reward: 0, expiresAt: 0, lastDropAt: 0, claimedBy: null },
       activityPanelMessageId: null,
+    },
+    management: {
+      modules: {
+        analytics: true,
+        weeklyReport: false,
+        staffStats: true,
+        ticketSla: true,
+        autoBackup: false,
+        commandPanels: true,
+      },
+      analytics: {
+        days: {},
+        weeklyReportChannelId: null,
+        lastWeeklyReportKey: null,
+      },
+      ticketSla: {
+        enabled: true,
+        minutes: 30,
+      },
+      autoBackup: {
+        enabled: false,
+        hour: 3,
+        lastDate: null,
+      },
     },
   };
 }
@@ -435,7 +465,28 @@ function normalizeData(raw) {
     },
     activityPanelMessageId: raw?.engagement?.activityPanelMessageId || null,
   };
-  base.version = 10;
+  base.management = {
+    ...base.management,
+    ...(raw?.management && typeof raw.management === 'object' ? raw.management : {}),
+    modules: {
+      ...base.management.modules,
+      ...(raw?.management?.modules && typeof raw.management.modules === 'object' ? raw.management.modules : {}),
+    },
+    analytics: {
+      ...base.management.analytics,
+      ...(raw?.management?.analytics && typeof raw.management.analytics === 'object' ? raw.management.analytics : {}),
+      days: raw?.management?.analytics?.days && typeof raw.management.analytics.days === 'object' ? raw.management.analytics.days : {},
+    },
+    ticketSla: {
+      ...base.management.ticketSla,
+      ...(raw?.management?.ticketSla && typeof raw.management.ticketSla === 'object' ? raw.management.ticketSla : {}),
+    },
+    autoBackup: {
+      ...base.management.autoBackup,
+      ...(raw?.management?.autoBackup && typeof raw.management.autoBackup === 'object' ? raw.management.autoBackup : {}),
+    },
+  };
+  base.version = 11;
   return base;
 }
 
@@ -502,7 +553,7 @@ function saveData(data) {
   const cleanGuildData = JSON.parse(JSON.stringify(data));
   delete cleanGuildData.guilds;
   root.guilds[guildId] = cleanGuildData;
-  root.version = Math.max(Number(root.version) || 0, Number(cleanGuildData.version) || 0, 10);
+  root.version = Math.max(Number(root.version) || 0, Number(cleanGuildData.version) || 0, 11);
   writeDataFile(root);
 }
 
@@ -745,6 +796,7 @@ const SERVER_SETUP_TEMPLATES = {
         setupChannel('📢・ankündigungen', 'announcements', 'text', { readOnly: true }),
         setupChannel('✅・verifizierung', 'verification'),
         setupChannel('🏷️・rollen', 'interests'),
+        setupChannel('📚・commands', 'commands', 'text', { readOnly: true, topic: 'Permanente User-Commandliste.' }),
       ]},
       { name: '━━ COMMUNITY ━━', key: 'community', channels: [
         setupChannel('💬・allgemein', 'general'),
@@ -774,6 +826,8 @@ const SERVER_SETUP_TEMPLATES = {
         setupChannel('📄・transkripte', 'transcripts'),
         setupChannel('🌐・social-audit', 'socialaudit'),
         setupChannel('📥・anonyme-inbox', 'anonymousinbox'),
+        setupChannel('🛠️・team-commands', 'teamcommands', 'text', { readOnly: true, topic: 'Permanente Commandliste für das Team.' }),
+        setupChannel('📊・server-analytics', 'analytics', 'text', { readOnly: true, topic: 'Server-Statistiken und Weekly Reports.' }),
       ]},
     ],
   },
@@ -806,6 +860,7 @@ const SERVER_SETUP_TEMPLATES = {
         setupChannel('📢・ankündigungen', 'announcements', 'text', { readOnly: true, topic: 'Offizielle News, Updates und wichtige Infos.' }),
         setupChannel('✅・verifizierung', 'verification', 'text', { topic: 'Verifiziere dich, um Zugriff auf den Server zu erhalten.' }),
         setupChannel('🏷️・rollen-auswahl', 'interests', 'text', { readOnly: true, topic: 'Wähle deine Interessen und Ping-Rollen.' }),
+        setupChannel('📚・commands', 'commands', 'text', { readOnly: true, topic: 'Alle Commands für Community-Mitglieder.' }),
       ]},
       { name: '┣━━〔 GAMBO ZONE 〕━━┫', key: 'scene', channels: [
         setupChannel('💬・main-chat', 'general', 'text', { topic: 'Der Hauptchat der Community.' }),
@@ -847,6 +902,8 @@ const SERVER_SETUP_TEMPLATES = {
         setupChannel('🌐・social-audit', 'socialaudit'),
         setupChannel('📥・anonyme-inbox', 'anonymousinbox'),
         setupChannel('📨・bewerbungs-auswertung', 'applicationreview'),
+        setupChannel('🛠️・team-commands', 'teamcommands', 'text', { readOnly: true, topic: 'Alle Team- und Management-Commands.' }),
+        setupChannel('📊・server-analytics', 'analytics', 'text', { readOnly: true, topic: 'Server Analytics, Weekly Reports und Staff Performance.' }),
       ]},
     ],
   },
@@ -878,6 +935,7 @@ const SERVER_SETUP_TEMPLATES = {
         setupChannel('announcements', 'announcements', 'text', { readOnly: true, topic: 'Official updates.' }),
         setupChannel('verify', 'verification', 'text', { topic: 'Verification access.' }),
         setupChannel('roles', 'interests', 'text', { readOnly: true, topic: 'Choose your roles.' }),
+        setupChannel('commands', 'commands', 'text', { readOnly: true, topic: 'Permanent user command list.' }),
       ]},
       { name: '━━━ 02 / COMMUNITY ━━━', key: 'community', channels: [
         setupChannel('general', 'general'),
@@ -918,6 +976,8 @@ const SERVER_SETUP_TEMPLATES = {
         setupChannel('social-audit', 'socialaudit'),
         setupChannel('anonymous-inbox', 'anonymousinbox'),
         setupChannel('application-review', 'applicationreview'),
+        setupChannel('team-commands', 'teamcommands', 'text', { readOnly: true, topic: 'Permanent staff command list.' }),
+        setupChannel('server-analytics', 'analytics', 'text', { readOnly: true, topic: 'Server analytics and weekly reports.' }),
       ]},
     ],
   },
@@ -950,6 +1010,7 @@ const SERVER_SETUP_TEMPLATES = {
         setupChannel('📣・ankündigungen', 'announcements', 'text', { readOnly: true }),
         setupChannel('✅・verifizierung', 'verification'),
         setupChannel('🏷️・rollen-auswahl', 'interests'),
+        setupChannel('📚・commands', 'commands', 'text', { readOnly: true, topic: 'Permanente User-Commandliste.' }),
       ]},
       { name: '╠══〔 COMMUNITY 〕══╣', key: 'community', channels: [
         setupChannel('💬・community-chat', 'general'),
@@ -991,6 +1052,8 @@ const SERVER_SETUP_TEMPLATES = {
         setupChannel('🌐・social-audit', 'socialaudit'),
         setupChannel('📥・anonyme-inbox', 'anonymousinbox'),
         setupChannel('📨・bewerbungs-auswertung', 'applicationreview'),
+        setupChannel('🛠️・team-commands', 'teamcommands', 'text', { readOnly: true, topic: 'Permanente Team-Commandliste.' }),
+        setupChannel('📊・server-analytics', 'analytics', 'text', { readOnly: true, topic: 'Analytics, Weekly Reports und Staff Performance.' }),
       ]},
     ],
   },
@@ -1214,6 +1277,11 @@ function applySetupConfig(data, created, templateId) {
   c.anonymousInboxChannelId = channelMap.anonymousinbox?.id || channelMap.logs?.id || null;
   c.interestsChannelId = channelMap.interests?.id || null;
   c.engagementChannelId = channelMap.activity?.id || channelMap.general?.id || null;
+  c.commandUserChannelId = channelMap.commands?.id || null;
+  c.commandUserMessageId = null;
+  c.commandTeamChannelId = channelMap.teamcommands?.id || null;
+  c.commandTeamMessageId = null;
+  c.analyticsChannelId = channelMap.analytics?.id || channelMap.logs?.id || null;
   c.setupTemplateId = templateId;
   c.setupThemeColor = SERVER_SETUP_TEMPLATES[templateId]?.color || 0x5865f2;
 
@@ -1242,6 +1310,15 @@ function applySetupConfig(data, created, templateId) {
   data.engagement.enabled = Boolean(c.engagementChannelId);
   data.security.antiNuke.enabled = true;
   data.security.selfHealing.enabled = true;
+  data.management.modules.analytics = true;
+  data.management.modules.commandPanels = true;
+  data.management.modules.staffStats = true;
+  data.management.modules.ticketSla = true;
+  data.management.modules.weeklyReport = true;
+  data.management.analytics.weeklyReportChannelId = c.analyticsChannelId;
+  data.management.ticketSla.enabled = true;
+  data.management.autoBackup.enabled = true;
+  data.management.autoBackup.hour = 3;
 
   if (['2', '3', '4'].includes(templateId)) {
     data.automod.enabled = true;
@@ -1352,6 +1429,18 @@ async function publishSetupPanels(guild, data, created, templateId) {
 
   if (channelMap.interests?.isTextBased()) {
     await updateInterestPanel(guild, data, channelMap.interests).catch(() => {});
+  }
+
+  if (channelMap.commands?.isTextBased()) {
+    await publishCommandPanel(guild, data, 'user', channelMap.commands, { forceNew: true }).catch(() => {});
+  }
+
+  if (channelMap.teamcommands?.isTextBased()) {
+    await publishCommandPanel(guild, data, 'team', channelMap.teamcommands, { forceNew: true }).catch(() => {});
+  }
+
+  if (channelMap.analytics?.isTextBased()) {
+    await channelMap.analytics.send({ embeds: [analyticsEmbed(guild, data, 7).setTitle('📊 Server Analytics bereit')] }).catch(() => {});
   }
 
   if (channelMap.logs?.isTextBased()) {
@@ -3197,6 +3286,7 @@ function configFieldForChannelId(data, channelId) {
     'ticketCategoryId','applicationReviewChannelId','ticketTranscriptChannelId','automodLogChannelId','tempVoiceLobbyId',
     'tempVoiceCategoryId','questionChannelId','communityPollChannelId','memberOfMonthChannelId','clipChannelId','lfgChannelId',
     'challengeChannelId','anonymousInboxChannelId','interestsChannelId','engagementChannelId',
+    'commandUserChannelId','commandTeamChannelId','analyticsChannelId',
   ];
   return fields.find(field => data.config?.[field] === channelId) || null;
 }
@@ -3208,6 +3298,7 @@ const SELF_HEAL_CHANNEL_KEYS = {
   tempVoiceLobbyId: 'tempvoice', tempVoiceCategoryId: 'category_voice', questionChannelId: 'questions',
   communityPollChannelId: 'polls', memberOfMonthChannelId: 'membermonth', clipChannelId: 'clips', lfgChannelId: 'lfg',
   challengeChannelId: 'challenges', anonymousInboxChannelId: 'anonymousinbox', interestsChannelId: 'interests', engagementChannelId: 'activity',
+  commandUserChannelId: 'commands', commandTeamChannelId: 'teamcommands', analyticsChannelId: 'analytics',
 };
 
 function templateChannelDefinition(templateId, key) {
@@ -3263,11 +3354,282 @@ async function selfHealDeletedChannel(channel) {
     data.config[field] = created.id;
     if (field === 'rulesChannelId' && created.isTextBased()) await publishRulebookMessage(guild, data, created, { forceNew: true }).catch(() => {});
     if (field === 'engagementChannelId' && created.isTextBased()) await updateActivityPanel(guild, data).catch(() => {});
+    if (field === 'commandUserChannelId' && created.isTextBased()) { data.config.commandUserMessageId = null; await publishCommandPanel(guild, data, 'user', created, { forceNew: true }).catch(() => {}); }
+    if (field === 'commandTeamChannelId' && created.isTextBased()) { data.config.commandTeamMessageId = null; await publishCommandPanel(guild, data, 'team', created, { forceNew: true }).catch(() => {}); }
+    if (field === 'analyticsChannelId') data.management.analytics.weeklyReportChannelId = created.id;
     saveData(data);
     await sendAutomodAlert(guild, data, '🩺 Self-Healing', `Der kritische Bereich **${channel.name}** wurde gelöscht und automatisch als <#${created.id}> wiederhergestellt.`).catch(() => {});
   } finally {
     setTimeout(() => selfHealLocks.delete(healKey), 3000);
   }
+}
+
+
+const USER_COMMAND_FIELDS = [
+  { name: 'ℹ️ Allgemein', value: '`/help` `/ping` `/serverinfo` `/userinfo` `/avatar` `/regelwerk anzeigen`' },
+  { name: '💰 Aktivität', value: '`/daily` `/coins balance` `/coins leaderboard` `/missions view` `/missions claim` `/season` `/seasonleaderboard` `/shop list` `/shop buy`' },
+  { name: '🏆 Level & Community', value: '`/rank` `/leaderboard` `/invites` `/inviteleaderboard` `/rep` `/reps` `/communityrank` `/communityleaderboard` `/badges`' },
+  { name: '🎮 Gemeinsam', value: '`/event list` `/clip submit` `/clip top` `/mitspieler create` `/mitspieler list` `/challenge list` `/game`' },
+  { name: '👤 Profil & Socials', value: '`/profil` `/profilset` `/interessen` `/mysocials` `/socialinfo` `/sociallist`' },
+  { name: '💬 Community', value: '`/suggest` `/anonymouspanel` `/anonymousinfo`' },
+];
+
+const TEAM_COMMAND_FIELDS = [
+  { name: '👑 Owner / Setup', value: '`/setupserver` `/backupserver` `/restoreserver` `/dashboard` `/servercheck` `/permissionscan` `/modules` `/autobackup` `/botstatus`' },
+  { name: '🛡️ Sicherheit', value: '`/antinuke` `/selfheal` `/automod` `/case` `/warn` `/warnings` `/clearwarnings` `/timeout` `/untimeout` `/kick` `/ban` `/unban` `/unbanall`' },
+  { name: '🎫 Support', value: '`/ticketpanel` `/ticket` `/ticketsla` `/applicationpanel` `/applicationlist` `/staffstats`' },
+  { name: '📢 Verwaltung', value: '`/announce` `/embed` `/poll` `/giveaway` `/purge` `/clear` `/slowmode` `/lock` `/unlock` `/rolepanel`' },
+  { name: '⚙️ Bot-Systeme', value: '`/setup` `/verificationpanel` `/tempvoice` `/voice` `/levelrole` `/levelsystem` `/duty` `/dutystats` `/dutyleaderboard` `/customcommand`' },
+  { name: '📊 Community-Systeme', value: '`/engagement` `/frage` `/communitypoll` `/memberofthemonth` `/clip` `/challenge` `/analytics` `/weeklyreport`' },
+  { name: '📚 Permanente Listen', value: '`/command user` erstellt/aktualisiert die User-Liste. `/command team` erstellt/aktualisiert die Team-Liste.' },
+];
+
+function commandPanelEmbed(guild, type) {
+  const team = type === 'team';
+  return new EmbedBuilder()
+    .setColor(team ? 0xe67e22 : 0x5865f2)
+    .setTitle(team ? '🛠️ TEAM COMMANDS' : '📚 USER COMMANDS')
+    .setDescription(team
+      ? 'Permanente Übersicht der wichtigsten Team-, Support- und Management-Befehle.'
+      : 'Permanente Übersicht der Commands, die Community-Mitglieder regelmäßig brauchen.')
+    .addFields(...(team ? TEAM_COMMAND_FIELDS : USER_COMMAND_FIELDS))
+    .setFooter({ text: `${guild.name} • wird nach Bot-Updates automatisch aktualisiert` })
+    .setTimestamp();
+}
+
+async function publishCommandPanel(guild, data, type, targetChannel = null, { forceNew = false } = {}) {
+  const team = type === 'team';
+  const channelField = team ? 'commandTeamChannelId' : 'commandUserChannelId';
+  const messageField = team ? 'commandTeamMessageId' : 'commandUserMessageId';
+  const channelId = targetChannel?.id || data.config[channelField];
+  const channel = targetChannel || (channelId ? await guild.channels.fetch(channelId).catch(() => null) : null);
+  if (!channel?.isTextBased()) return null;
+
+  let message = null;
+  if (!forceNew && data.config[messageField] && data.config[channelField] === channel.id) {
+    message = await channel.messages.fetch(data.config[messageField]).catch(() => null);
+  }
+  const payload = { embeds: [commandPanelEmbed(guild, type)], allowedMentions: { parse: [] } };
+  if (message) await message.edit(payload);
+  else message = await channel.send(payload);
+  data.config[channelField] = channel.id;
+  data.config[messageField] = message.id;
+  saveData(data);
+  return message;
+}
+
+async function refreshSavedCommandPanels(guild, data) {
+  if (!data.management?.modules?.commandPanels) return;
+  if (data.config.commandUserChannelId) await publishCommandPanel(guild, data, 'user').catch(() => {});
+  if (data.config.commandTeamChannelId) await publishCommandPanel(guild, data, 'team').catch(() => {});
+}
+
+function ensureAnalyticsDay(data, timestamp = Date.now()) {
+  const key = localDateInfo(timestamp).date;
+  if (!data.management.analytics.days[key]) {
+    data.management.analytics.days[key] = { joins: 0, leaves: 0, messages: 0, voiceMs: 0 };
+  }
+  const oldKeys = Object.keys(data.management.analytics.days).sort();
+  for (const stale of oldKeys.slice(0, Math.max(0, oldKeys.length - 90))) delete data.management.analytics.days[stale];
+  return data.management.analytics.days[key];
+}
+
+function analyticsSummary(data, days = 7) {
+  const keys = Object.keys(data.management?.analytics?.days || {}).sort().slice(-days);
+  return keys.reduce((out, key) => {
+    const d = data.management.analytics.days[key] || {};
+    out.joins += Number(d.joins || 0);
+    out.leaves += Number(d.leaves || 0);
+    out.messages += Number(d.messages || 0);
+    out.voiceMs += Number(d.voiceMs || 0);
+    return out;
+  }, { joins: 0, leaves: 0, messages: 0, voiceMs: 0, days: keys.length });
+}
+
+function analyticsEmbed(guild, data, days = 7) {
+  const sum = analyticsSummary(data, days);
+  const net = sum.joins - sum.leaves;
+  return new EmbedBuilder()
+    .setColor(net >= 0 ? 0x2ecc71 : 0xe74c3c)
+    .setTitle(`📊 Server Analytics • ${days === 1 ? 'Heute' : `letzte ${days} Tage`}`)
+    .addFields(
+      { name: '👥 Mitglieder', value: `Aktuell: **${guild.memberCount}**\nJoins: **${sum.joins}**\nLeaver: **${sum.leaves}**\nNetto: **${net >= 0 ? '+' : ''}${net}**`, inline: true },
+      { name: '💬 Nachrichten', value: `**${sum.messages.toLocaleString('de-DE')}**`, inline: true },
+      { name: '🎧 Voice', value: `**${formatLongDuration(sum.voiceMs)}**`, inline: true },
+    )
+    .setFooter({ text: `Erfasste Tage: ${sum.days} • Zeitzone ${COMMUNITY_TIMEZONE}` })
+    .setTimestamp();
+}
+
+function staffPerformanceEmbed(guild, data) {
+  const map = new Map();
+  const touch = id => {
+    if (!id) return null;
+    if (!map.has(id)) map.set(id, { tickets: 0, cases: 0, dutyMs: 0, responseMs: 0, responseCount: 0 });
+    return map.get(id);
+  };
+  for (const ticket of Object.values(data.tickets?.records || {})) {
+    const ticketRow = touch(ticket.claimedBy || ticket.closedBy);
+    if (ticketRow && ticket.status === 'closed') ticketRow.tickets++;
+    const responseRow = touch(ticket.firstStaffReplyBy || ticket.claimedBy || ticket.closedBy);
+    if (responseRow && ticket.firstStaffReplyAt && ticket.createdAt) {
+      responseRow.responseMs += Math.max(0, ticket.firstStaffReplyAt - ticket.createdAt);
+      responseRow.responseCount++;
+    }
+  }
+  for (const item of Object.values(data.modCases?.items || {})) {
+    const row = touch(item.moderatorId);
+    if (row) row.cases++;
+  }
+  for (const [userId, total] of Object.entries(data.duty?.totals || {})) {
+    const row = touch(userId);
+    if (row) row.dutyMs = Number(total || 0);
+  }
+  const rows = [...map.entries()].sort((a, b) => (b[1].tickets * 5 + b[1].cases * 2 + b[1].dutyMs / 3600000) - (a[1].tickets * 5 + a[1].cases * 2 + a[1].dutyMs / 3600000)).slice(0, 15);
+  const text = rows.length ? rows.map(([id, v], i) => {
+    const avg = v.responseCount ? formatLongDuration(Math.round(v.responseMs / v.responseCount)) : '—';
+    return `**${i + 1}.** <@${id}> • 🎫 ${v.tickets} • 📜 ${v.cases} • ⏱️ ${formatLongDuration(v.dutyMs)} • Antwort Ø ${avg}`;
+  }).join('\n') : '*Noch keine Staff-Daten vorhanden.*';
+  return new EmbedBuilder().setColor(0xe67e22).setTitle('👨‍💼 Staff Performance').setDescription(text).setFooter({ text: 'Tickets • Mod-Cases • Duty-Zeit • durchschnittliche erste Ticket-Antwort' }).setTimestamp();
+}
+
+function modulesEmbed(data) {
+  const m = data.management.modules;
+  const lines = [
+    ['Analytics', m.analytics], ['Weekly Report', m.weeklyReport], ['Staff Stats', m.staffStats],
+    ['Ticket SLA', data.management.ticketSla.enabled], ['Auto Backup', data.management.autoBackup.enabled], ['Command Panels', m.commandPanels],
+    ['Engagement', data.engagement.enabled], ['Anti-Nuke', data.security.antiNuke.enabled], ['Self-Healing', data.security.selfHealing.enabled], ['AutoMod', data.automod.enabled],
+  ].map(([name, enabled]) => `${enabled ? '✅' : '❌'} **${name}**`).join('\n');
+  return new EmbedBuilder().setColor(0x5865f2).setTitle('🧩 Module Manager').setDescription(lines).setTimestamp();
+}
+
+function botStatusEmbed(clientInstance, guild, data) {
+  const memory = process.memoryUsage();
+  return new EmbedBuilder()
+    .setColor(clientInstance.ws.status === 0 ? 0x2ecc71 : 0xf1c40f)
+    .setTitle('🩺 Bot Health Monitor')
+    .addFields(
+      { name: 'Discord', value: `Ping: **${Math.round(clientInstance.ws.ping)} ms**\nReady: **${clientInstance.isReady() ? 'Ja' : 'Nein'}**`, inline: true },
+      { name: 'Prozess', value: `Uptime: **${formatLongDuration(process.uptime() * 1000)}**\nRAM: **${Math.round(memory.rss / 1024 / 1024)} MB**`, inline: true },
+      { name: 'Bot', value: `Commands: **${buildCommands().length}**\nGuilds: **${clientInstance.guilds.cache.size}**`, inline: true },
+      { name: 'GitHub Changelog', value: config.githubWebhookSecret ? '✅ Webhook-Secret gesetzt' : '❌ Webhook-Secret fehlt', inline: true },
+      { name: 'Persistenz', value: `Speicher: \`${storageDir}\`\nDatenversion: **v${data.version}**`, inline: false },
+    )
+    .setFooter({ text: guild.name })
+    .setTimestamp();
+}
+
+async function postWeeklyReport(guild, data, force = false) {
+  if (!data.management.modules.weeklyReport && !force) return null;
+  const channelId = data.management.analytics.weeklyReportChannelId || data.config.analyticsChannelId || data.config.logChannelId;
+  const channel = channelId ? await guild.channels.fetch(channelId).catch(() => null) : null;
+  if (!channel?.isTextBased()) return null;
+  const embed = analyticsEmbed(guild, data, 7).setTitle('📈 Weekly Server Report').setDescription('Automatischer Wochenbericht des Discord-Servers.');
+  const message = await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+  return message;
+}
+
+async function checkTicketSla(guild, data) {
+  if (!data.management.ticketSla.enabled) return false;
+  const threshold = Math.max(5, Number(data.management.ticketSla.minutes || 30)) * 60 * 1000;
+  let changed = false;
+  for (const ticket of Object.values(data.tickets?.records || {})) {
+    if (ticket.status !== 'open' || ticket.firstStaffReplyAt || ticket.slaRemindedAt) continue;
+    if (Date.now() - Number(ticket.createdAt || 0) < threshold) continue;
+    const channel = await guild.channels.fetch(ticket.channelId).catch(() => null);
+    if (!channel?.isTextBased()) continue;
+    await channel.send({
+      content: data.config.supportRoleId ? `<@&${data.config.supportRoleId}>` : undefined,
+      embeds: [new EmbedBuilder().setColor(0xe67e22).setTitle('⏱️ Ticket SLA').setDescription(`Ticket **#${ticket.id}** wartet seit mehr als **${Math.round(threshold / 60000)} Minuten** auf eine erste Team-Antwort.`)],
+      allowedMentions: data.config.supportRoleId ? { roles: [data.config.supportRoleId] } : { parse: [] },
+    }).catch(() => {});
+    ticket.slaRemindedAt = Date.now();
+    changed = true;
+  }
+  if (changed) saveData(data);
+  return changed;
+}
+
+async function checkManagementAutomation(clientInstance) {
+  const info = localDateInfo();
+  const week = isoWeekKey();
+  for (const guild of clientInstance.guilds.cache.values()) {
+    const data = loadData(guild.id);
+    let changed = false;
+
+    if (data.management.modules.weeklyReport && info.weekday === 0 && info.hour >= 19 && data.management.analytics.lastWeeklyReportKey !== week) {
+      const posted = await postWeeklyReport(guild, data).catch(() => null);
+      if (posted) {
+        data.management.analytics.lastWeeklyReportKey = week;
+        changed = true;
+      }
+    }
+
+    await checkTicketSla(guild, data).catch(() => {});
+
+    if (data.management.autoBackup.enabled && info.hour >= Number(data.management.autoBackup.hour || 3) && data.management.autoBackup.lastDate !== info.date) {
+      const backup = await captureServerBackup(guild, data, 'automatic');
+      pushServerBackup(data, guild.id, backup);
+      data.management.autoBackup.lastDate = info.date;
+      changed = true;
+      const channelId = data.config.logChannelId || data.config.analyticsChannelId;
+      const channel = channelId ? await guild.channels.fetch(channelId).catch(() => null) : null;
+      if (channel?.isTextBased()) await channel.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71).setTitle('💾 Automatisches Server-Backup').setDescription(`Backup \`${backup.id}\` wurde automatisch erstellt.`).setTimestamp()] }).catch(() => {});
+    }
+
+    if (changed) saveData(data);
+  }
+}
+
+async function ensureTemplateStructure(guild, template) {
+  await guild.roles.fetch().catch(() => {});
+  await guild.channels.fetch().catch(() => {});
+  const roleMap = {};
+  const channelMap = {};
+  const categoryMap = {};
+
+  for (const def of template.roles) {
+    let role = guild.roles.cache.find(r => !r.managed && r.name === def.name) || null;
+    if (!role) {
+      role = await guild.roles.create({ name: def.name, color: def.color ?? template.color, hoist: Boolean(def.hoist), mentionable: Boolean(def.mentionable), permissions: permissionValues(def.permissions || []), reason: `Setup Update ${template.name}` });
+    }
+    roleMap[def.key] = role;
+  }
+
+  for (const section of template.sections) {
+    let category = guild.channels.cache.find(ch => ch.type === ChannelType.GuildCategory && ch.name === section.name) || null;
+    if (!category) category = await guild.channels.create({ name: section.name, type: ChannelType.GuildCategory, permissionOverwrites: setupOverwriteList(guild, roleMap, section, {}), reason: `Setup Update ${template.name}` });
+    categoryMap[section.key] = category;
+    channelMap[`category_${section.key}`] = category;
+    for (const def of section.channels) {
+      const type = def.type === 'voice' ? ChannelType.GuildVoice : ChannelType.GuildText;
+      let channel = guild.channels.cache.find(ch => ch.type === type && ch.name === def.name) || null;
+      if (!channel) {
+        channel = await guild.channels.create({ name: def.name, type, parent: category.id, topic: type === ChannelType.GuildText ? (def.topic || null) : undefined, permissionOverwrites: setupOverwriteList(guild, roleMap, section, def), reason: `Setup Update ${template.name}` });
+      }
+      channelMap[def.key] = channel;
+    }
+  }
+  return { roleMap, channelMap, categoryMap };
+}
+
+function applySetupUpdateConfig(data, created, templateId) {
+  const { roleMap, channelMap } = created;
+  const c = data.config;
+  const setIf = (field, value) => { if (value) c[field] = value; };
+  setIf('welcomeChannelId', channelMap.welcome?.id); setIf('rulesChannelId', channelMap.rules?.id); setIf('logChannelId', channelMap.logs?.id);
+  setIf('suggestionsChannelId', channelMap.suggestions?.id); setIf('giveawayChannelId', channelMap.giveaways?.id); setIf('socialsChannelId', channelMap.socials?.id);
+  setIf('socialAuditChannelId', channelMap.socialaudit?.id); setIf('ticketCategoryId', channelMap.category_supportcat?.id); setIf('verifiedRoleId', roleMap.verified?.id);
+  setIf('supportRoleId', roleMap.support?.id); setIf('moderatorRoleId', roleMap.moderator?.id); setIf('announcementRoleId', roleMap.announcement?.id);
+  setIf('applicationReviewChannelId', channelMap.applicationreview?.id || channelMap.applications?.id); setIf('ticketTranscriptChannelId', channelMap.transcripts?.id);
+  setIf('automodLogChannelId', channelMap.automodlogs?.id); setIf('tempVoiceLobbyId', channelMap.tempvoice?.id); setIf('tempVoiceCategoryId', channelMap.category_voice?.id);
+  setIf('clipChannelId', channelMap.clips?.id); setIf('lfgChannelId', channelMap.lfg?.id); setIf('challengeChannelId', channelMap.challenges?.id);
+  setIf('anonymousInboxChannelId', channelMap.anonymousinbox?.id); setIf('interestsChannelId', channelMap.interests?.id); setIf('engagementChannelId', channelMap.activity?.id);
+  setIf('commandUserChannelId', channelMap.commands?.id); setIf('commandTeamChannelId', channelMap.teamcommands?.id); setIf('analyticsChannelId', channelMap.analytics?.id);
+  c.setupTemplateId = templateId; c.setupThemeColor = SERVER_SETUP_TEMPLATES[templateId]?.color || c.setupThemeColor || 0x5865f2;
+  data.management.modules.analytics = true; data.management.modules.commandPanels = true; data.management.modules.staffStats = true; data.management.modules.ticketSla = true; data.management.modules.weeklyReport = true;
+  data.management.ticketSla.enabled = true; data.management.autoBackup.enabled = true;
+  if (c.analyticsChannelId) data.management.analytics.weeklyReportChannelId ||= c.analyticsChannelId;
 }
 
 function serverCheckReport(guild, data) {
@@ -3281,6 +3643,7 @@ function serverCheckReport(guild, data) {
     ['Regelwerk', data.config.rulesChannelId], ['Logs', data.config.logChannelId], ['Tickets', data.config.ticketCategoryId],
     ['Verifizierung', data.config.verifiedRoleId], ['Support-Rolle', data.config.supportRoleId], ['Temp-Voice Lobby', data.config.tempVoiceLobbyId],
     ['Activity Hub', data.config.engagementChannelId],
+    ['User-Commands', data.config.commandUserChannelId], ['Team-Commands', data.config.commandTeamChannelId], ['Analytics', data.config.analyticsChannelId],
   ];
   for (const [label, id] of checks) {
     const exists = id && (guild.channels.cache.has(id) || guild.roles.cache.has(id));
@@ -3314,12 +3677,17 @@ function dashboardPayload(guild, data) {
     new ButtonBuilder().setCustomId('dashboard_selfheal').setLabel(`Self-Heal: ${heal ? 'AN' : 'AUS'}`).setEmoji('🩺').setStyle(heal ? ButtonStyle.Success : ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('dashboard_automod').setLabel(`AutoMod: ${auto ? 'AN' : 'AUS'}`).setEmoji('🤖').setStyle(auto ? ButtonStyle.Success : ButtonStyle.Danger),
   );
+  const row3 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('dashboard_analytics').setLabel('Analytics').setEmoji('📊').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('dashboard_modules').setLabel('Module').setEmoji('🧩').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('dashboard_botstatus').setLabel('Bot Status').setEmoji('🩺').setStyle(ButtonStyle.Secondary),
+  );
   return {
     embeds: [new EmbedBuilder().setColor(0x111111).setTitle(`👑 Owner Dashboard • ${guild.name}`).setDescription(
       `**Mitglieder:** ${guild.memberCount}\n**Channels:** ${guild.channels.cache.size}\n**Rollen:** ${guild.roles.cache.size}\n\n` +
       `🛡️ Anti-Nuke: **${anti ? 'Aktiv' : 'Inaktiv'}**\n🩺 Self-Healing: **${heal ? 'Aktiv' : 'Inaktiv'}**\n🤖 AutoMod: **${auto ? 'Aktiv' : 'Inaktiv'}**`
     ).setTimestamp()],
-    components: [row1, row2],
+    components: [row1, row2, row3],
     ephemeral: true,
   };
 }
@@ -3428,9 +3796,14 @@ function buildCommands() {
           { name: 'Design 3 • Minimal Elite • Obsidian', value: '3' },
           { name: 'Design 4 • UNFUGSTIFTER Private Edition', value: '4' },
         ))
+      .addStringOption(o => o
+        .setName('modus')
+        .setDescription('Neu = kompletter Reset, Update = nur fehlende Bestandteile ergänzen.')
+        .setRequired(false)
+        .addChoices({ name: 'Neu aufbauen', value: 'neu' }, { name: 'Update ohne Löschen', value: 'update' }))
       .addBooleanOption(o => o
         .setName('bestaetigen')
-        .setDescription('MUSS true sein: alte Channels/Rollen werden gelöscht.')
+        .setDescription('MUSS true sein. Bei Update wird nichts absichtlich gelöscht.')
         .setRequired(true)),
     new SlashCommandBuilder()
       .setName('backupserver')
@@ -3472,6 +3845,48 @@ function buildCommands() {
       .addSubcommand(s => s.setName('user').setDescription('Zeigt Cases eines Nutzers.').addUserOption(o => o.setName('user').setDescription('Nutzer').setRequired(true)))
       .addSubcommand(s => s.setName('view').setDescription('Zeigt einen einzelnen Case.').addIntegerOption(o => o.setName('id').setDescription('Case-ID').setRequired(true).setMinValue(1)))
       .addSubcommand(s => s.setName('note').setDescription('Fügt einem Case eine interne Notiz hinzu.').addIntegerOption(o => o.setName('id').setDescription('Case-ID').setRequired(true).setMinValue(1)).addStringOption(o => o.setName('text').setDescription('Interne Notiz').setRequired(true).setMaxLength(500))),
+
+    new SlashCommandBuilder()
+      .setName('command')
+      .setDescription('Erstellt oder aktualisiert permanente Commandlisten.')
+      .addSubcommand(s => s.setName('user').setDescription('Erstellt die permanente User-Commandliste.').addChannelOption(o => o.setName('channel').setDescription('Ziel-Channel, sonst aktueller Channel').setRequired(false).addChannelTypes(ChannelType.GuildText)))
+      .addSubcommand(s => s.setName('team').setDescription('Erstellt die permanente Team-Commandliste.').addChannelOption(o => o.setName('channel').setDescription('Ziel-Channel, sonst aktueller Channel').setRequired(false).addChannelTypes(ChannelType.GuildText))),
+    new SlashCommandBuilder()
+      .setName('analytics')
+      .setDescription('Zeigt Server-Analytics.')
+      .addStringOption(o => o.setName('zeitraum').setDescription('Zeitraum').setRequired(false).addChoices({ name: 'Heute', value: '1' }, { name: '7 Tage', value: '7' }, { name: '30 Tage', value: '30' })),
+    new SlashCommandBuilder()
+      .setName('weeklyreport')
+      .setDescription('Verwaltet den automatischen Wochenbericht.')
+      .addSubcommand(s => s.setName('setup').setDescription('Aktiviert Weekly Reports.').addChannelOption(o => o.setName('channel').setDescription('Report-Channel').setRequired(true).addChannelTypes(ChannelType.GuildText)))
+      .addSubcommand(s => s.setName('disable').setDescription('Deaktiviert Weekly Reports.'))
+      .addSubcommand(s => s.setName('status').setDescription('Zeigt den Weekly-Report-Status.'))
+      .addSubcommand(s => s.setName('post').setDescription('Postet sofort einen Wochenbericht.')),
+    new SlashCommandBuilder().setName('staffstats').setDescription('Zeigt Staff-Performance aus Tickets, Cases und Duty-Zeit.'),
+    new SlashCommandBuilder()
+      .setName('modules')
+      .setDescription('Aktiviert oder deaktiviert Bot-Module.')
+      .addSubcommand(s => s.setName('status').setDescription('Zeigt alle Module.'))
+      .addSubcommand(s => s.setName('enable').setDescription('Aktiviert ein Modul.').addStringOption(o => o.setName('modul').setDescription('Modul').setRequired(true).addChoices(
+        { name: 'Analytics', value: 'analytics' }, { name: 'Weekly Report', value: 'weeklyReport' }, { name: 'Staff Stats', value: 'staffStats' }, { name: 'Ticket SLA', value: 'ticketSla' }, { name: 'Auto Backup', value: 'autoBackup' }, { name: 'Command Panels', value: 'commandPanels' }, { name: 'Engagement', value: 'engagement' }, { name: 'Anti-Nuke', value: 'antiNuke' }, { name: 'Self-Healing', value: 'selfHealing' }, { name: 'AutoMod', value: 'automod' }
+      )))
+      .addSubcommand(s => s.setName('disable').setDescription('Deaktiviert ein Modul.').addStringOption(o => o.setName('modul').setDescription('Modul').setRequired(true).addChoices(
+        { name: 'Analytics', value: 'analytics' }, { name: 'Weekly Report', value: 'weeklyReport' }, { name: 'Staff Stats', value: 'staffStats' }, { name: 'Ticket SLA', value: 'ticketSla' }, { name: 'Auto Backup', value: 'autoBackup' }, { name: 'Command Panels', value: 'commandPanels' }, { name: 'Engagement', value: 'engagement' }, { name: 'Anti-Nuke', value: 'antiNuke' }, { name: 'Self-Healing', value: 'selfHealing' }, { name: 'AutoMod', value: 'automod' }
+      ))),
+    new SlashCommandBuilder()
+      .setName('ticketsla')
+      .setDescription('Verwaltet Erinnerungen für unbeantwortete Tickets.')
+      .addSubcommand(s => s.setName('status').setDescription('Zeigt Ticket-SLA-Status.'))
+      .addSubcommand(s => s.setName('enable').setDescription('Aktiviert Ticket SLA.'))
+      .addSubcommand(s => s.setName('disable').setDescription('Deaktiviert Ticket SLA.'))
+      .addSubcommand(s => s.setName('set').setDescription('Setzt die Minuten bis zur Erinnerung.').addIntegerOption(o => o.setName('minuten').setDescription('Minuten').setRequired(true).setMinValue(5).setMaxValue(1440))),
+    new SlashCommandBuilder().setName('botstatus').setDescription('Zeigt Bot-Health, Uptime, RAM und Webhook-Status.'),
+    new SlashCommandBuilder()
+      .setName('autobackup')
+      .setDescription('Verwaltet tägliche automatische Server-Backups.')
+      .addSubcommand(s => s.setName('status').setDescription('Zeigt Auto-Backup-Status.'))
+      .addSubcommand(s => s.setName('disable').setDescription('Deaktiviert Auto-Backups.'))
+      .addSubcommand(s => s.setName('enable').setDescription('Aktiviert Auto-Backups.').addIntegerOption(o => o.setName('stunde').setDescription('Stunde 0-23 in COMMUNITY_TIMEZONE').setRequired(false).setMinValue(0).setMaxValue(23))),
 
     new SlashCommandBuilder()
       .setName('setup')
@@ -4175,6 +4590,16 @@ client.once(Events.ClientReady, async readyClient => {
   // Coins, Live-Aktivität, Missionen und Random Drops.
   await checkEngagementAutomation(readyClient);
   setInterval(() => checkEngagementAutomation(readyClient).catch(() => {}), 15 * 60 * 1000);
+
+  // Permanente Command-Panels nach jedem Deployment automatisch aktualisieren.
+  for (const guild of readyClient.guilds.cache.values()) {
+    const data = loadData(guild.id);
+    await refreshSavedCommandPanels(guild, data).catch(() => {});
+  }
+
+  // Weekly Reports, Ticket SLA und automatische Server-Backups.
+  await checkManagementAutomation(readyClient);
+  setInterval(() => checkManagementAutomation(readyClient).catch(() => {}), MANAGEMENT_CHECK_INTERVAL_MS);
 });
 
 // ============================================================
@@ -4183,6 +4608,7 @@ client.once(Events.ClientReady, async readyClient => {
 
 client.on(Events.GuildMemberAdd, async member => {
   const data = loadData(member.guild.id);
+  if (!member.user.bot && data.management.modules.analytics) { ensureAnalyticsDay(data).joins++; saveData(data); }
   if (data.engagement.enabled && !member.user.bot) {
     ensureDailyStats(data, Date.now()).joins++;
     saveData(data);
@@ -4225,6 +4651,7 @@ client.on(Events.GuildMemberAdd, async member => {
 
 client.on(Events.GuildMemberRemove, async member => {
   const data = loadData(member.guild.id);
+  if (!member.user.bot && data.management.modules.analytics) { ensureAnalyticsDay(data).leaves++; saveData(data); }
   if (!serverMaintenanceGuilds.has(member.guild.id) && data.security?.antiNuke?.enabled) {
     const kickEntry = await latestAuditExecutor(member.guild, AuditLogEvent.MemberKick, member.id);
     if (kickEntry?.executorId) await recordAntiNukeAction(member.guild, data, kickEntry.executorId, `Kick: ${member.user.tag}`).catch(() => {});
@@ -4287,6 +4714,7 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
       const duration = finishVoiceSession(data, newState.member.id);
       if (duration) {
         recordEngagementVoice(data, newState.member.id, duration);
+        if (data.management.modules.analytics) ensureAnalyticsDay(data).voiceMs += duration;
         await checkAndAwardBadges(data, newState.member.id);
       }
     }
@@ -4349,7 +4777,17 @@ client.on(Events.MessageCreate, async message => {
   if (await handleAutomodMessage(message, data)) return;
 
   await recordCommunityMessage(message, data).catch(error => console.error('❌ Community-Aktivität Fehler:', error));
+  if (data.management.modules.analytics) ensureAnalyticsDay(data).messages++;
+  if (isTicketChannel(message.channel)) {
+    const record = Object.values(data.tickets?.records || {}).find(t => t.channelId === message.channel.id && t.status === 'open');
+    if (record && message.author.id !== record.ownerId && canManageTickets(message.member, data) && !record.firstStaffReplyAt) {
+      record.firstStaffReplyAt = Date.now();
+      record.firstStaffReplyBy = message.author.id;
+      record.slaRemindedAt = null;
+    }
+  }
   recordEngagementMessage(message, data);
+  saveData(data);
   await awardMessageXp(message, data).catch(error => console.error('❌ Level-System Fehler:', error));
 
   if (await handleCommunityGameMessage(message, data)) return;
@@ -4423,8 +4861,25 @@ client.on(Events.MessageDelete, async message => {
     suggestionSourceDeletes.delete(message.id);
     return;
   }
-  if (!message.guild || message.author?.bot) return;
+  if (!message.guild) return;
   const data = loadData(message.guild.id);
+
+  // Die beiden Commandlisten sollen dauerhaft bestehen. Wird eine Panel-Nachricht gelöscht,
+  // erstellt der Bot sie im gespeicherten Channel automatisch neu.
+  if (data.management?.modules?.commandPanels && message.id === data.config.commandUserMessageId) {
+    data.config.commandUserMessageId = null;
+    saveData(data);
+    await publishCommandPanel(message.guild, data, 'user', null, { forceNew: true }).catch(() => {});
+    return;
+  }
+  if (data.management?.modules?.commandPanels && message.id === data.config.commandTeamMessageId) {
+    data.config.commandTeamMessageId = null;
+    saveData(data);
+    await publishCommandPanel(message.guild, data, 'team', null, { forceNew: true }).catch(() => {});
+    return;
+  }
+
+  if (message.author?.bot) return;
   if (!data.config.logChannelId || message.channel.id === data.config.logChannelId) return;
   const text = message.content ? `\n**Inhalt:** ${message.content.slice(0, 1000)}` : '';
   await logEvent(message.guild, data, '🗑️ Nachricht gelöscht', `**Channel:** <#${message.channel.id}>\n**Autor:** ${message.author ? `<@${message.author.id}>` : 'Unbekannt'}${text}`);
@@ -4506,6 +4961,18 @@ client.on(Events.InteractionCreate, async interaction => {
         }
         if (action === 'permissions') {
           await interaction.reply({ embeds: [permissionsReport(interaction.guild)], ephemeral: true, allowedMentions: { parse: [] } });
+          return;
+        }
+        if (action === 'analytics') {
+          await interaction.reply({ embeds: [analyticsEmbed(interaction.guild, data, 7)], ephemeral: true });
+          return;
+        }
+        if (action === 'modules') {
+          await interaction.reply({ embeds: [modulesEmbed(data)], ephemeral: true });
+          return;
+        }
+        if (action === 'botstatus') {
+          await interaction.reply({ embeds: [botStatusEmbed(client, interaction.guild, data)], ephemeral: true });
           return;
         }
         if (action === 'backup') {
@@ -4627,7 +5094,7 @@ client.on(Events.InteractionCreate, async interaction => {
           )],
         });
         const record = Object.values(data.tickets?.records || {}).find(t => t.channelId === interaction.channelId && t.status === 'open');
-        if (record) { record.claimedBy = interaction.user.id; saveData(data); }
+        if (record) { record.claimedBy = interaction.user.id; record.claimedAt = Date.now(); saveData(data); }
         await interaction.followUp({ content: `✅ <@${interaction.user.id}> hat das Ticket übernommen.` });
         return;
       }
@@ -5382,7 +5849,8 @@ client.on(Events.InteractionCreate, async interaction => {
           { name: '🎮 Gemeinsam', value: '`/clip` `/mitspieler` `/challenge` `/game` `/badges`' },
           { name: '👤 Profile & Willkommen', value: '`/profil` `/profilset` `/interessen` `/anonymouspanel` `/anonymousinfo`' },
           { name: '🧩 Eigene Commands', value: '`/customcommand` oder gespeicherte Befehle mit `!name`' },
-          { name: '⚙️ Einrichtung', value: '`/dashboard` `/setupserver` `/backupserver` `/restoreserver` `/setup channel` `/setup role` `/setup tickets` `/setup show`' },
+          { name: '⚙️ Einrichtung', value: '`/dashboard` `/setupserver` `/backupserver` `/restoreserver` `/setup channel` `/setup role` `/setup tickets` `/setup show` `/command user` `/command team`' },
+          { name: '🧰 Management Pro', value: '`/analytics` `/weeklyreport` `/staffstats` `/modules` `/ticketsla` `/botstatus` `/autobackup`' },
         );
       await interaction.reply({ embeds: [embed], ephemeral: true });
       return;
@@ -5760,6 +6228,126 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
+    if (command === 'command') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Du brauchst **Server verwalten** oder Administrator, um permanente Commandlisten zu posten.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      const channel = interaction.options.getChannel('channel') || interaction.channel;
+      const message = await publishCommandPanel(interaction.guild, data, sub, channel).catch(() => null);
+      await interaction.reply({ content: message ? `✅ **${sub === 'team' ? 'Team' : 'User'}-Commandliste** wurde permanent in <#${channel.id}> erstellt/aktualisiert.` : '❌ Commandliste konnte nicht erstellt werden.', ephemeral: true });
+      return;
+    }
+
+    if (command === 'analytics') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Du brauchst **Server verwalten** oder Administrator.', ephemeral: true });
+        return;
+      }
+      const days = Number(interaction.options.getString('zeitraum') || '7');
+      await interaction.reply({ embeds: [analyticsEmbed(interaction.guild, data, days)], ephemeral: true });
+      return;
+    }
+
+    if (command === 'weeklyreport') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'setup') {
+        const channel = interaction.options.getChannel('channel');
+        data.management.modules.weeklyReport = true;
+        data.management.analytics.weeklyReportChannelId = channel.id;
+        data.config.analyticsChannelId ||= channel.id;
+        saveData(data);
+        await interaction.reply({ content: `✅ Weekly Report aktiviert. Jeden **Sonntag ab 19:00 Uhr (${COMMUNITY_TIMEZONE})** wird in <#${channel.id}> gepostet.`, ephemeral: true });
+        return;
+      }
+      if (sub === 'disable') {
+        data.management.modules.weeklyReport = false; saveData(data);
+        await interaction.reply({ content: '✅ Weekly Report deaktiviert.', ephemeral: true }); return;
+      }
+      if (sub === 'post') {
+        const msg = await postWeeklyReport(interaction.guild, data, true).catch(() => null);
+        await interaction.reply({ content: msg ? `✅ Wochenbericht gepostet: ${msg.url}` : '❌ Kein gültiger Report-Channel eingerichtet.', ephemeral: true }); return;
+      }
+      await interaction.reply({ content: `📈 Weekly Report: **${data.management.modules.weeklyReport ? 'aktiv' : 'inaktiv'}**\nChannel: ${data.management.analytics.weeklyReportChannelId ? `<#${data.management.analytics.weeklyReportChannelId}>` : 'nicht gesetzt'}`, ephemeral: true });
+      return;
+    }
+
+    if (command === 'staffstats') {
+      if (!canUseTeamTools(interaction.member, data)) {
+        await interaction.reply({ content: '❌ Nur das Team kann Staff-Statistiken sehen.', ephemeral: true });
+        return;
+      }
+      await interaction.reply({ embeds: [staffPerformanceEmbed(interaction.guild, data)], ephemeral: true, allowedMentions: { parse: [] } });
+      return;
+    }
+
+    if (command === 'modules') {
+      if (!isGuildOwner(interaction)) {
+        await interaction.reply({ content: '❌ Nur der Server-Inhaber kann Module verwalten.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub !== 'status') {
+        const key = interaction.options.getString('modul');
+        const enabled = sub === 'enable';
+        if (key === 'ticketSla') data.management.ticketSla.enabled = enabled;
+        else if (key === 'autoBackup') data.management.autoBackup.enabled = enabled;
+        else if (key === 'engagement') data.engagement.enabled = enabled;
+        else if (key === 'antiNuke') data.security.antiNuke.enabled = enabled;
+        else if (key === 'selfHealing') data.security.selfHealing.enabled = enabled;
+        else if (key === 'automod') data.automod.enabled = enabled;
+        else data.management.modules[key] = enabled;
+        saveData(data);
+      }
+      await interaction.reply({ embeds: [modulesEmbed(data)], ephemeral: true });
+      return;
+    }
+
+    if (command === 'ticketsla') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'enable') data.management.ticketSla.enabled = true;
+      if (sub === 'disable') data.management.ticketSla.enabled = false;
+      if (sub === 'set') data.management.ticketSla.minutes = interaction.options.getInteger('minuten');
+      saveData(data);
+      await interaction.reply({ content: `⏱️ Ticket SLA: **${data.management.ticketSla.enabled ? 'aktiv' : 'inaktiv'}**\nErinnerung nach **${data.management.ticketSla.minutes} Minuten** ohne erste Team-Antwort.`, ephemeral: true });
+      return;
+    }
+
+    if (command === 'botstatus') {
+      if (!canSetup(interaction.member)) {
+        await interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+        return;
+      }
+      await interaction.reply({ embeds: [botStatusEmbed(client, interaction.guild, data)], ephemeral: true });
+      return;
+    }
+
+    if (command === 'autobackup') {
+      if (!isGuildOwner(interaction)) {
+        await interaction.reply({ content: '❌ Nur der Server-Inhaber kann Auto-Backups verwalten.', ephemeral: true });
+        return;
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'enable') {
+        data.management.autoBackup.enabled = true;
+        const hour = interaction.options.getInteger('stunde');
+        if (hour !== null) data.management.autoBackup.hour = hour;
+      }
+      if (sub === 'disable') data.management.autoBackup.enabled = false;
+      saveData(data);
+      await interaction.reply({ content: `💾 Auto Backup: **${data.management.autoBackup.enabled ? 'aktiv' : 'inaktiv'}**\nZeit: **${String(data.management.autoBackup.hour).padStart(2, '0')}:00 Uhr** (${COMMUNITY_TIMEZONE})\nGespeichert werden weiterhin maximal die letzten **5 Backups**.`, ephemeral: true });
+      return;
+    }
+
     if (command === 'servercheck') {
       if (!canSetup(interaction.member)) {
         await interaction.reply({ content: '❌ Du brauchst **Server verwalten** oder Administrator.', ephemeral: true });
@@ -5879,6 +6467,7 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       const templateId = interaction.options.getString('design');
+      const mode = interaction.options.getString('modus') || 'neu';
       const confirmed = interaction.options.getBoolean('bestaetigen');
       const template = SERVER_SETUP_TEMPLATES[templateId];
 
@@ -5908,6 +6497,23 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       await interaction.deferReply({ ephemeral: true });
+
+      if (mode === 'update') {
+        await interaction.editReply({ content: `🔄 **Setup Update** für Design ${templateId} – ${template.name} läuft. Bestehende Channels/Rollen werden nicht absichtlich gelöscht.` });
+        serverMaintenanceGuilds.add(interaction.guild.id);
+        const created = await ensureTemplateStructure(interaction.guild, template);
+        serverMaintenanceGuilds.delete(interaction.guild.id);
+        applySetupUpdateConfig(data, created, templateId);
+        data.setupHistory[interaction.guild.id] = { ...(data.setupHistory[interaction.guild.id] || {}), templateId, templateName: template.name, ownerId: interaction.user.id, updatedAt: Date.now() };
+        saveData(data);
+        if (created.channelMap.commands?.isTextBased()) await publishCommandPanel(interaction.guild, data, 'user', created.channelMap.commands).catch(() => {});
+        if (created.channelMap.teamcommands?.isTextBased()) await publishCommandPanel(interaction.guild, data, 'team', created.channelMap.teamcommands).catch(() => {});
+        if (created.channelMap.activity?.isTextBased() && data.engagement.enabled) await updateActivityPanel(interaction.guild, data).catch(() => {});
+        saveData(data);
+        await interaction.editReply({ content: `✅ **Setup Update fertig.**
+Design **${templateId} – ${template.name}** wurde auf den aktuellen Stand gebracht. Fehlende Rollen, Kategorien, Channels sowie User-/Team-Commandlisten wurden ergänzt. Bestehende Struktur wurde nicht absichtlich gelöscht.` });
+        return;
+      }
 
       const backup = await captureServerBackup(interaction.guild, data, `before-setup-${templateId}`);
       pushServerBackup(data, interaction.guild.id, backup);
