@@ -4420,6 +4420,14 @@ async function postGithubChangelog(payload) {
 
 function startGithubWebhookServer() {
   const server = http.createServer((req, res) => {
+    if ((req.url || '').startsWith('/stream/')) {
+      streamIntegration.http(req, res).catch(error => {
+        console.error('[UNFUG Stream HTTP]', error.message);
+        if (!res.headersSent) { res.writeHead(500); res.end('Internal error'); }
+        else res.destroy();
+      });
+      return;
+    }
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
@@ -4524,6 +4532,9 @@ function startGithubWebhookServer() {
 // CLIENT / READY
 // ============================================================
 
+// UNFUG_STREAM_INTEGRATION_V1
+const {StreamIntegration, commands: streamIntegrationCommands} = require('./stream-integration');
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -4537,10 +4548,13 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel, Partials.GuildMember],
 });
 
+const streamIntegration = new StreamIntegration({client});
+client.once(Events.ClientReady, () => streamIntegration.start().catch(error => console.error('[UNFUG Stream]', error.message)));
+
 client.once(Events.ClientReady, async readyClient => {
   console.log(`✅ Eingeloggt als ${readyClient.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(config.token);
-  const commands = buildCommands();
+  const commands = [...buildCommands(), ...streamIntegrationCommands];
 
   for (const guild of readyClient.guilds.cache.values()) {
     try {
@@ -4944,6 +4958,7 @@ client.on(Events.WebhooksUpdate, async channel => {
 
 client.on(Events.InteractionCreate, async interaction => {
   try {
+    if (await streamIntegration.handle(interaction)) return;
     const data = interaction.guildId ? loadData(interaction.guildId) : loadData();
 
     // ---------- BUTTONS ----------
