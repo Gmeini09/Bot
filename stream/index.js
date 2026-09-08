@@ -52,9 +52,25 @@ function initializeIntegration({ client, storageDir, canManage, env = process.en
   async function send(g, stream, test = false) {
     const channel = await client.channels.fetch(g.announcementChannel);
     if (!channel || channel.guildId !== g.guildId || !channel.isTextBased()) throw new Error('DISCORD_CHANNEL_INVALID');
+    const channelName = stream.user_name || stream.user_login || g.channel;
+    const streamUrl = 'https://www.twitch.tv/' + stream.user_login;
+    const embed = {
+      title: test ? 'Toomturboo ist live • TEST' : 'Toomturboo ist live',
+      color: 0x9147ff,
+      description: `${test ? 'Testmeldung – keine echte Live-Ankündigung.\n\n' : ''}Schaut vorbei und seid dabei!\n\n**${stream.title || 'Live auf Twitch'}**`,
+      url: streamUrl,
+      fields: [
+        { name: 'Spiel', value: stream.game_name || '—', inline: true },
+        { name: 'Zuschauer', value: Number.isFinite(stream.viewer_count) ? String(stream.viewer_count) : '—', inline: true },
+      ],
+      thumbnail: { url: `https://static-cdn.jtvnw.net/ttv-boxart/${encodeURIComponent(stream.game_name || 'Just Chatting')}-285x380.jpg` },
+      image: stream.thumbnail_url ? { url: stream.thumbnail_url.replace('{width}', '960').replace('{height}', '540') } : undefined,
+      footer: { text: `${channelName} • twitch.tv/${stream.user_login}` },
+      timestamp: new Date().toISOString(),
+    };
     return channel.send({
       content: !test && g.role ? `<@&${g.role}>` : undefined,
-      embeds: [{ title: test ? 'UNFUG • TEST – keine Live-Meldung' : 'UNFUG • LIVE', color: 0x171717, description: format(g.template, stream), url: 'https://www.twitch.tv/' + stream.user_login, footer: { text: 'PRUDA CREATOR CLUB' } }],
+      embeds: [embed],
       allowedMentions: { parse: [], roles: !test && g.role ? [g.role] : [] },
     });
   }
