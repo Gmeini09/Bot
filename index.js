@@ -4542,7 +4542,15 @@ client.once(Events.ClientReady, async readyClient => {
   streamIntegration.start();
   console.log(`✅ Eingeloggt als ${readyClient.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(config.token);
-  const commands = [...buildCommands(), ...streamIntegration.commands()];
+    const commands = [...buildCommands(), ...streamIntegration.commands()];
+    // Discord requires required options to precede optional options. Some
+    // legacy community commands were authored in the opposite order; reorder
+    // only the outgoing JSON so their behavior and handlers remain unchanged.
+    const normalizeOptions = options => (options || []).map(option => ({
+      ...option,
+      options: option.options ? normalizeOptions(option.options) : option.options,
+    })).sort((a, b) => Number(Boolean(b.required)) - Number(Boolean(a.required)));
+    for (const command of commands) command.options = normalizeOptions(command.options);
 
   for (const guild of readyClient.guilds.cache.values()) {
     try {
