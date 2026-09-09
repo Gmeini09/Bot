@@ -81,7 +81,7 @@ function initializeIntegration({ client, storageDir, canManage, env = process.en
       store.expire();
       for (const [id, g] of Object.entries(store.state.guilds)) {
         if (!client.guilds.cache.has(id) || !g.channel) continue;
-        if (g.auth) try { await twitch.ensure(id); } catch { twitch.failures?.add(id); twitch.close(id); }
+        if (g.auth) {   try {     await twitch.ensure(id);   } catch (error) {     console.error('Twitch IRC Verbindung fehlgeschlagen:', error?.message || error);     twitch.failures?.add(id);     twitch.close(id);   } }
         if (!g.enabled || !twitch.configured) continue;
         try {
           const channelName = g.channel;
