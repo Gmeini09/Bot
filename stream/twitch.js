@@ -107,7 +107,7 @@ class Twitch {
         }
       }
     });
-    socket.on('error', () => { this.failures.add(id); });
+    socket.on('error', error => {   console.error('Twitch IRC Socket-Fehler:', error?.code || error?.message || error);   this.failures.add(id); });
     socket.on('close', () => { if (this.sockets.get(id) === entry) this.sockets.delete(id); });
   }
   stop() { this.stopped = true; for (const id of this.sockets.keys()) this.close(id); }
