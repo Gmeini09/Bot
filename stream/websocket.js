@@ -23,8 +23,12 @@ function connectWebSocket(options, ready) {
     destroyed = true; clearTimeout(timer); ws.terminate();
   };
   socket.write = text => {
-    if (destroyed || ws.readyState !== WebSocket.OPEN) return false;
-    ws.send(text, error => { if (error) { socket.emit('error', error); socket.destroy(); } });
+    if (destroyed || ws.readyState !== WebSocket.OPEN) return false;    // Twitch expects one IRC command per WebSocket message.
+    for (const line of text.split('\r\n').filter(Boolean)) {
+      ws.send(line + '\r\n', error => {
+        if (error) { socket.emit('error', error); socket.destroy(); }
+      });
+    }
     return true;
   };
   ws.on('open', () => { if (!destroyed) { touch(); ready(); } });
