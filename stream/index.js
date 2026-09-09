@@ -140,7 +140,7 @@ function initializeIntegration({ client, storageDir, canManage, env = process.en
         const key = crypto.randomBytes(32).toString('hex');
         pending.set(key, { id, channel: g.channel, expires: Date.now() + 10 * 60000 });
         const auth = new URL('https://id.twitch.tv/oauth2/authorize');
-        auth.search = new URLSearchParams({ client_id: env.TWITCH_CLIENT_ID, redirect_uri: redirect, response_type: 'code', scope: 'chat:read', state: key, force_verify: 'true' }).toString();
+        auth.search = new URLSearchParams({ client_id: env.TWITCH_CLIENT_ID, redirect_uri: redirect, response_type: 'code', scope: 'chat:read chat:edit', state: key, force_verify: 'true' }).toString();
         reply = `Innerhalb von 10 Minuten als **${g.channel}** bei Twitch bestätigen:\n${auth}\nDiesen Link privat halten.`;
       } else if (action === 'overlay' || action === 'overlayneu') {
         if (action === 'overlayneu') { g.overlayKey = crypto.randomBytes(32).toString('hex'); store.save(); }
