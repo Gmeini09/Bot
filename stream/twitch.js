@@ -1,5 +1,5 @@
 'use strict';
-const tls = require('node:tls');
+const { connectWebSocket } = require('./websocket');
 
 function parseLine(line) {
   const match = line.match(/^(?:@([^ ]+) )?:([^ ]+) PRIVMSG #([a-z0-9_]+) :([\s\S]*)$/i);
@@ -9,7 +9,7 @@ function parseLine(line) {
 }
 
 class Twitch {
-  constructor(store, env, request = fetch, connect = tls.connect) {
+  constructor(store, env, request = fetch, connect = connectWebSocket) {
     this.store = store; this.env = env; this.request = request; this.connect = connect;
     this.sockets = new Map(); this.stopped = false; this.app = null; this.failures = new Set(); this.refreshes = new Map();
     for (const g of Object.values(store.state.guilds)) if (g.auth) g.auth.validatedAt = 0;
@@ -83,7 +83,7 @@ class Twitch {
     const auth = await this.access(id);
     if (this.sockets.has(id) || this.stopped || g.auth !== auth || g.channel !== auth.login) return;
     const entry = { joined: false, socket: null };
-    const socket = this.connect({ host: 'irc.chat.twitch.tv', port: 6697, servername: 'irc.chat.twitch.tv', rejectUnauthorized: true }, () => {
+    const socket = this.connect({}, () => {
       socket.write('PASS oauth:' + auth.access + '\r\nNICK ' + auth.login + '\r\nCAP REQ :twitch.tv/tags twitch.tv/commands\r\nJOIN #' + g.channel + '\r\n');
     });
     entry.socket = socket; this.sockets.set(id, entry);
@@ -107,7 +107,12 @@ class Twitch {
         }
       }
     });
-    socket.on('error', error => {   console.error('Twitch IRC Socket-Fehler:', error?.code || error?.message || error);   this.failures.add(id); });
+    socket.on('error', error => {
+      const code = /^[A-Z0-9_]+$/.test(error?.code || '') ? error.code : 'CONNECTION_ERROR';
+      console.error('Twitch WebSocket:', code);
+      this.failures.add(id);
+      socket.destroy();
+    });
     socket.on('close', () => { if (this.sockets.get(id) === entry) this.sockets.delete(id); });
   }
   stop() { this.stopped = true; for (const id of this.sockets.keys()) this.close(id); }
