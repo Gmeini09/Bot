@@ -1,7 +1,7 @@
 {
   "name": "community-allround-bot",
-  "version": "5.1.0",
-  "description": "Discord community allround bot with Unfugstifter selling server setup",
+  "version": "5.2.0",
+  "description": "Discord community allround bot with Unfugstifter selling server setup, PayPal and support tickets",
   "main": "index.js",
   "scripts": {
     "start": "node selling-entry.js",

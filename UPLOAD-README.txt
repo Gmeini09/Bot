@@ -1,4 +1,4 @@
-UNFUGSTIFTER SELLING SETUP
+UNFUGSTIFTER SELLING SETUP v5.2
 
 1. Lade selling-entry.js in den Hauptordner deines GitHub-Repos Gmeini09/Bot.
 2. Ersetze die bestehende package.json durch die package.json aus diesem Paket.
@@ -8,6 +8,18 @@ UNFUGSTIFTER SELLING SETUP
 5. Nach dem Bot-Neustart erscheint:
    /setup server selling
 6. Der Command kann nur vom Server-Inhaber ausgeführt werden und der Bot braucht Administrator.
+
+NEU IN v5.2:
+- Zahlung fest auf PayPal ausgelegt
+- eigener privater Support-Ticket-Button
+- Kauf-Tickets und Support-Tickets können parallel offen sein
+- deutlich erweitertes Shop-Regelwerk
+- Weiterverkauf verboten
+- Leaken / Teilen / Reupload verboten
+- Ticket-/Bestellaktionen werden nachvollziehbar protokolliert
+- Warnung vor gefälschten Zahlungsnachweisen
+- PayPal-Login-Daten werden niemals verlangt
+- neue Discord-Server bekommen die Slash-Commands automatisch registriert
 
 Der Setup-Command löscht absichtlich keine fremden bestehenden Channels/Rollen.
 Er kann mehrfach ausgeführt werden und ergänzt fehlende Shop-Bereiche.
@@ -20,8 +32,10 @@ Erstellt werden u.a.:
 - FiveM-Assets
 - Bundles
 - Bestellbereich
+- PayPal-Zahlungsinfo
 - Bewertungen / Kunden-Ergebnisse
-- Support
+- Support-Chat
+- privates Support-Ticket-System
 - Team-Bereich
 - privates Kauf-Ticket-System mit Produkt-Buttons
 

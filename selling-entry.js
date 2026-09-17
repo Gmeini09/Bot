@@ -10,6 +10,7 @@ const {
   Events,
   PermissionFlagsBits,
   REST,
+  Routes,
 } = require('discord.js');
 
 const SELLING = {
@@ -20,7 +21,7 @@ const SELLING = {
     buy: '┣━━〔 BESTELLEN 〕━━┫',
     community: '┣━━〔 COMMUNITY 〕━━┫',
     support: '┣━━〔 SUPPORT 〕━━┫',
-    orders: '┣━━〔 KAUF-TICKETS 〕━━┫',
+    orders: '┣━━〔 TICKETS 〕━━┫',
     team: '╰━━〔 TEAM INTERN 〕━━╯',
   },
   roles: [
@@ -58,6 +59,9 @@ function isSellingInteraction(interaction) {
   return false;
 }
 
+let cachedSellingCommandBody = null;
+let sellingLoginToken = null;
+
 function addSellingSetupCommand(body) {
   if (!Array.isArray(body)) return body;
   return body.map(command => {
@@ -93,6 +97,9 @@ REST.prototype.put = function patchedPut(route, options = {}) {
   const nextOptions = Array.isArray(options?.body)
     ? { ...options, body: addSellingSetupCommand(options.body) }
     : options;
+  if (Array.isArray(nextOptions?.body) && nextOptions.body.some(command => command?.name === 'setup')) {
+    cachedSellingCommandBody = JSON.parse(JSON.stringify(nextOptions.body));
+  }
   return originalRestPut.call(this, route, nextOptions);
 };
 
@@ -243,8 +250,9 @@ async function createSellingStructure(guild) {
   channels.giveaways = await ensureChannel(guild, categories.community, '🎁・giveaways', { roleMap, topic: 'Giveaways und Aktionen.' });
   channels.partners = await ensureChannel(guild, categories.community, '🤝・partner', { readOnly: true, roleMap, topic: 'Partner und Empfehlungen.' });
 
-  channels.support = await ensureChannel(guild, categories.support, '❓・support-chat', { roleMap, topic: 'Fragen vor oder nach dem Kauf.' });
-  channels.ticketInfo = await ensureChannel(guild, categories.support, '🎫・ticket-info', { readOnly: true, roleMap, topic: 'Informationen zu Kauf- und Support-Tickets.' });
+  channels.support = await ensureChannel(guild, categories.support, '❓・support-chat', { roleMap, topic: 'Kurze Fragen vor oder nach dem Kauf.' });
+  channels.supportTicket = await ensureChannel(guild, categories.support, '🎫・support-ticket', { readOnly: true, roleMap, topic: 'Öffne hier ein privates Support-Ticket.' });
+  channels.ticketInfo = await ensureChannel(guild, categories.support, '📋・ticket-info', { readOnly: true, roleMap, topic: 'Informationen zu Kauf- und Support-Tickets.' });
   channels.supportVoice = await ensureChannel(guild, categories.support, '📞・Support Warteraum', { type: ChannelType.GuildVoice, roleMap });
 
   channels.teamChat = await ensureChannel(guild, categories.team, '🛠️・team-chat', { privateForStaff: true, roleMap, topic: 'Interner Team-Chat.' });
@@ -265,17 +273,26 @@ async function seedSellingServer(structure) {
   });
 
   await seedIfEmpty(channels.rules, {
-    embeds: [shopEmbed('📜 Shop-Regelwerk', [
-      '1. Respektvoller Umgang mit Kunden und Team.',
-      '2. Bestellungen und Zahlungen nur über die vorgesehenen Kauf-Tickets.',
-      '3. Produkte dürfen nur im Rahmen der jeweils genannten Lizenz genutzt werden.',
-      '4. Es werden nur **eigene oder ausdrücklich lizenzierte Dateien/Assets** angeboten – keine unerlaubten Reuploads oder gecrackten Inhalte.',
-      '5. Bei Problemen bitte ein Support- oder Kauf-Ticket verwenden.',
+    embeds: [shopEmbed('📜 Shop-Regelwerk & Nutzungsbedingungen', [
+      '**1. Respekt & Verhalten**\nBehandle Kunden, Teammitglieder und andere Nutzer respektvoll. Beleidigungen, Spam, Provokationen oder absichtliche Störungen können zum Ausschluss führen.',
+      '**2. Bestellungen nur über offizielle Tickets**\nBestellungen, Preisabsprachen und Zahlungsbestätigungen werden ausschließlich über die vorgesehenen Kauf-Tickets abgewickelt.',
+      '**3. Zahlung ausschließlich per PayPal**\nDie aktuell gültige PayPal-Adresse und der endgültige Preis werden dir vom Team im privaten Ticket bestätigt. Sende kein Geld an Adressen aus fremden Nachrichten oder Screenshots.',
+      '**4. Weiterverkauf verboten**\nGekaufte Produkte dürfen ohne ausdrückliche schriftliche Erlaubnis nicht weiterverkauft, vermietet, getauscht oder gegen andere Leistungen weitergegeben werden.',
+      '**5. Leaken / Teilen verboten**\nDas Hochladen, Veröffentlichen, Leaken, Versenden oder Teilen der Dateien mit Freunden, anderen Communities, Servern oder Download-Seiten ist untersagt.',
+      '**6. Keine Reuploads oder Kopien**\nProdukte dürfen nicht unter anderem Namen erneut hochgeladen, gespiegelt, als eigenes Werk ausgegeben oder in öffentliche Packs eingebaut werden.',
+      '**7. Lizenz gilt nur für den Käufer**\nSofern beim Produkt nichts anderes angegeben ist, erhält nur der Käufer das vereinbarte Nutzungsrecht. Ein Kauf überträgt nicht automatisch Eigentums- oder Weitervertriebsrechte.',
+      '**8. Schutz der Shop-Dateien**\nDas Entfernen von Credits, Schutzmechanismen oder Lizenzhinweisen mit dem Ziel einer unerlaubten Weitergabe ist untersagt.',
+      '**9. Nachweise & Protokollierung**\nZur Abwicklung und zum Schutz vor Missbrauch können Bestellungen und Ticket-Aktionen protokolliert werden – z. B. Discord-ID, Produkt, Ticket, Zeitstempel, zuständiges Teammitglied und Bestellstatus. PayPal-Passwörter oder andere Zugangsdaten werden niemals verlangt.',
+      '**10. Falsche Zahlungsnachweise**\nGefälschte PayPal-Screenshots, manipulierte Belege oder falsche Angaben führen zur Ablehnung der Bestellung und können zum Ausschluss aus dem Shop führen.',
+      '**11. Support & Änderungen**\nSupport bezieht sich auf den vereinbarten Lieferumfang. Größere nachträgliche Änderungen oder neue Wünsche können als neuer Auftrag behandelt werden.',
+      '**12. Verstöße gegen die Lizenz**\nBei nachgewiesenem Weiterverkauf, Leak oder unerlaubter Weitergabe kann die Nutzungslizenz entzogen und weiterer Support verweigert werden. Weitere Schritte richten sich nach dem anwendbaren Recht.',
+      '**13. Rückerstattung / Widerruf**\nRückerstattungen und gesetzliche Widerrufsrechte richten sich nach dem jeweiligen Auftrag und dem anwendbaren Recht. Individuelle Vereinbarungen werden im Ticket festgehalten.',
+      '**14. Mit dem Kauf akzeptiert**\nMit Abschluss einer Bestellung bestätigst du, dass du diese Regeln und die im Ticket genannten Produktbedingungen zur Kenntnis genommen hast.',
     ].join('\n\n'))],
   });
 
   await seedIfEmpty(channels.faq, {
-    embeds: [shopEmbed('❓ FAQ', '**Wie bestelle ich?**\nÖffne in **🛒・bestellen** ein Ticket für dein gewünschtes Produkt.\n\n**Wo stehen Preise?**\nPreise können direkt in den Produkt-Channels oder im Ticket genannt werden.\n\n**Wo bekomme ich Support?**\nIm Kauf-Ticket oder in **❓・support-chat**.')],
+    embeds: [shopEmbed('❓ FAQ', '**Wie bestelle ich?**\nÖffne in **🛒・bestellen** ein Ticket für dein gewünschtes Produkt.\n\n**Wo stehen Preise?**\nPreise können direkt in den Produkt-Channels oder im Ticket genannt werden.\n\n**Wo bekomme ich Support?**\nFür kurze Fragen in **❓・support-chat** oder über **🎫・support-ticket** als privates Support-Ticket.')],
   });
 
   const productSeeds = [
@@ -298,6 +315,7 @@ async function seedSellingServer(structure) {
   const orderRow2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('selling_order:grafik').setLabel('Design').setEmoji('🎨').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('selling_order:fivem').setLabel('FiveM Asset').setEmoji('🚗').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('selling_support_open').setLabel('Support').setEmoji('🎫').setStyle(ButtonStyle.Success),
   );
   await seedIfEmpty(channels.order, {
     embeds: [shopEmbed('🛒 Bestellung starten', 'Wähle unten aus was du kaufen möchtest. Der Bot erstellt automatisch ein **privates Kauf-Ticket** für dich und das Shop-Team.')],
@@ -305,11 +323,19 @@ async function seedSellingServer(structure) {
   });
 
   await seedIfEmpty(channels.payment, {
-    embeds: [shopEmbed('💳 Zahlung', 'Die gültigen Zahlungsarten und Preise trägt der Server-Inhaber hier ein.\n\n**Wichtig:** Zahle nur über Informationen, die dir im offiziellen Kauf-Ticket bestätigt wurden.')],
+    embeds: [shopEmbed('💳 Zahlung • PayPal', '**Zahlungsart: PayPal**\n\nDie korrekte **PayPal-Adresse und der endgültige Betrag** werden dir ausschließlich im privaten Kauf-Ticket vom Shop-Team bestätigt.\n\n**Bitte nicht vorher bezahlen.** Nach der Zahlung sendest du die Bestätigung im Ticket. Teile niemals PayPal-Passwörter, Login-Codes oder andere Zugangsdaten.')],
+  });
+
+  const supportRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('selling_support_open').setLabel('Support-Ticket öffnen').setEmoji('🎫').setStyle(ButtonStyle.Primary),
+  );
+  await seedIfEmpty(channels.supportTicket, {
+    embeds: [shopEmbed('🎫 Privater Support', 'Du hast ein Problem mit einem Produkt, einer Bestellung, Installation oder Lieferung?\n\nDrücke unten auf **Support-Ticket öffnen**. Nur du und das Shop-Team können das Ticket sehen.')],
+    components: [supportRow],
   });
 
   await seedIfEmpty(channels.ticketInfo, {
-    embeds: [shopEmbed('🎫 Tickets', 'Kauf-Tickets werden über **🛒・bestellen** erstellt.\n\nIm Ticket kannst du dein gewünschtes Produkt, Varianten, Anpassungen und offene Fragen direkt mit dem Team klären.')],
+    embeds: [shopEmbed('📋 Ticket-System', '**Kauf-Ticket:** über **🛒・bestellen** für neue Bestellungen.\n\n**Support-Ticket:** über **🎫・support-ticket** für Probleme, Installation, Lieferung oder Fragen nach dem Kauf.\n\nTicket-Aktionen werden für die Bearbeitung und Nachvollziehbarkeit protokolliert.')],
   });
 }
 
@@ -344,6 +370,7 @@ async function openSellingTicket(interaction, productKey) {
   const duplicate = interaction.guild.channels.cache.find(channel =>
     channel.type === ChannelType.GuildText
       && String(channel.topic || '').includes(`selling-owner:${interaction.user.id}`)
+      && String(channel.topic || '').includes('selling-kind:order')
       && String(channel.topic || '').includes('selling-status:open'));
   if (duplicate) {
     await interaction.reply({ content: `❌ Du hast bereits ein offenes Kauf-Ticket: <#${duplicate.id}>`, ephemeral: true });
@@ -368,7 +395,7 @@ async function openSellingTicket(interaction, productKey) {
     name: `order-${productKey}-${sanitizeName(interaction.user.username)}`.slice(0, 95),
     type: ChannelType.GuildText,
     parent: category.id,
-    topic: `selling-owner:${interaction.user.id}|selling-product:${productKey}|selling-status:open`,
+    topic: `selling-owner:${interaction.user.id}|selling-kind:order|selling-product:${productKey}|selling-status:open`,
     permissionOverwrites: overwrites,
     reason: `Selling Bestellung von ${interaction.user.tag}`,
   });
@@ -379,9 +406,10 @@ async function openSellingTicket(interaction, productKey) {
   );
   await channel.send({
     content: `<@${interaction.user.id}>`,
-    embeds: [shopEmbed(`${product.emoji} Kauf-Ticket • ${product.label}`, `Hallo <@${interaction.user.id}>!\n\nBeschreibe bitte genau was du möchtest. Das Shop-Team klärt anschließend **Preis, Umfang, Lieferzeit und Anpassungen** mit dir.`, [
+    embeds: [shopEmbed(`${product.emoji} Kauf-Ticket • ${product.label}`, `Hallo <@${interaction.user.id}>!\n\nBeschreibe bitte genau was du möchtest. Das Shop-Team klärt anschließend **Preis, Umfang, Lieferzeit und Anpassungen** mit dir.\n\n💳 **Zahlung: PayPal** – bitte erst bezahlen, nachdem dir Preis und PayPal-Adresse hier im Ticket bestätigt wurden.`, [
       { name: 'Produkt', value: product.label, inline: true },
       { name: 'Kunde', value: `<@${interaction.user.id}>`, inline: true },
+      { name: 'Zahlung', value: 'PayPal', inline: true },
     ])],
     components: [actions],
     allowedMentions: { users: [interaction.user.id] },
@@ -389,6 +417,60 @@ async function openSellingTicket(interaction, productKey) {
 
   await interaction.reply({ content: `✅ Dein **${product.label}**-Ticket wurde erstellt: <#${channel.id}>`, ephemeral: true });
   await logSelling(interaction.guild, '🛒 Neue Bestellung', `<@${interaction.user.id}> hat ein **${product.label}**-Ticket erstellt: <#${channel.id}>`);
+}
+
+async function openSupportTicket(interaction) {
+  if (!interaction.inGuild()) return;
+
+  const duplicate = interaction.guild.channels.cache.find(channel =>
+    channel.type === ChannelType.GuildText
+      && String(channel.topic || '').includes(`selling-owner:${interaction.user.id}`)
+      && String(channel.topic || '').includes('selling-kind:support')
+      && String(channel.topic || '').includes('selling-status:open'));
+  if (duplicate) {
+    await interaction.reply({ content: `❌ Du hast bereits ein offenes Support-Ticket: <#${duplicate.id}>`, ephemeral: true });
+    return;
+  }
+
+  const category = interaction.guild.channels.cache.find(channel => channel.type === ChannelType.GuildCategory && channel.name === SELLING.categories.orders);
+  if (!category) {
+    await interaction.reply({ content: '❌ Die Ticket-Kategorie fehlt. Der Server-Inhaber soll `/setup server selling` erneut ausführen.', ephemeral: true });
+    return;
+  }
+
+  const staffRoles = interaction.guild.roles.cache.filter(role =>
+    ['👑・INHABER', '⚜️・MANAGEMENT', '🎫・SUPPORT', '🎨・DESIGNER', '🎧・SOUND DESIGNER', '🛠️・DEVELOPER'].includes(role.name));
+  const overwrites = [
+    { id: interaction.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles, PermissionFlagsBits.EmbedLinks] },
+    ...staffRoles.map(role => ({ id: role.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageMessages] })),
+  ];
+
+  const channel = await interaction.guild.channels.create({
+    name: `support-${sanitizeName(interaction.user.username)}`.slice(0, 95),
+    type: ChannelType.GuildText,
+    parent: category.id,
+    topic: `selling-owner:${interaction.user.id}|selling-kind:support|selling-status:open`,
+    permissionOverwrites: overwrites,
+    reason: `Selling Support von ${interaction.user.tag}`,
+  });
+
+  const actions = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('selling_claim').setLabel('Übernehmen').setEmoji('🙋').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('selling_close').setLabel('Ticket schließen').setEmoji('🔒').setStyle(ButtonStyle.Danger),
+  );
+  await channel.send({
+    content: `<@${interaction.user.id}>`,
+    embeds: [shopEmbed('🎫 Support-Ticket', `Hallo <@${interaction.user.id}>!\n\nBeschreibe bitte dein Problem so genau wie möglich. Wenn es um einen Kauf geht, nenne **Produkt, ungefähres Kaufdatum und was genau nicht funktioniert**.\n\nBitte sende keine Passwörter, PayPal-Login-Codes oder andere Zugangsdaten.`, [
+      { name: 'Kunde', value: `<@${interaction.user.id}>`, inline: true },
+      { name: 'Typ', value: 'Support', inline: true },
+    ])],
+    components: [actions],
+    allowedMentions: { users: [interaction.user.id] },
+  });
+
+  await interaction.reply({ content: `✅ Dein Support-Ticket wurde erstellt: <#${channel.id}>`, ephemeral: true });
+  await logSelling(interaction.guild, '🎫 Neues Support-Ticket', `<@${interaction.user.id}> hat ein Support-Ticket erstellt: <#${channel.id}>`);
 }
 
 async function handleTicketButton(interaction) {
@@ -401,8 +483,9 @@ async function handleTicketButton(interaction) {
       await interaction.reply({ content: '❌ Nur das Shop-Team kann Bestellungen übernehmen.', ephemeral: true });
       return;
     }
-    await interaction.reply({ content: `🙋 <@${interaction.user.id}> hat diese Bestellung übernommen.` });
-    await logSelling(interaction.guild, '🙋 Bestellung übernommen', `<@${interaction.user.id}> hat <#${interaction.channel.id}> übernommen.`);
+    const isSupport = String(interaction.channel.topic || '').includes('selling-kind:support');
+    await interaction.reply({ content: `🙋 <@${interaction.user.id}> hat dieses ${isSupport ? 'Support-Ticket' : 'Kauf-Ticket'} übernommen.` });
+    await logSelling(interaction.guild, isSupport ? '🙋 Support übernommen' : '🙋 Bestellung übernommen', `<@${interaction.user.id}> hat <#${interaction.channel.id}> übernommen.`);
     return;
   }
 
@@ -412,7 +495,8 @@ async function handleTicketButton(interaction) {
       return;
     }
     await interaction.reply({ content: '🔒 Ticket wird geschlossen …' });
-    await logSelling(interaction.guild, '🔒 Bestellung geschlossen', `<@${interaction.user.id}> hat <#${interaction.channel.id}> geschlossen.`);
+    const isSupport = String(interaction.channel.topic || '').includes('selling-kind:support');
+    await logSelling(interaction.guild, isSupport ? '🔒 Support geschlossen' : '🔒 Bestellung geschlossen', `<@${interaction.user.id}> hat <#${interaction.channel.id}> geschlossen.`);
     setTimeout(() => interaction.channel.delete(`Selling Ticket geschlossen von ${interaction.user.tag}`).catch(() => {}), 2500);
   }
 }
@@ -439,8 +523,8 @@ async function runSellingSetup(interaction) {
   await interaction.editReply([
     '✅ **Selling Server ist eingerichtet.**',
     '',
-    'Erstellt wurden Bereiche für **Thumbnails, NVE-Presets/Grafik-Setups, Soundpacks, Designs, FiveM-Assets, Bundles, Bewertungen, Support und Team**.',
-    'In **🛒・bestellen** gibt es ein funktionierendes Button-System, das automatisch private Kauf-Tickets erstellt.',
+    'Erstellt wurden Bereiche für **Thumbnails, NVE-Presets/Grafik-Setups, Soundpacks, Designs, FiveM-Assets, Bundles, Bewertungen, PayPal-Zahlungen, Support und Team**.',
+    'In **🛒・bestellen** gibt es private Kauf-Tickets und in **🎫・support-ticket** ein eigenes Support-Ticket-System.',
     '',
     'ℹ️ Bereits vorhandene fremde Channels/Rollen werden absichtlich **nicht gelöscht**. Der Command kann dadurch gefahrlos erneut ausgeführt werden und ergänzt fehlende Teile.',
   ].join('\n'));
@@ -460,6 +544,11 @@ async function handleSellingInteraction(interaction) {
     return true;
   }
 
+  if (interaction.isButton?.() && interaction.customId === 'selling_support_open') {
+    await openSupportTicket(interaction);
+    return true;
+  }
+
   if (interaction.isButton?.() && (interaction.customId === 'selling_claim' || interaction.customId === 'selling_close')) {
     await handleTicketButton(interaction);
     return true;
@@ -469,6 +558,7 @@ async function handleSellingInteraction(interaction) {
 
 const originalLogin = Client.prototype.login;
 Client.prototype.login = function patchedLogin(...args) {
+  sellingLoginToken = args[0] || sellingLoginToken;
   if (!this.__sellingSetupInstalled) {
     this.__sellingSetupInstalled = true;
     this.prependListener(Events.InteractionCreate, async interaction => {
@@ -480,6 +570,20 @@ Client.prototype.login = function patchedLogin(...args) {
         const payload = { content: '❌ Beim Selling-System ist ein Fehler aufgetreten. Prüfe die Bot-Rechte und Railway-Logs.', ephemeral: true };
         if (interaction.deferred || interaction.replied) await interaction.followUp(payload).catch(() => {});
         else await interaction.reply(payload).catch(() => {});
+      }
+    });
+
+    // Wenn der Bot später auf einen neuen Discord eingeladen wird, werden die
+    // Slash-Commands dort automatisch registriert. Ein Railway-Neustart ist
+    // dafür nicht mehr nötig.
+    this.on(Events.GuildCreate, async guild => {
+      if (!cachedSellingCommandBody || !sellingLoginToken || !this.application?.id) return;
+      try {
+        const rest = new REST({ version: '10' }).setToken(sellingLoginToken);
+        await rest.put(Routes.applicationGuildCommands(this.application.id, guild.id), { body: cachedSellingCommandBody });
+        console.log(`✅ ${cachedSellingCommandBody.length} Commands automatisch auf neuem Server ${guild.name} (${guild.id}) registriert.`);
+      } catch (error) {
+        console.error(`❌ Commands konnten auf neuem Server ${guild.name} nicht registriert werden:`, error);
       }
     });
   }
