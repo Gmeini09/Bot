@@ -1,0 +1,21 @@
+UNFUGSTIFTER SELLING SETUP v5.6
+
++ Persistenter Multi-Produkt-Warenkorb
++ Gemeinsamer Checkout mit einer UF-Bestellnummer
++ Automatische Auftrags-Warteschlange
++ Queue-Position und ETA im Bestellsystem
++ Öffentliche Queue-/Auslastungsanzeige
++ Bronze/Silber/Gold/VIP Stammkundensystem
++ Automatische Stammkundenrollen und Rabatte
++ PDF-Bestell-/Zahlungsbeleg bei Lieferung
++ /sell receipt
++ Echtes sichtbares Käufer-/Lizenz-Watermarking für Bilder
++ /sell watermark
++ /sell queue
++ /sell loyalty
++ Neue Kundenstatus- und Queue-Channels
++ Kombibestellungen vergeben alle passenden Produkt-Käuferrollen
++ Regelwerk auf 41 präzise Punkte erweitert
++ Regelwerk auf mehrere Discord-Nachrichten verteilt, damit keine Embed-Limits Inhalte abschneiden
++ FAQ, Ticket-Info und Setup-Abschlussmeldung professionalisiert
++ Node Engine auf >=18.17.0 für sharp-Kompatibilität gesetzt

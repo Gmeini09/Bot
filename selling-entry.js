@@ -18,6 +18,8 @@ const {
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
+const PDFDocument = require('pdfkit');
+const sharp = require('sharp');
 
 const SELLING = {
   color: 0x8b5cf6,
@@ -46,6 +48,10 @@ const SELLING = {
     { name: '🎨・DESIGN KÄUFER', key: 'buyer_grafik', color: 0xeb459e, hoist: false, permissions: [] },
     { name: '🚗・FIVEM KÄUFER', key: 'buyer_fivem', color: 0xfee75c, hoist: false, permissions: [] },
     { name: '📦・BUNDLE KÄUFER', key: 'buyer_bundle', color: 0xe67e22, hoist: false, permissions: [] },
+    { name: '🥉・STAMMKUNDE BRONZE', key: 'loyalty_bronze', color: 0xcd7f32, hoist: false, permissions: [] },
+    { name: '🥈・STAMMKUNDE SILBER', key: 'loyalty_silver', color: 0xc0c0c0, hoist: false, permissions: [] },
+    { name: '🥇・STAMMKUNDE GOLD', key: 'loyalty_gold', color: 0xffd700, hoist: true, permissions: [] },
+    { name: '💠・VIP KUNDE', key: 'loyalty_vip', color: 0x00d9ff, hoist: true, permissions: [] },
     { name: '🔔・SHOP UPDATES', key: 'updates', color: 0x95a5a6, hoist: false, permissions: [] },
     { name: '🎁・GIVEAWAYS', key: 'giveaways', color: 0xe67e22, hoist: false, permissions: [] },
     { name: '✅・VERIFIZIERT', key: 'verified', color: 0x2ecc71, hoist: false, permissions: [] },
@@ -53,12 +59,12 @@ const SELLING = {
 };
 
 const PRODUCT_TYPES = {
-  thumbnail: { label: 'Thumbnail', emoji: '🖼️', roleKey: 'buyer_thumbnail', revisions: 2, delivery: '1–3 Tage' },
-  nve: { label: 'NVE Preset / Grafik-Setup', emoji: '🌆', roleKey: 'buyer_nve', revisions: 1, delivery: '1–3 Tage' },
-  soundpack: { label: 'Soundpack', emoji: '🔊', roleKey: 'buyer_soundpack', revisions: 1, delivery: '1–2 Tage' },
-  grafik: { label: 'Grafik / Design', emoji: '🎨', roleKey: 'buyer_grafik', revisions: 2, delivery: '1–4 Tage' },
-  fivem: { label: 'FiveM Asset', emoji: '🚗', roleKey: 'buyer_fivem', revisions: 1, delivery: 'nach Umfang' },
-  bundle: { label: 'Bundle / Komplettpaket', emoji: '📦', roleKey: 'buyer_bundle', revisions: 2, delivery: 'nach Umfang' },
+  thumbnail: { label: 'Thumbnail', emoji: '🖼️', roleKey: 'buyer_thumbnail', revisions: 2, delivery: '1–3 Tage', etaDays: 2 },
+  nve: { label: 'NVE Preset / Grafik-Setup', emoji: '🌆', roleKey: 'buyer_nve', revisions: 1, delivery: '1–3 Tage', etaDays: 2 },
+  soundpack: { label: 'Soundpack', emoji: '🔊', roleKey: 'buyer_soundpack', revisions: 1, delivery: '1–2 Tage', etaDays: 2 },
+  grafik: { label: 'Grafik / Design', emoji: '🎨', roleKey: 'buyer_grafik', revisions: 2, delivery: '1–4 Tage', etaDays: 3 },
+  fivem: { label: 'FiveM Asset', emoji: '🚗', roleKey: 'buyer_fivem', revisions: 1, delivery: 'nach Umfang', etaDays: 4 },
+  bundle: { label: 'Bundle / Komplettpaket', emoji: '📦', roleKey: 'buyer_bundle', revisions: 2, delivery: 'nach Umfang', etaDays: 4 },
 };
 
 const SUPPORT_TYPES = {
@@ -101,6 +107,7 @@ function blankGuildShopData() {
     coupons: {},
     portfolio: {},
     reviews: {},
+    carts: {},
     config: {
       paypalEmail: null,
       availability: 'open',
@@ -145,6 +152,7 @@ function ensureGuildShopData(store, guildId) {
   data.coupons = data.coupons && typeof data.coupons === 'object' ? data.coupons : {};
   data.portfolio = data.portfolio && typeof data.portfolio === 'object' ? data.portfolio : {};
   data.reviews = data.reviews && typeof data.reviews === 'object' ? data.reviews : {};
+  data.carts = data.carts && typeof data.carts === 'object' ? data.carts : {};
   data.config = { ...blankGuildShopData().config, ...(data.config || {}) };
   data.config.channelIds = data.config.channelIds && typeof data.config.channelIds === 'object' ? data.config.channelIds : {};
   data.config.roleIds = data.config.roleIds && typeof data.config.roleIds === 'object' ? data.config.roleIds : {};
@@ -202,6 +210,202 @@ function availabilityLabel(status) {
     busy: '🟠 Hohe Auslastung',
     closed: '🔴 Bestellungen geschlossen',
   }[status] || '🟢 Bestellungen offen';
+}
+
+
+const LOYALTY_LEVELS = [
+  { key: 'vip', label: 'VIP', roleKey: 'loyalty_vip', minOrders: 20, discount: 15 },
+  { key: 'gold', label: 'Gold', roleKey: 'loyalty_gold', minOrders: 10, discount: 12 },
+  { key: 'silver', label: 'Silber', roleKey: 'loyalty_silver', minOrders: 5, discount: 8 },
+  { key: 'bronze', label: 'Bronze', roleKey: 'loyalty_bronze', minOrders: 3, discount: 5 },
+];
+
+function completedOrdersForUser(data, userId) {
+  return Object.values(data.orders || {}).filter(order => order.userId === userId && Number(order.deliveredAt) > 0);
+}
+
+function loyaltyForUser(data, userId) {
+  const count = completedOrdersForUser(data, userId).length;
+  const level = LOYALTY_LEVELS.find(entry => count >= entry.minOrders) || null;
+  return { count, level, discount: level?.discount || 0 };
+}
+
+function orderProductKeys(order) {
+  if (Array.isArray(order.cartItems) && order.cartItems.length) return [...new Set(order.cartItems.filter(key => PRODUCT_TYPES[key]))];
+  return PRODUCT_TYPES[order.productKey] ? [order.productKey] : [];
+}
+
+function orderProductLabel(order) {
+  const keys = orderProductKeys(order);
+  if (!keys.length) return order.productKey || 'Unbekannt';
+  if (keys.length === 1) return PRODUCT_TYPES[keys[0]].label;
+  return keys.map(key => PRODUCT_TYPES[key].label).join(' + ');
+}
+
+function orderProductEmoji(order) {
+  const keys = orderProductKeys(order);
+  return keys.length === 1 ? PRODUCT_TYPES[keys[0]].emoji : '🛒';
+}
+
+function orderEtaDays(order) {
+  const keys = orderProductKeys(order);
+  if (!keys.length) return 3;
+  return Math.max(...keys.map(key => Number(PRODUCT_TYPES[key]?.etaDays || 3)));
+}
+
+function activeQueue(data) {
+  return Object.values(data.orders || {})
+    .filter(order => !order.closedAt && !order.deliveredAt && order.status !== 'disputed')
+    .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+}
+
+function queueInfoForOrder(data, order) {
+  const queue = activeQueue(data);
+  const index = queue.findIndex(item => item.id === order.id);
+  if (index < 0) return { position: null, total: queue.length, etaStart: null, etaFinish: null };
+  const dailyCapacity = data.config.availability === 'busy' ? 0.5 : 1;
+  const waitDays = Math.ceil(index / dailyCapacity);
+  const etaDays = orderEtaDays(order);
+  const etaStart = Date.now() + waitDays * 86400000;
+  const etaFinish = etaStart + etaDays * 86400000;
+  return { position: index + 1, total: queue.length, etaStart, etaFinish };
+}
+
+function effectiveDiscountForOrder(order) {
+  return Math.max(0, Math.min(90, Math.max(Number(order.discountPercent || 0), Number(order.loyaltyDiscountPercent || 0))));
+}
+
+function safeAscii(value) {
+  return String(value ?? '').replace(/[^\x20-\x7E]/g, '?');
+}
+
+function buildReceiptPdf(guild, order, license) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'A4', margin: 54, info: { Title: `Bestellbeleg ${order.id}`, Author: 'Unfugstifter Shop' } });
+      const chunks = [];
+      doc.on('data', chunk => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      doc.font('Helvetica-Bold').fontSize(20).text('UNFUGSTIFTER SHOP');
+      doc.font('Helvetica').fontSize(10).text('Bestell- / Zahlungsbeleg fuer digitale Produkte');
+      doc.moveDown();
+      doc.moveTo(54, doc.y).lineTo(541, doc.y).stroke();
+      doc.moveDown();
+
+      const rows = [
+        ['Belegnummer', order.id],
+        ['Discord-Server', guild.name],
+        ['Kaeufer Discord-ID', order.userId],
+        ['Produkt(e)', orderProductLabel(order)],
+        ['Zahlungsart', 'PayPal'],
+        ['Status', order.deliveredAt ? 'Geliefert' : orderStatusLabel(order.status).replace(/[^\x20-\x7E]/g, '')],
+        ['Betrag', Number.isFinite(Number(order.finalPrice ?? order.basePrice)) ? `${Number(order.finalPrice ?? order.basePrice).toFixed(2)} EUR` : 'Nicht gesetzt'],
+        ['Bestellt am', new Date(order.createdAt).toLocaleString('de-AT')],
+        ['Bezahlt am', order.paidAt ? new Date(order.paidAt).toLocaleString('de-AT') : '-'],
+        ['Geliefert am', order.deliveredAt ? new Date(order.deliveredAt).toLocaleString('de-AT') : '-'],
+        ['Lizenz-ID', license?.id || order.licenseId || '-'],
+        ['Kaeuferkennung', license?.buyerMarker || '-'],
+      ];
+      for (const [label, value] of rows) {
+        doc.font('Helvetica-Bold').fontSize(10).text(`${safeAscii(label)}:`, { continued: true, width: 150 });
+        doc.font('Helvetica').text(` ${safeAscii(value)}`);
+      }
+
+      doc.moveDown();
+      doc.font('Helvetica-Bold').text('Hinweis');
+      doc.font('Helvetica').fontSize(9).text(
+        'Dieser PDF-Beleg dokumentiert die im Discord-Shop erfasste Bestellung und Zahlung. Er ersetzt nicht automatisch eine gesetzlich vorgeschriebene steuerliche Rechnung. Massgeblich fuer Leistungsumfang, Lizenz und weitere Vereinbarungen sind das Regelwerk sowie die schriftlichen Angaben im zugehoerigen Bestell-Ticket.'
+      );
+      doc.moveDown();
+      doc.text(`Erstellt: ${new Date().toLocaleString('de-AT')}`);
+      doc.end();
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+function ensureOrderLicense(data, order) {
+  if (order.licenseId && data.licenses[order.licenseId]) return data.licenses[order.licenseId];
+  const id = createLicenseId(data, order.id);
+  const license = {
+    id,
+    orderId: order.id,
+    userId: order.userId,
+    productKey: order.productKey,
+    productKeys: orderProductKeys(order),
+    issuedAt: Date.now(),
+    active: true,
+    buyerMarker: `UFBUY-${order.userId.slice(-6)}-${order.id}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`,
+  };
+  data.licenses[id] = license;
+  order.licenseId = id;
+  return license;
+}
+
+async function applyLoyaltyRole(guild, data, userId) {
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return null;
+  const { level, count, discount } = loyaltyForUser(data, userId);
+  const loyaltyRoles = LOYALTY_LEVELS.map(entry => findSellingRole(guild, entry.roleKey)).filter(Boolean);
+  const targetRole = level ? findSellingRole(guild, level.roleKey) : null;
+  for (const role of loyaltyRoles) {
+    if (role.id !== targetRole?.id && member.roles.cache.has(role.id)) await member.roles.remove(role, 'Selling Loyalty Status aktualisiert').catch(() => {});
+  }
+  if (targetRole && !member.roles.cache.has(targetRole.id)) await member.roles.add(targetRole, `Selling Loyalty: ${level.label}`).catch(() => {});
+  return { level, count, discount, role: targetRole };
+}
+
+async function watermarkOrderImage(guild, data, order, attachment) {
+  const contentType = String(attachment?.contentType || '').toLowerCase();
+  if (!contentType.startsWith('image/')) throw new Error('Watermarking ist aktuell fuer Bilddateien (PNG/JPG/WEBP) vorgesehen.');
+  if (Number(attachment.size || 0) > 20 * 1024 * 1024) throw new Error('Die Bilddatei ist groesser als 20 MB.');
+  const response = await fetch(attachment.url);
+  if (!response.ok) throw new Error('Die hochgeladene Datei konnte nicht geladen werden.');
+  const input = Buffer.from(await response.arrayBuffer());
+  const image = sharp(input, { failOn: 'none' });
+  const meta = await image.metadata();
+  if (!meta.width || !meta.height) throw new Error('Bildgroesse konnte nicht erkannt werden.');
+  const license = ensureOrderLicense(data, order);
+  const marker = `${order.id} | ${license.id} | ${license.buyerMarker}`;
+  const tileW = Math.max(360, Math.floor(meta.width / 2));
+  const tileH = Math.max(180, Math.floor(meta.height / 3));
+  const fontSize = Math.max(18, Math.min(44, Math.floor(meta.width / 32)));
+  const escaped = marker.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const svg = Buffer.from(`<svg width="${meta.width}" height="${meta.height}" xmlns="http://www.w3.org/2000/svg">
+    <defs><pattern id="p" width="${tileW}" height="${tileH}" patternUnits="userSpaceOnUse" patternTransform="rotate(-28)">
+      <text x="20" y="${Math.floor(tileH/2)}" font-family="Arial, sans-serif" font-size="${fontSize}" font-weight="700" fill="white" fill-opacity="0.15" stroke="black" stroke-opacity="0.10" stroke-width="1">${escaped}</text>
+    </pattern></defs>
+    <rect width="100%" height="100%" fill="url(#p)"/>
+    <rect x="0" y="${Math.max(0, meta.height-52)}" width="100%" height="52" fill="black" fill-opacity="0.40"/>
+    <text x="${Math.max(16, meta.width-16)}" y="${Math.max(30, meta.height-18)}" text-anchor="end" font-family="Arial, sans-serif" font-size="${Math.max(14, Math.floor(fontSize*0.7))}" font-weight="700" fill="white">${escaped}</text>
+  </svg>`);
+  const output = await image.composite([{ input: svg, top: 0, left: 0 }]).png({ compressionLevel: 9 }).toBuffer();
+  return { buffer: output, license, marker, fileName: `${order.id}-${path.parse(attachment.name || 'delivery').name}-watermarked.png` };
+}
+
+function cartForUser(data, userId) {
+  const cart = data.carts[userId] && typeof data.carts[userId] === 'object' ? data.carts[userId] : { items: [], updatedAt: Date.now() };
+  cart.items = Array.isArray(cart.items) ? cart.items.filter(key => PRODUCT_TYPES[key]) : [];
+  data.carts[userId] = cart;
+  return cart;
+}
+
+function cartEmbed(data, userId) {
+  const cart = cartForUser(data, userId);
+  const lines = cart.items.length
+    ? cart.items.map((key, index) => `${index + 1}. ${PRODUCT_TYPES[key].emoji} **${PRODUCT_TYPES[key].label}**`).join('\n')
+    : '*Dein Warenkorb ist leer.*';
+  return shopEmbed('🛒 Dein Warenkorb', `${lines}\n\nBeim Checkout wird **eine gemeinsame UF-Bestellung** angelegt. Preis, Lieferumfang und PayPal-Zahlung werden im privaten Ticket final bestaetigt.`);
+}
+
+function cartActionRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('selling_cart_checkout').setLabel('Checkout').setEmoji('✅').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('selling_cart_clear').setLabel('Leeren').setEmoji('🗑️').setStyle(ButtonStyle.Danger),
+  );
 }
 
 function getCouponState(data, rawCode) {
@@ -299,6 +503,23 @@ function buildSellCommandDefinition() {
         type: 1, name: 'update', description: 'Postet ein Update an Käufer eines Produkts.', options: [
           { type: 3, name: 'produkt', description: 'Produkt', required: true, choices: productChoices },
           { type: 3, name: 'text', description: 'Update-Text', required: true, max_length: 1500 },
+        ],
+      },
+      { type: 1, name: 'queue', description: 'Zeigt die aktuelle automatische Auftrags-Warteschlange.' },
+      {
+        type: 1, name: 'receipt', description: 'Erstellt einen PDF-Bestellbeleg erneut.', options: [
+          { type: 3, name: 'order', description: 'Bestellnummer, z. B. UF-0001', required: true },
+        ],
+      },
+      {
+        type: 1, name: 'watermark', description: 'Versieht eine Liefergrafik mit Käufer-/Lizenz-Wasserzeichen.', options: [
+          { type: 3, name: 'order', description: 'Bestellnummer, z. B. UF-0001', required: true },
+          { type: 11, name: 'datei', description: 'PNG/JPG/WEBP Datei', required: true },
+        ],
+      },
+      {
+        type: 1, name: 'loyalty', description: 'Zeigt Stammkunden-/VIP-Status eines Kunden.', options: [
+          { type: 6, name: 'user', description: 'Kunde', required: true },
         ],
       },
       {
@@ -571,6 +792,7 @@ async function createSellingStructure(guild) {
   channels.orderStatus = await ensureChannel(guild, categories.buy, '📊・bestellstatus', { readOnly: true, roleMap, topic: 'Aktueller Bestellstatus und Auslastung des Shops.' });
   channels.payment = await ensureChannel(guild, categories.buy, '💳・zahlung', { readOnly: true, roleMap, topic: 'Zahlungsinformationen werden vom Shop-Team gepflegt.' });
   channels.reviews = await ensureChannel(guild, categories.buy, '⭐・bewertungen', { readOnly: true, roleMap, topic: 'Verifizierte Bewertungen aus abgeschlossenen Bestellungen.' });
+  channels.customerStatus = await ensureChannel(guild, categories.buy, '💠・kundenstatus', { readOnly: true, roleMap, topic: 'Stammkunden-, VIP- und Rabattvorteile.' });
   channels.results = await ensureChannel(guild, categories.buy, '📸・kunden-ergebnisse', { roleMap, topic: 'Ergebnisse und Showcase von Kunden.' });
   channels.requests = await ensureChannel(guild, categories.buy, '💡・produkt-wünsche', { roleMap, topic: 'Wünsche für neue Produkte oder individuelle Aufträge.' });
 
@@ -591,50 +813,87 @@ async function createSellingStructure(guild) {
   channels.transcripts = await ensureChannel(guild, categories.team, '📄・transkripte', { privateForStaff: true, roleMap, topic: 'Automatisch gespeicherte Ticket-Transkripte.' });
   channels.blacklist = await ensureChannel(guild, categories.team, '🚫・blacklist', { privateForStaff: true, roleMap, topic: 'Interne Shop-Blacklist und Sperrprotokoll.' });
   channels.dashboard = await ensureChannel(guild, categories.team, '📊・shop-dashboard', { privateForStaff: true, roleMap, topic: 'Interne Kennzahlen und Shop-Übersicht.' });
+  channels.queue = await ensureChannel(guild, categories.team, '⏱️・auftrags-warteschlange', { privateForStaff: true, roleMap, topic: 'Automatische Auftragsreihenfolge, Positionen und ETA.' });
   channels.teamVoice = await ensureChannel(guild, categories.team, '🔊・Team Talk', { type: ChannelType.GuildVoice, privateForStaff: true, roleMap });
 
   return { roleMap, categories, channels };
+}
+
+
+async function seedCompleteRulebook(channel) {
+  if (!channel?.isTextBased?.()) return;
+  const latest = await channel.messages.fetch({ limit: 1 }).catch(() => null);
+  if (latest?.size) return;
+  const sections = [
+    ['📜 01 • Geltung, Bestellung & Vertrag', [
+      '**1. Geltungsbereich**\nDieses Regelwerk gilt für sämtliche Produkte, Warenkorb-Bestellungen, Custom-Aufträge, Supportleistungen, digitalen Lieferungen, Updates und Lizenzen des Unfugstifter Shops.',
+      '**2. Verbindlichkeit nur im offiziellen Ticket**\nVerbindlich sind ausschließlich Angaben, die im zugehörigen Kauf-Ticket durch das Shop-Team bestätigt wurden. Dazu gehören Produktumfang, Preis, Rabatt, Lieferform, Revisionen, ETA und Zahlungsdaten.',
+      '**3. Warenkorb ist noch kein Vertrag**\nDas Hinzufügen von Produkten zum Warenkorb oder das Absenden des Checkout-Formulars allein verpflichtet noch nicht zur Zahlung. Erst die Bestätigung von Preis und Leistungsumfang im Kauf-Ticket ist maßgeblich.',
+      '**4. Wahrheitsgemäße Angaben**\nKäufer müssen erforderliche Angaben korrekt machen. Identitätstäuschung, falsche Referenzen, manipulierte Nachweise oder bewusst irreführende Angaben können zur sofortigen Beendigung und Sperre führen.',
+      '**5. Individuelle Aufträge**\nBei Custom-Arbeiten sind Referenzen, gewünschter Stil, Format, Einsatzzweck und sonstige Anforderungen vor Beginn möglichst vollständig anzugeben. Nachträgliche grundlegende Änderungen können als neuer Zusatzauftrag berechnet werden.',
+    ]],
+    ['💳 02 • Preise, PayPal, Rabatte & Belege', [
+      '**6. Zahlung ausschließlich über PayPal**\nDie gültige Empfängeradresse und der endgültige Betrag werden im privaten Bestell-Ticket bestätigt. Zahlungen an andere Adressen, die nur per DM, Screenshot oder durch Dritte genannt wurden, erfolgen auf eigenes Risiko.',
+      '**7. Niemals Zugangsdaten senden**\nDer Shop verlangt niemals PayPal-Passwort, 2FA-Code, Login-Code, vollständige Zugangsdaten oder Fernzugriff auf dein Konto.',
+      '**8. Zahlungszuordnung**\nZur Zuordnung kann eine Transaktionsreferenz oder ein geeigneter Zahlungsnachweis verlangt werden. Nicht erforderliche sensible Daten sollen geschwärzt werden.',
+      '**9. Rabattcodes**\nRabattcodes können zeitlich, mengenmäßig oder auf bestimmte Aktionen beschränkt sein. Manipulation, Mehrfachnutzung trotz Begrenzung oder Umgehungsversuche können zur Stornierung des Rabatts führen.',
+      '**10. Stammkunden- und VIP-Rabatte**\nBronze, Silber, Gold und VIP werden automatisch anhand gelieferter Bestellungen vergeben. Rabattcode und Stammkundenrabatt werden standardmäßig nicht addiert; automatisch gilt der höhere Rabatt, sofern im Ticket nichts anderes bestätigt wird.',
+      '**11. PDF-Bestellbeleg**\nNach Lieferung kann ein PDF-Bestell-/Zahlungsbeleg erstellt werden. Dieser dokumentiert die im Shopsystem gespeicherte Bestellung; er wird nicht pauschal als steuerliche Rechnung bezeichnet.',
+    ]],
+    ['⏱️ 03 • Warteschlange, ETA, Lieferung & Revisionen', [
+      '**12. Warteschlange**\nOffene Aufträge werden automatisiert in einer Warteschlange geführt. Die Position kann sich durch abgeschlossene, pausierte oder strittige Aufträge verändern.',
+      '**13. ETA ist eine Schätzung**\nAngezeigte Start- und Lieferzeiten sind unverbindliche Schätzwerte auf Grundlage von Queue-Position, Auslastung und Produkttyp. Der konkret bestätigte Termin im Ticket hat Vorrang.',
+      '**14. Mitwirkung des Käufers**\nFehlende Antworten, Dateien, Referenzen oder Freigaben können die Bearbeitung verzögern. Solche Verzögerungen werden nicht automatisch dem Shop zugerechnet.',
+      '**15. Lieferung**\nDigitale Lieferungen erfolgen im privaten Kunden-/Delivery-Bereich. Der Käufer ist dafür verantwortlich, gelieferte Dateien innerhalb angemessener Zeit zu sichern.',
+      '**16. Revisionen**\nInkludierte Revisionen werden pro Bestellung angezeigt. Eine Revision umfasst angemessene Änderungen innerhalb des vereinbarten Konzepts; ein vollständiger Richtungswechsel oder neuer Auftrag kann zusätzlich berechnet werden.',
+      '**17. Abnahme und Fehler**\nOffensichtliche Fehler oder fehlende Bestandteile sollen zeitnah im Ticket oder Support gemeldet werden. Gesetzliche Rechte werden dadurch nicht ausgeschlossen.',
+    ]],
+    ['🔐 04 • Lizenz, Eigentum, Weiterverkauf & Weitergabe', [
+      '**18. Persönliche Nutzungslizenz**\nSofern nicht ausdrücklich anders vereinbart, erhält ausschließlich der Käufer eine persönliche, nicht übertragbare Nutzungslizenz im bestätigten Umfang. Eigentums-, Quell-, Weiterverkaufs- oder Unterlizenzierungsrechte werden nicht automatisch übertragen.',
+      '**19. Weiterverkauf strikt verboten**\nProdukte oder Teile davon dürfen ohne ausdrückliche schriftliche Freigabe nicht verkauft, vermietet, getauscht, verschenkt, gebündelt oder als Bonus zu eigenen Verkäufen weitergegeben werden.',
+      '**20. Leaken / Teilen strikt verboten**\nDas Hochladen, Spiegeln, Veröffentlichen, Leaken oder Versenden an Freunde, andere Discords, FiveM-Server, Communities, Clouds, Foren, Telegram-Gruppen, Download-Seiten oder andere Dritte ist ohne Freigabe untersagt.',
+      '**21. Reuploads / Reskins / Kopien verboten**\nEin Produkt darf nicht lediglich umbenannt, leicht verändert oder neu verpackt und anschließend als eigenes Produkt, Pack, Preset, Design oder Asset veröffentlicht bzw. verkauft werden.',
+      '**22. Team-/Server-/Mehrnutzerlizenz**\nMehrere Nutzer, Teams, Agenturen oder Server dürfen ein Produkt nur gemeinsam verwenden, wenn eine entsprechende Lizenz ausdrücklich im Ticket bestätigt wurde.',
+      '**23. Lizenztransfer**\nEin Transfer an einen anderen Discord-Account oder Betreiber ist nur mit vorheriger Freigabe des Managements gültig. Eigenmächtige Transfers sind nicht erlaubt.',
+    ]],
+    ['🕵️ 05 • Watermarking, Käuferkennung & Anti-Leak', [
+      '**24. Käuferkennung**\nBestellungen können eine eindeutige Bestellnummer, Lizenz-ID und Käuferkennung erhalten. Diese Zuordnung dient Lizenzprüfung, Support, Update-Berechtigung und Anti-Leak-Nachverfolgung.',
+      '**25. Echtes Bild-Watermarking**\nLiefergrafiken können mit sichtbaren, wiederholten Käufer-/Lizenz-Wasserzeichen versehen werden. Das Entfernen oder gezielte Unkenntlichmachen zur Verschleierung einer unerlaubten Weitergabe ist untersagt.',
+      '**26. Keine falschen Überwachungsbehauptungen**\nDer Shop behauptet nicht, private Geräte, PayPal-Konten oder fremde Plattformen vollständig überwachen zu können. Dokumentiert werden nur Daten, die im Shop-/Discord-System oder im Rahmen zulässiger Nachweise tatsächlich vorliegen.',
+      '**27. Leak-Nachweis**\nBei Verdacht können Lizenz-ID, Käuferkennung, Ticketverlauf, Zeitstempel, Dateikennzeichnung und öffentlich zugängliche Fundstellen zur Prüfung herangezogen werden.',
+      '**28. Konsequenzen bei belegtem Missbrauch**\nBei nachvollziehbar belegtem Leak, Weiterverkauf, Umgehung von Lizenzschutz oder unerlaubter Verbreitung kann die Lizenz deaktiviert, Support beendet und der Nutzer vom Shop ausgeschlossen werden. Weitere zulässige Schritte richten sich nach dem anwendbaren Recht.',
+    ]],
+    ['🎫 06 • Support, Streitfälle, Refunds & Blacklist', [
+      '**29. Support**\nSupport gilt für den vereinbarten Lieferumfang. Größere Erweiterungen, neue Varianten, fremdverursachte Fehler oder Änderungen an Drittsoftware können als neuer Auftrag behandelt werden.',
+      '**30. Support-Tickets**\nFür allgemeine Hilfe, Installation, Bestellung/Lieferung und PayPal gibt es getrennte Support-Typen. Passwörter und 2FA-Codes dürfen nicht gesendet werden.',
+      '**31. Streitfälle**\nProbleme sollen zuerst im offiziellen Ticket geklärt werden. Relevante Informationen werden nachvollziehbar dokumentiert; beide Seiten sollen Gelegenheit zur sachlichen Darstellung erhalten.',
+      '**32. Rückerstattung / Widerruf / Gewährleistung**\nDiese Rechte werden nicht pauschal ausgeschlossen. Maßgeblich sind die konkrete Vereinbarung und zwingende gesetzliche Verbraucherrechte, soweit sie anwendbar sind.',
+      '**33. Blacklist**\nBetrugsversuche, wiederholter Missbrauch, schwere Regelverstöße oder Umgehung bestehender Sperren können zu einer Sperre für neue Bestellungen führen. Support für bestehende Streitfälle kann weiterhin ermöglicht werden.',
+      '**34. Chargebacks und falsche Zahlungsbehauptungen**\nBewusst falsche Zahlungsbehauptungen, gefälschte Belege oder missbräuchliche Rückbuchungen können zur Sperre und Dokumentation des Vorgangs führen. Berechtigte Zahlungsprobleme sollen über Support geklärt werden.',
+    ]],
+    ['📋 07 • Daten, Logs, Verhalten & Schlussbestimmungen', [
+      '**35. Dokumentation**\nZur Auftragsbearbeitung, Sicherheit und Nachvollziehbarkeit können Discord-ID, Bestellnummer, Produkt, Status, Preis, Rabatt, Zeitstempel, zuständiges Teammitglied, Lizenzdaten und relevante Ticketkommunikation gespeichert werden.',
+      '**36. Ticket-Transkripte**\nBeim Schließen können Transkripte im internen Team-Bereich gespeichert werden. Enthalten sein können Nachrichten, Embed-Inhalte und Verweise auf hochgeladene Dateien im technisch erfassten Umfang.',
+      '**37. Respektvolles Verhalten**\nBeleidigungen, Drohungen, Spam, Doxxing, Erpressung, absichtliche Störungen oder Betrugsversuche werden nicht toleriert.',
+      '**38. Rechte Dritter**\nKäufer dürfen gelieferte Inhalte nicht in einer Weise verwenden, die Urheber-, Marken-, Persönlichkeits- oder sonstige Rechte Dritter verletzt. Der Shop verkauft nur Inhalte, die er selbst erstellt hat oder rechtmäßig anbieten darf.',
+      '**39. Produkt-Updates**\nUpdates können an aktive Käuferlizenzen und passende Käuferrollen gebunden sein. Ein Anspruch auf unbegrenzte zukünftige Erweiterungen entsteht nur, wenn dies ausdrücklich zugesagt wurde.',
+      '**40. Änderungen des Regelwerks**\nDas Regelwerk kann für zukünftige Bestellungen angepasst werden. Für bereits abgeschlossene Bestellungen bleiben zwingende gesetzliche Rechte sowie individuell bestätigte Vereinbarungen maßgeblich.',
+      '**41. Zustimmung**\nMit Abschluss einer Bestellung bestätigst du, dass du dieses Regelwerk und die im Kauf-Ticket bestätigten Produkt-, Preis- und Lizenzbedingungen zur Kenntnis genommen hast.',
+    ]],
+  ];
+  for (const [title, rules] of sections) {
+    await channel.send({ embeds: [shopEmbed(title, rules.join('\n\n'))] }).catch(() => {});
+  }
 }
 
 async function seedSellingServer(structure) {
   const { channels } = structure;
 
   await seedIfEmpty(channels.welcome, {
-    embeds: [shopEmbed('🛒 Willkommen im Unfugstifter Shop', 'Willkommen im offiziellen **Unfugstifter Shop** für digitale Produkte und individuelle Aufträge.\n\nInformiere dich zuerst in **📜・regelwerk**, sieh dir anschließend die Produktbereiche an und starte deine Bestellung ausschließlich über **🛒・bestellen**. Preise, Lieferumfang und Zahlung werden immer im privaten Ticket bestätigt.')],
+    embeds: [shopEmbed('🛒 Willkommen im Unfugstifter Shop', 'Willkommen im offiziellen **Unfugstifter Shop** für digitale Produkte und individuelle Aufträge.\n\nInformiere dich zuerst in **📜・regelwerk**, sieh dir anschließend die Produktbereiche an und stelle deine Produkte über den **Warenkorb in 🛒・bestellen** zusammen. Preise, Lieferumfang und Zahlung werden immer im privaten Ticket bestätigt.')],
   });
 
-  await seedIfEmpty(channels.rules, {
-    embeds: [
-      shopEmbed('📜 01 • Shop-Regeln & Vertragsablauf', [
-        '**1. Geltungsbereich**\nDiese Regeln gelten für den Discord-Shop, alle Bestellungen, individuellen Aufträge, digitalen Lieferungen sowie Support-Leistungen des Unfugstifter Shops.',
-        '**2. Verbindliche Bestellungen nur im Ticket**\nPreis, Produktumfang, Anpassungen, Lieferform und Zahlungsdetails gelten erst dann als bestätigt, wenn sie im offiziellen privaten Kauf-Ticket durch das Shop-Team festgehalten wurden. Absprachen außerhalb des Tickets sind nicht verbindlich.',
-        '**3. Richtige Angaben**\nDer Käufer muss die für den Auftrag notwendigen Angaben vollständig und wahrheitsgemäß machen. Falsche Angaben, Identitätstäuschung, manipulierte Nachweise oder absichtliche Irreführung können zur sofortigen Beendigung der Bestellung führen.',
-        '**4. Zahlung ausschließlich über PayPal**\nDie gültige PayPal-Empfängeradresse und der endgültige Betrag werden ausschließlich im jeweiligen Kauf-Ticket bestätigt. Zahlungen an Adressen aus privaten DMs, Screenshots oder Nachrichten Dritter erfolgen auf eigenes Risiko.',
-        '**5. Keine Zahlung vor Bestätigung**\nBezahle erst, nachdem Preis, Lieferumfang und PayPal-Empfänger im Ticket bestätigt wurden. Das Team verlangt niemals dein PayPal-Passwort, 2FA-Codes, Login-Codes oder Zugriff auf dein Konto.',
-        '**6. Zahlungsnachweis**\nNach der Zahlung kann zur Zuordnung ein geeigneter Zahlungsnachweis oder eine Transaktionsreferenz verlangt werden. Sensible Kontodaten, Passwörter oder vollständige Login-Daten sollen dabei nicht geteilt werden.',
-        '**7. Verhalten im Shop**\nBeleidigungen, Drohungen, Spam, absichtliche Störungen, Betrugsversuche, manipulierte Zahlungsbelege oder das Umgehen von Shop-Sperren werden nicht toleriert und können zum Ausschluss führen.',
-      ].join('\n\n')),
-      shopEmbed('🔐 02 • Lizenz, Weitergabe & Anti-Leak', [
-        '**8. Persönliche Nutzungslizenz**\nSofern im Angebot oder Ticket nichts anderes vereinbart wurde, erhält ausschließlich der Käufer eine persönliche, nicht übertragbare Nutzungslizenz für den vereinbarten Zweck. Der Kauf überträgt keine Weiterverkaufs-, Unterlizenzierungs- oder Eigentumsrechte am zugrunde liegenden Werk.',
-        '**9. Weiterverkauf strikt verboten**\nProdukte oder Bestandteile davon dürfen ohne ausdrückliche schriftliche Genehmigung weder direkt noch indirekt verkauft, vermietet, getauscht, verschenkt, gebündelt oder gegen andere Leistungen weitergegeben werden.',
-        '**10. Leaken und Teilen strikt verboten**\nDas Hochladen, Spiegeln, Veröffentlichen, Leaken, Versenden oder sonstige Zugänglichmachen an Freunde, andere Discords, FiveM-Server, Communities, Cloud-Ordner, Foren, Telegram-Gruppen, Download-Seiten oder sonstige Dritte ist untersagt.',
-        '**11. Keine Reuploads / Reskins / Kopien**\nProdukte dürfen nicht unter anderem Namen neu hochgeladen, geringfügig verändert und als eigenes Werk ausgegeben, in öffentliche Packs eingebaut oder als Grundlage für einen konkurrierenden Verkauf verwendet werden.',
-        '**12. Keine Umgehung von Schutzmaßnahmen**\nCredits, Lizenzhinweise, Käuferkennzeichnungen, Wasserzeichen oder sonstige legitime Schutzmechanismen dürfen nicht entfernt, manipuliert oder umgangen werden, wenn dies der unerlaubten Weitergabe, Verschleierung oder Weiterverwertung dient.',
-        '**13. Nutzung nur im vereinbarten Umfang**\nEine Server-, Team-, Agentur- oder Mehrnutzerlizenz besteht nur dann, wenn sie ausdrücklich im Ticket vereinbart wurde. Eine normale Einzelbestellung berechtigt nicht automatisch zur Nutzung durch weitere Personen oder Projekte.',
-        '**14. Fremdrechte bleiben geschützt**\nDer Shop verkauft nur eigene oder rechtmäßig nutzbare Inhalte. Käufer dürfen mit gelieferten Dateien ebenfalls keine Marken-, Urheber-, Persönlichkeits- oder sonstigen Rechte Dritter verletzen.',
-      ].join('\n\n')),
-      shopEmbed('⚖️ 03 • Verstöße, Support, Rückerstattung & Nachweise', [
-        '**15. Konsequenzen bei Leak / Weiterverkauf**\nBei nachvollziehbar belegtem Leak, unerlaubter Weitergabe, Weiterverkauf oder Lizenzmissbrauch kann die Nutzungslizenz beendet, weiterer Support verweigert und der Nutzer dauerhaft vom Shop ausgeschlossen werden. Mögliche weitere Ansprüche richten sich nach dem anwendbaren Recht.',
-        '**16. Dokumentation und Nachvollziehbarkeit**\nZur Bearbeitung, Betrugsprävention und Durchsetzung der Shop-Regeln können Bestell- und Ticketdaten dokumentiert werden, insbesondere Discord-ID, Ticket-ID, Produkt, Zeitstempel, Bearbeitungsstatus, zuständiges Teammitglied und relevante Kommunikationsverläufe. Es wird nicht behauptet, dass außerhalb dieser Systeme „alles gesehen“ werden kann.',
-        '**17. Supportumfang**\nSupport umfasst grundsätzlich Fehler oder Fragen innerhalb des vereinbarten Lieferumfangs. Neue Wünsche, größere Umbauten, zusätzliche Varianten, fremdverursachte Fehler oder Änderungen an Drittsoftware können als zusätzlicher Auftrag behandelt werden.',
-        '**18. Mitwirkungspflicht beim Support**\nFür eine schnelle Bearbeitung sollen Produktname, ungefähres Kaufdatum, Fehlerbeschreibung, relevante Screenshots/Logs und bereits getestete Schritte bereitgestellt werden. Zugangsdaten oder Passwörter werden nicht verlangt.',
-        '**19. Lieferung digitaler Inhalte**\nLieferzeit und Lieferform richten sich nach dem jeweiligen Produkt bzw. der individuellen Vereinbarung im Ticket. Bei Sonderanfertigungen können Zwischenabnahmen oder Rückfragen erforderlich sein.',
-        '**20. Rückerstattung und Widerruf**\nRückerstattungen, Widerruf und Gewährleistung werden nicht pauschal ausgeschlossen. Es gelten die im konkreten Auftrag getroffenen Vereinbarungen sowie zwingende gesetzliche Verbraucherrechte, soweit diese anwendbar sind.',
-        '**21. Regelverstöße und Sperren**\nBei schweren oder wiederholten Verstößen kann der Zugang zu Shop, Support, Downloads und zukünftigen Bestellungen eingeschränkt oder gesperrt werden. Bereits bestehende gesetzliche Rechte bleiben davon unberührt.',
-        '**22. Zustimmung**\nMit Abschluss einer Bestellung bestätigst du, dass du das zu diesem Zeitpunkt veröffentlichte Regelwerk sowie die konkreten Produkt- und Lizenzbedingungen im Ticket zur Kenntnis genommen hast.',
-      ].join('\n\n')),
-    ],
-  });
+  await seedCompleteRulebook(channels.rules);
 
   await seedIfEmpty(channels.faq, {
     embeds: [shopEmbed('❓ FAQ', '**Wie bestelle ich?**\nWähle in **🛒・bestellen** dein Produkt. Der Bot erstellt ein privates Kauf-Ticket.\n\n**Wann ist ein Preis verbindlich?**\nErst wenn Preis und Lieferumfang im privaten Ticket bestätigt wurden.\n\n**Wie bezahle ich?**\nAusschließlich über **PayPal** an die im Ticket bestätigte Empfängeradresse.\n\n**Wo bekomme ich Support?**\nNutze **🎫・support-ticket** und wähle den passenden Bereich.\n\n**Darf ich gekaufte Dateien weitergeben?**\nNein. Weiterverkauf, Leaks, Reuploads und Weitergabe an Dritte sind ohne ausdrückliche Erlaubnis untersagt.')],
@@ -652,19 +911,24 @@ async function seedSellingServer(structure) {
     await seedIfEmpty(channel, { embeds: [shopEmbed(title, description)] });
   }
 
+  await seedIfEmpty(channels.customerStatus, {
+    embeds: [shopEmbed('💠 Stammkunden & VIP', '**Bronze:** ab 3 gelieferten Bestellungen • 5 % Stammkundenrabatt\n**Silber:** ab 5 • 8 %\n**Gold:** ab 10 • 12 %\n**VIP:** ab 20 • 15 %\n\nDer Status wird nach erfolgreichen Lieferungen automatisch aktualisiert. Rabattcodes und Stammkundenrabatte werden standardmäßig **nicht gestapelt**; automatisch gilt der höhere Rabatt. Der finale Preis wird immer im Kauf-Ticket bestätigt.')],
+  });
+
   const orderRow1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('selling_order:thumbnail').setLabel('Thumbnail').setEmoji('🖼️').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('selling_order:nve').setLabel('NVE / Grafik').setEmoji('🌆').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('selling_order:soundpack').setLabel('Soundpack').setEmoji('🔊').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('selling_cart_add:thumbnail').setLabel('Thumbnail +').setEmoji('🖼️').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('selling_cart_add:nve').setLabel('NVE +').setEmoji('🌆').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('selling_cart_add:soundpack').setLabel('Soundpack +').setEmoji('🔊').setStyle(ButtonStyle.Primary),
   );
   const orderRow2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('selling_order:grafik').setLabel('Design').setEmoji('🎨').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('selling_order:fivem').setLabel('FiveM Asset').setEmoji('🚗').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('selling_order:bundle').setLabel('Bundle').setEmoji('📦').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('selling_support:general').setLabel('Support').setEmoji('🎫').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('selling_cart_add:grafik').setLabel('Design +').setEmoji('🎨').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('selling_cart_add:fivem').setLabel('FiveM +').setEmoji('🚗').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('selling_cart_add:bundle').setLabel('Bundle +').setEmoji('📦').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('selling_cart_view').setLabel('Warenkorb').setEmoji('🛒').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('selling_support:general').setLabel('Support').setEmoji('🎫').setStyle(ButtonStyle.Secondary),
   );
   await seedIfEmpty(channels.order, {
-    embeds: [shopEmbed('🛒 Bestellung starten', 'Wähle das gewünschte Produkt. Der Bot erstellt ein **privates Kauf-Ticket**, in dem Preis, Lieferumfang, Bearbeitung und PayPal-Zahlung verbindlich geklärt werden.\n\nMit einer Bestellung akzeptierst du die jeweils geltenden **Shop- und Lizenzbedingungen** in 📜・regelwerk.')],
+    embeds: [shopEmbed('🛒 Bestellung starten', 'Lege ein oder mehrere Produkte über die **+ Buttons** in deinen Warenkorb. Öffne danach **🛒 Warenkorb → Checkout**. Der Bot erstellt eine gemeinsame **UF-Bestellung** mit privatem Kauf-Ticket. Dort werden Preis, Rabatt, Queue/ETA, Lieferumfang, Revisionen und PayPal-Zahlung final bestätigt.\n\nMit Abschluss der Bestellung gelten die veröffentlichten **Shop- und Lizenzbedingungen** in 📜・regelwerk.')],
     components: [orderRow1, orderRow2],
   });
 
@@ -686,7 +950,7 @@ async function seedSellingServer(structure) {
   });
 
   await seedIfEmpty(channels.ticketInfo, {
-    embeds: [shopEmbed('📋 Ticket-System & Ablauf', '**Kauf-Ticket**\nFür neue Bestellungen. Dort werden Produkt, Umfang, Preis, PayPal-Zahlung und Lieferung verbindlich abgestimmt.\n\n**Support-Ticket**\nFür allgemeine Hilfe, Installation, Lieferprobleme oder Zahlungsfragen.\n\n**Nachvollziehbarkeit**\nTicket-Erstellung, Zuständigkeit, Status und relevante Bearbeitungsschritte können für Support, Betrugsprävention und interne Dokumentation protokolliert werden.')],
+    embeds: [shopEmbed('📋 Ticket-System & Ablauf', '**Kauf-Ticket**\nFür Warenkorb- und Einzelbestellungen. Dort werden Produkte, Umfang, Preis, Rabatt/VIP-Status, Queue/ETA, PayPal-Zahlung, Revisionen und Lieferung abgestimmt.\n\n**PDF-Beleg & Lizenz**\nNach Lieferung erhält der Kundenbereich Lizenzdatei und PDF-Bestellbeleg. Bilddateien können vom Team mit Käufer-/Lizenz-Watermark versehen werden.\n\n**Support-Ticket**\nFür allgemeine Hilfe, Installation, Lieferprobleme oder Zahlungsfragen.\n\n**Nachvollziehbarkeit**\nTicket-Erstellung, Zuständigkeit, Status und relevante Bearbeitungsschritte können für Support, Betrugsprävention und interne Dokumentation protokolliert werden.')],
   });
 
 
@@ -702,6 +966,7 @@ async function seedSellingServer(structure) {
   await seedIfEmpty(channels.portfolio, { embeds: [shopEmbed('🖼️ Portfolio', 'Ausgewählte Arbeiten und Referenzen werden hier automatisch über `/sell portfolio` gepflegt.')] });
   await seedIfEmpty(channels.orderStatus, { embeds: [shopEmbed('📊 Bestellstatus', '🟢 **Bestellungen offen**\nNeue Aufträge können aktuell angenommen werden.')] });
   await seedIfEmpty(channels.dashboard, { embeds: [shopEmbed('📊 Shop-Dashboard', 'Interne Shop-Kennzahlen können mit `/sell dashboard` abgerufen werden.')] });
+  await seedIfEmpty(channels.queue, { embeds: [shopEmbed('⏱️ Auftrags-Warteschlange', 'Die aktuelle interne Queue inklusive geschätzter ETA kann mit `/sell queue` angezeigt werden. Der öffentliche Überblick wird automatisch in 📊・bestellstatus aktualisiert.')] });
 }
 
 function sanitizeName(value) {
@@ -785,25 +1050,35 @@ function supportActionRows() {
   )];
 }
 
-function orderInfoEmbed(order) {
-  const product = PRODUCT_TYPES[order.productKey] || { label: order.productKey || 'Unbekannt', emoji: '📦', delivery: 'nach Umfang' };
+function orderInfoEmbed(order, data = null) {
+  const productLabel = orderProductLabel(order);
+  const emoji = orderProductEmoji(order);
   const assigned = order.assignedTo ? `<@${order.assignedTo}>` : 'Noch niemand';
   const basePrice = Number.isFinite(Number(order.basePrice)) ? formatEuro(order.basePrice) : 'Noch offen';
   const finalPrice = Number.isFinite(Number(order.finalPrice)) ? formatEuro(order.finalPrice) : basePrice;
-  const coupon = order.couponCode ? `\`${order.couponCode}\` (${order.discountPercent || 0} %)` : 'Keiner';
+  const effectiveDiscount = effectiveDiscountForOrder(order);
+  const discountParts = [];
+  if (order.couponCode) discountParts.push(`Code \`${order.couponCode}\`: ${order.discountPercent || 0} %`);
+  if (order.loyaltyDiscountPercent) discountParts.push(`${order.loyaltyLabel || 'Stammkunde'}: ${order.loyaltyDiscountPercent} %`);
   const license = order.licenseId ? `\`${order.licenseId}\`` : 'Noch nicht ausgestellt';
+  const queue = data ? queueInfoForOrder(data, order) : null;
+  const queueText = queue?.position
+    ? `**Queue:** #${queue.position} von ${queue.total}\n**ETA Start:** <t:${Math.floor(queue.etaStart / 1000)}:R>\n**ETA Lieferung:** ca. <t:${Math.floor(queue.etaFinish / 1000)}:d>`
+    : '**Queue:** nicht aktiv';
 
-  return shopEmbed(`${product.emoji} Bestellung ${order.id} • ${product.label}`, [
+  return shopEmbed(`${emoji} Bestellung ${order.id} • ${productLabel}`.slice(0, 256), [
     `**Status:** ${orderStatusLabel(order.status)}`,
     `**Kunde:** <@${order.userId}>`,
     `**Zuständig:** ${assigned}`,
-    `**Preis:** ${basePrice}${order.discountPercent ? ` → **${finalPrice}**` : ''}`,
-    `**Rabatt:** ${coupon}`,
+    `**Preis:** ${basePrice}${effectiveDiscount ? ` → **${finalPrice}**` : ''}`,
+    `**Rabatt:** ${discountParts.length ? discountParts.join(' • ') : 'Keiner'}`,
     `**Revisionen:** ${Math.max(0, Number(order.revisionsRemaining || 0))}`,
-    `**Richtwert Lieferung:** ${product.delivery || 'nach Umfang'}`,
+    `**Richtwert Lieferung:** ${orderEtaDays(order)} Tag(e) / nach Umfang`,
     `**Lizenz:** ${license}`,
+    queueText,
   ].join('\n'), [
     { name: 'Auftrag', value: String(order.details || 'Keine Angaben').slice(0, 1024) },
+    { name: 'Produkte', value: orderProductKeys(order).map(key => `${PRODUCT_TYPES[key].emoji} ${PRODUCT_TYPES[key].label}`).join('\n').slice(0, 1024) || productLabel },
     { name: 'Referenzen', value: String(order.references || '—').slice(0, 1024) },
     { name: 'Wunschtermin', value: String(order.deadline || '—').slice(0, 1024), inline: true },
     { name: 'Zusatz', value: String(order.notes || '—').slice(0, 1024), inline: true },
@@ -818,7 +1093,9 @@ function dashboardEmbed(guild, data) {
   const open = orders.filter(order => !order.closedAt).length;
   const disputed = orders.filter(order => order.status === 'disputed' && !order.closedAt).length;
   const productCounts = {};
-  for (const order of orders) productCounts[order.productKey] = (productCounts[order.productKey] || 0) + 1;
+  for (const order of orders) {
+    for (const key of orderProductKeys(order)) productCounts[key] = (productCounts[key] || 0) + 1;
+  }
   const topProducts = Object.entries(productCounts)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5)
@@ -837,13 +1114,147 @@ function dashboardEmbed(guild, data) {
     ? `${(reviews.reduce((sum, review) => sum + Number(review.stars || 0), 0) / reviews.length).toFixed(1)} / 5`
     : 'Noch keine Bewertungen';
 
+  const queue = activeQueue(data);
+  const loyaltyCounts = Object.values(data.orders || {}).filter(order => order.deliveredAt).reduce((acc, order) => { acc.add(order.userId); return acc; }, new Set()).size;
+
   return shopEmbed('📊 Owner Shop-Dashboard', `Interne Live-Übersicht für **${guild.name}**.`, [
     { name: 'Bestellungen', value: `Gesamt: **${orders.length}**\nOffen: **${open}**\nStreitfälle: **${disputed}**`, inline: true },
     { name: 'Verkäufe', value: `Bezahlt: **${paidOrders.length}**\nGeliefert: **${delivered.length}**\nUmsatz erfasst: **${formatEuro(revenue)}**`, inline: true },
     { name: 'Service', value: `Ø Lieferung: **${avgDelivery}**\nBewertungen: **${reviews.length}**\nØ Rating: **${avgRating}**`, inline: true },
     { name: 'Top-Produkte', value: topProducts },
+    { name: 'Warteschlange', value: `Aktiv: **${queue.length}**\nKunden mit Lieferung: **${loyaltyCounts}**`, inline: true },
     { name: 'Shop-Status', value: `${availabilityLabel(data.config.availability)}${data.config.availabilityNote ? `\n${data.config.availabilityNote}` : ''}` },
   ]);
+}
+
+
+async function handleCartButton(interaction) {
+  if (!interaction.inGuild()) return;
+  const { store, data } = getGuildShopData(interaction.guildId);
+  if (data.blacklist[interaction.user.id]) {
+    await interaction.reply({ content: '🚫 Du bist aktuell für neue Bestellungen gesperrt.', ephemeral: true });
+    return;
+  }
+  const id = String(interaction.customId || '');
+  if (id.startsWith('selling_cart_add:')) {
+    const key = id.split(':')[1];
+    if (!PRODUCT_TYPES[key]) return;
+    const cart = cartForUser(data, interaction.user.id);
+    if (!cart.items.includes(key)) cart.items.push(key);
+    cart.updatedAt = Date.now();
+    saveSellingStore(store);
+    await interaction.reply({ embeds: [cartEmbed(data, interaction.user.id)], components: [cartActionRow()], ephemeral: true });
+    return;
+  }
+  if (id === 'selling_cart_view') {
+    await interaction.reply({ embeds: [cartEmbed(data, interaction.user.id)], components: [cartActionRow()], ephemeral: true });
+    return;
+  }
+  if (id === 'selling_cart_clear') {
+    data.carts[interaction.user.id] = { items: [], updatedAt: Date.now() };
+    saveSellingStore(store);
+    await interaction.update({ embeds: [cartEmbed(data, interaction.user.id)], components: [cartActionRow()] });
+    return;
+  }
+  if (id === 'selling_cart_checkout') {
+    const cart = cartForUser(data, interaction.user.id);
+    if (!cart.items.length) {
+      await interaction.reply({ content: '🛒 Dein Warenkorb ist leer.', ephemeral: true });
+      return;
+    }
+    if (data.config.availability === 'closed') {
+      await interaction.reply({ content: '🔴 Neue Bestellungen sind aktuell geschlossen.', ephemeral: true });
+      return;
+    }
+    const duplicate = Object.values(data.orders).find(order => order.userId === interaction.user.id && !order.closedAt);
+    if (duplicate) {
+      await interaction.reply({ content: `❌ Du hast bereits eine offene Bestellung **${duplicate.id}**.`, ephemeral: true });
+      return;
+    }
+    const modal = new ModalBuilder().setCustomId('selling_cart_checkout_modal').setTitle('Warenkorb bestellen');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('details').setLabel('Auftrag / Wünsche').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1500)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('references').setLabel('Referenzen / Links').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1000)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('deadline').setLabel('Wunschtermin').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(100)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('coupon').setLabel('Rabattcode').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(30)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('notes').setLabel('Zusätzliche Hinweise').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(800)),
+    );
+    await interaction.showModal(modal);
+  }
+}
+
+async function createCartOrderFromModal(interaction) {
+  if (!interaction.inGuild()) return;
+  const { store, data } = getGuildShopData(interaction.guildId);
+  const cart = cartForUser(data, interaction.user.id);
+  if (!cart.items.length) {
+    await interaction.reply({ content: '🛒 Dein Warenkorb ist leer.', ephemeral: true });
+    return;
+  }
+  if (data.blacklist[interaction.user.id] || data.config.availability === 'closed') {
+    await interaction.reply({ content: '❌ Checkout ist aktuell nicht möglich.', ephemeral: true });
+    return;
+  }
+  const duplicate = Object.values(data.orders).find(order => order.userId === interaction.user.id && !order.closedAt);
+  if (duplicate) {
+    await interaction.reply({ content: `❌ Du hast bereits eine offene Bestellung **${duplicate.id}**.`, ephemeral: true });
+    return;
+  }
+  const couponState = getCouponState(data, interaction.fields.getTextInputValue('coupon'));
+  if (couponState.error) {
+    await interaction.reply({ content: `❌ Rabattcode ungültig: ${couponState.error}`, ephemeral: true });
+    return;
+  }
+  const loyalty = loyaltyForUser(data, interaction.user.id);
+  const orderId = nextOrderId(data);
+  const keys = [...new Set(cart.items)];
+  const revisions = Math.max(...keys.map(key => Number(PRODUCT_TYPES[key]?.revisions || 0)), 0);
+  const order = {
+    id: orderId, userId: interaction.user.id, productKey: keys.length === 1 ? keys[0] : 'cart', cartItems: keys,
+    details: interaction.fields.getTextInputValue('details').trim(), references: interaction.fields.getTextInputValue('references').trim(),
+    deadline: interaction.fields.getTextInputValue('deadline').trim(), notes: interaction.fields.getTextInputValue('notes').trim(),
+    couponCode: couponState.code, discountPercent: couponState.coupon ? Number(couponState.coupon.percent || 0) : 0,
+    loyaltyDiscountPercent: loyalty.discount, loyaltyLabel: loyalty.level?.label || null,
+    basePrice: null, finalPrice: null, status: 'pending', revisionsRemaining: revisions, assignedTo: null,
+    createdAt: Date.now(), paidAt: null, deliveredAt: null, closedAt: null, channelId: null, deliveryChannelId: null,
+    licenseId: null, reviewSubmitted: false,
+  };
+  data.orders[orderId] = order;
+  if (couponState.coupon) couponState.coupon.uses = Number(couponState.coupon.uses || 0) + 1;
+  data.carts[interaction.user.id] = { items: [], updatedAt: Date.now() };
+  saveSellingStore(store);
+
+  const category = findSellingCategory(interaction.guild, SELLING.categories.orders);
+  if (!category) {
+    order.closedAt = Date.now();
+    saveSellingStore(store);
+    await interaction.reply({ content: '❌ Die Kauf-Ticket-Kategorie fehlt. Führe `/setup server selling` erneut aus.', ephemeral: true });
+    return;
+  }
+  let channel;
+  try {
+    channel = await interaction.guild.channels.create({
+      name: `${orderId.toLowerCase()}-cart-${sanitizeName(interaction.user.username)}`.slice(0, 95),
+      type: ChannelType.GuildText, parent: category.id,
+      topic: `selling-owner:${interaction.user.id}|selling-kind:order|selling-order:${orderId}|selling-product:cart|selling-status:open`,
+      permissionOverwrites: sellingTicketOverwrites(interaction.guild, interaction.user.id),
+      reason: `Selling Warenkorb ${orderId} von ${interaction.user.tag}`,
+    });
+  } catch (error) {
+    order.closedAt = Date.now(); order.failedAt = Date.now();
+    data.carts[interaction.user.id] = { items: keys, updatedAt: Date.now() };
+    if (couponState.coupon) couponState.coupon.uses = Math.max(0, Number(couponState.coupon.uses || 0) - 1);
+    saveSellingStore(store); throw error;
+  }
+  order.channelId = channel.id;
+  saveSellingStore(store);
+  await channel.send({ content: `<@${interaction.user.id}>`, embeds: [orderInfoEmbed(order, data)], components: orderActionRows(order), allowedMentions: { users: [interaction.user.id] } });
+  const internal = findSellingTextChannel(interaction.guild, '📦・bestellungen');
+  if (internal) await internal.send({ embeds: [shopEmbed(`🛒 Neue Warenkorb-Bestellung ${orderId}`, `<@${interaction.user.id}>\n${keys.map(key => `${PRODUCT_TYPES[key].emoji} ${PRODUCT_TYPES[key].label}`).join('\n')}\nTicket: <#${channel.id}>`)], allowedMentions: { parse: [] } }).catch(() => {});
+  await refreshOrderStatusPanel(interaction.guild, data).catch(() => {});
+  const q = queueInfoForOrder(data, order);
+  await interaction.reply({ content: `✅ Warenkorb-Bestellung **${orderId}** erstellt: <#${channel.id}>${q.position ? `\nQueue-Position: **#${q.position} von ${q.total}**` : ''}`, ephemeral: true });
+  await logSelling(interaction.guild, '🛒 Neue Warenkorb-Bestellung', `<@${interaction.user.id}> hat **${orderId}** erstellt: <#${channel.id}>`);
 }
 
 async function showOrderModal(interaction, productKey) {
@@ -953,6 +1364,7 @@ async function createOrderFromModal(interaction, productKey) {
     return;
   }
 
+  const loyalty = loyaltyForUser(data, interaction.user.id);
   const orderId = nextOrderId(data);
   const order = {
     id: orderId,
@@ -964,6 +1376,8 @@ async function createOrderFromModal(interaction, productKey) {
     notes: interaction.fields.getTextInputValue('notes').trim(),
     couponCode: couponState.code,
     discountPercent: couponState.coupon ? Number(couponState.coupon.percent || 0) : 0,
+    loyaltyDiscountPercent: loyalty.discount,
+    loyaltyLabel: loyalty.level?.label || null,
     basePrice: null,
     finalPrice: null,
     status: 'pending',
@@ -1013,7 +1427,7 @@ async function createOrderFromModal(interaction, productKey) {
 
   await channel.send({
     content: `<@${interaction.user.id}>`,
-    embeds: [orderInfoEmbed(order)],
+    embeds: [orderInfoEmbed(order, data)],
     components: orderActionRows(order),
     allowedMentions: { users: [interaction.user.id] },
   });
@@ -1026,8 +1440,10 @@ async function createOrderFromModal(interaction, productKey) {
     }).catch(() => {});
   }
 
+  await refreshOrderStatusPanel(interaction.guild, data).catch(() => {});
+  const queue = queueInfoForOrder(data, order);
   await interaction.reply({
-    content: `✅ Bestellung **${orderId}** wurde erstellt: <#${channel.id}>\nDas Team bestätigt dort Preis, Lieferumfang und PayPal-Zahlung.`,
+    content: `✅ Bestellung **${orderId}** wurde erstellt: <#${channel.id}>\nDas Team bestätigt dort Preis, Lieferumfang und PayPal-Zahlung.${queue.position ? `\nQueue-Position: **#${queue.position} von ${queue.total}**` : ''}`,
     ephemeral: true,
   });
   await logSelling(interaction.guild, '🛒 Neue Bestellung', `<@${interaction.user.id}> hat **${orderId} • ${product.label}** erstellt: <#${channel.id}>`);
@@ -1131,10 +1547,13 @@ async function archiveSellingTranscript(channel, title, extra = '') {
 async function grantBuyerRoles(guild, order) {
   const member = await guild.members.fetch(order.userId).catch(() => null);
   if (!member) return;
-  const customer = findSellingRole(guild, 'customer');
-  const productRole = findSellingRole(guild, PRODUCT_TYPES[order.productKey]?.roleKey);
-  const roles = [customer, productRole].filter(Boolean);
-  if (roles.length) await member.roles.add(roles, `Selling Bestellung ${order.id} geliefert`).catch(() => {});
+  const customerRole = findSellingRole(guild, 'customer');
+  if (customerRole) await member.roles.add(customerRole, `Selling Bestellung ${order.id}`).catch(() => {});
+  for (const key of orderProductKeys(order)) {
+    const product = PRODUCT_TYPES[key];
+    const productRole = product?.roleKey ? findSellingRole(guild, product.roleKey) : null;
+    if (productRole) await member.roles.add(productRole, `Selling Kauf ${order.id}`).catch(() => {});
+  }
 }
 
 function licenseText(guild, order, license) {
@@ -1144,7 +1563,7 @@ function licenseText(guild, order, license) {
     `Lizenz-ID: ${license.id}`,
     `Bestellung: ${order.id}`,
     `Käufer Discord-ID: ${order.userId}`,
-    `Produkt: ${PRODUCT_TYPES[order.productKey]?.label || order.productKey}`,
+    `Produkt(e): ${orderProductLabel(order)}`,
     `Ausgestellt: ${new Date(license.issuedAt).toISOString()}`,
     `Käuferkennzeichnung: ${license.buyerMarker}`,
     '',
@@ -1152,8 +1571,9 @@ function licenseText(guild, order, license) {
     'Persönliche, nicht übertragbare Nutzungslizenz im im Ticket vereinbarten Umfang.',
     'Weiterverkauf, Leak, Reupload, unerlaubte Weitergabe oder Unterlizenzierung sind nicht gestattet.',
     '',
-    'Diese Datei ist eine Zuordnungs-/Lizenzdatei. Der Bot verändert Produktdateien nicht automatisch.',
-    'Die Käuferkennzeichnung kann vom Shop-Team bei eigenen Dateien zusätzlich als Wasserzeichen/Marker eingebettet werden.',
+    'Diese Datei ist eine Zuordnungs-/Lizenzdatei.',
+    'Bildlieferungen können mit /sell watermark sichtbar und wiederholt mit Bestell-, Lizenz- und Käuferkennung markiert werden.',
+    'Andere Dateitypen werden nicht als unsichtbar wassergezeichnet ausgegeben, sofern dafür kein gesonderter Prozess vereinbart wurde.',
     '',
     `Server: ${guild.name} (${guild.id})`,
   ].join('\n');
@@ -1164,21 +1584,8 @@ async function deliverOrder(guild, orderId, actorId = null) {
   const order = data.orders[orderId];
   if (!order) throw new Error('Bestellung nicht gefunden.');
 
-  const product = PRODUCT_TYPES[order.productKey] || { label: order.productKey, emoji: '📦' };
-  if (!order.licenseId) {
-    const id = createLicenseId(data, order.id);
-    const license = {
-      id,
-      orderId: order.id,
-      userId: order.userId,
-      productKey: order.productKey,
-      issuedAt: Date.now(),
-      active: true,
-      buyerMarker: `UFBUY-${guild.id.slice(-5)}-${order.userId}-${order.id}`,
-    };
-    data.licenses[id] = license;
-    order.licenseId = id;
-  }
+  const product = { label: orderProductLabel(order), emoji: orderProductEmoji(order) };
+  ensureOrderLicense(data, order);
   order.status = 'delivered';
   order.deliveredAt ||= Date.now();
 
@@ -1203,6 +1610,8 @@ async function deliverOrder(guild, orderId, actorId = null) {
 
   const license = data.licenses[order.licenseId];
   const attachment = new AttachmentBuilder(Buffer.from(licenseText(guild, order, license), 'utf8'), { name: `${license.id}.txt` });
+  const receiptBuffer = await buildReceiptPdf(guild, order, license);
+  const receiptAttachment = new AttachmentBuilder(receiptBuffer, { name: `${order.id}-Bestellbeleg.pdf` });
   const reviewRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`selling_review_open:${order.id}`).setLabel('Bewertung abgeben').setEmoji('⭐').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(`selling_revision:${order.id}`).setLabel(`Revision anfragen (${Math.max(0, Number(order.revisionsRemaining || 0))})`).setEmoji('🔄').setStyle(ButtonStyle.Secondary),
@@ -1212,7 +1621,7 @@ async function deliverOrder(guild, orderId, actorId = null) {
     await deliveryChannel.send({
       content: `<@${order.userId}>`,
       embeds: [shopEmbed(`${product.emoji} Lieferung • ${order.id}`, `Deine Bestellung wurde als **geliefert** markiert.\n\n**Produkt:** ${product.label}\n**Lizenz:** \`${order.licenseId}\`\n**Käuferkennzeichnung:** \`${license.buyerMarker}\`\n\nDie eigentlichen Produktdateien werden hier vom Shop-Team bereitgestellt. Bewahre deine Lizenz-ID für Support und Updates auf.`)],
-      files: [attachment],
+      files: [attachment, receiptAttachment],
       components: [reviewRow],
       allowedMentions: { users: [order.userId] },
     });
@@ -1239,6 +1648,12 @@ async function deliverOrder(guild, orderId, actorId = null) {
   }
 
   saveSellingStore(store);
+  const loyaltyStatus = await applyLoyaltyRole(guild, data, order.userId).catch(() => null);
+  saveSellingStore(store);
+  await refreshOrderStatusPanel(guild, data).catch(() => {});
+  if (loyaltyStatus?.level && deliveryChannel?.isTextBased()) {
+    await deliveryChannel.send({ embeds: [shopEmbed('💠 Kundenstatus aktualisiert', `Du hast jetzt **${loyaltyStatus.level.label}** mit **${loyaltyStatus.discount}% Stammkundenrabatt** für zukünftige Bestellungen.`)] }).catch(() => {});
+  }
   return { order, deliveryChannel, license };
 }
 
@@ -1260,6 +1675,7 @@ async function setOrderStatus(guild, orderId, status, actorId) {
   if (status === 'disputed') order.disputedAt ||= Date.now();
   order.updatedAt = Date.now();
   saveSellingStore(store);
+  await refreshOrderStatusPanel(guild, data).catch(() => {});
 
   const channel = order.channelId ? await guild.channels.fetch(order.channelId).catch(() => null) : null;
   if (channel?.isTextBased()) {
@@ -1367,7 +1783,7 @@ async function submitReview(interaction, orderId) {
 
   const reviewsChannel = findSellingTextChannel(interaction.guild, '⭐・bewertungen');
   if (reviewsChannel) {
-    const product = PRODUCT_TYPES[order.productKey] || { label: order.productKey, emoji: '📦' };
+    const product = { label: orderProductLabel(order), emoji: orderProductEmoji(order) };
     await reviewsChannel.send({
       embeds: [shopEmbed(`${'⭐'.repeat(stars)} Bewertung • ${product.label}`, text, [
         { name: 'Kunde', value: `<@${interaction.user.id}>`, inline: true },
@@ -1383,8 +1799,8 @@ async function submitReview(interaction, orderId) {
 async function handleFaqButton(interaction, key) {
   const answers = {
     payment: '**Zahlung:** Ausschließlich PayPal. Der exakte Betrag und die gültige Empfängeradresse werden in deinem privaten Kauf-Ticket bestätigt. Bezahle niemals nur aufgrund einer DM.',
-    delivery: '**Lieferung:** Die Richtwerte hängen vom Produkt ab. Im Ticket bestätigt das Team den konkreten Umfang und die erwartete Lieferzeit. Nach Lieferung erhältst du einen privaten Kundenbereich.',
-    license: '**Lizenz:** Standardmäßig erhält nur der Käufer eine persönliche, nicht übertragbare Nutzungslizenz. Weiterverkauf, Leak, Reupload und unerlaubte Weitergabe sind verboten.',
+    delivery: '**Lieferung:** Deine Bestellung läuft in einer automatischen Warteschlange. Queue-Position und ETA sind Schätzwerte. Nach Lieferung erhältst du einen privaten Kundenbereich mit Lizenzdatei und PDF-Bestellbeleg.',
+    license: '**Lizenz:** Standardmäßig erhält nur der Käufer eine persönliche, nicht übertragbare Nutzungslizenz. Bildlieferungen können eine eindeutige Käufer-/Lizenz-Watermark tragen. Weiterverkauf, Leak, Reupload und unerlaubte Weitergabe sind verboten.',
     support: '**Support:** Nutze den Support-Ticket-Bereich für Installation, Zahlungsfragen, Lieferprobleme oder allgemeine Hilfe. Sende niemals Passwörter oder 2FA-Codes.',
   };
   await interaction.reply({ content: answers[key] || 'Keine FAQ-Information gefunden.', ephemeral: true });
@@ -1471,6 +1887,7 @@ async function handleOrderTicketButton(interaction) {
     order.closedAt = Date.now();
     order.channelId = null;
     saveSellingStore(store);
+    await refreshOrderStatusPanel(interaction.guild, data).catch(() => {});
     await logSelling(interaction.guild, `🔒 Bestellung geschlossen • ${id}`, `<@${interaction.user.id}> hat das Ticket geschlossen.`);
     setTimeout(() => interaction.channel.delete(`Selling Bestellung ${id} geschlossen`).catch(() => {}), 2500);
   }
@@ -1498,7 +1915,9 @@ async function refreshOrderStatusPanel(guild, data) {
   const deliveryLines = Object.values(PRODUCT_TYPES)
     .map(product => `${product.emoji} **${product.label}:** ${product.delivery}`)
     .join('\n');
-  const embed = shopEmbed('📊 Bestellstatus & Lieferzeiten', `${availabilityLabel(data.config.availability)}${data.config.availabilityNote ? `\n${data.config.availabilityNote}` : ''}\n\n**Ungefähre Richtwerte**\n${deliveryLines}\n\nDer konkrete Termin wird immer im Kauf-Ticket bestätigt.`);
+  const queue = activeQueue(data);
+  const nextLines = queue.slice(0, 5).map((order, index) => `**#${index + 1}** • ${order.id} • ${orderProductLabel(order)}`).join('\n') || '*Keine aktiven Aufträge.*';
+  const embed = shopEmbed('📊 Bestellstatus & Lieferzeiten', `${availabilityLabel(data.config.availability)}${data.config.availabilityNote ? `\n${data.config.availabilityNote}` : ''}\n\n**Aktive Warteschlange:** ${queue.length} Auftrag/Aufträge\n${nextLines}\n\n**Ungefähre Richtwerte**\n${deliveryLines}\n\nETA-Angaben sind Schätzwerte. Der konkret bestätigte Termin im Kauf-Ticket hat Vorrang.`);
   const messages = await channel.messages.fetch({ limit: 25 }).catch(() => null);
   const existing = messages?.find(message => message.author.id === guild.members.me?.id && message.embeds?.[0]?.title?.startsWith('📊 Bestellstatus'));
   if (existing) return existing.edit({ embeds: [embed] }).catch(() => null);
@@ -1543,7 +1962,7 @@ async function handleSellCommand(interaction) {
     }
 
     if (action === 'info') {
-      await interaction.reply({ embeds: [orderInfoEmbed(order)], ephemeral: true, allowedMentions: { parse: [] } });
+      await interaction.reply({ embeds: [orderInfoEmbed(order, data)], ephemeral: true, allowedMentions: { parse: [] } });
       return;
     }
     if (action === 'assign') {
@@ -1560,14 +1979,14 @@ async function handleSellCommand(interaction) {
         return;
       }
       order.basePrice = Math.round(Number(amount) * 100) / 100;
-      const discount = Math.max(0, Math.min(90, Number(order.discountPercent || 0)));
+      const discount = effectiveDiscountForOrder(order);
       order.finalPrice = Math.round(order.basePrice * (1 - discount / 100) * 100) / 100;
       saveSellingStore(store);
       const channel = order.channelId ? await interaction.guild.channels.fetch(order.channelId).catch(() => null) : null;
       if (channel?.isTextBased()) {
         const paypal = data.config.paypalEmail ? `\n**PayPal-Empfänger:** \`${data.config.paypalEmail}\`` : '\n**PayPal-Empfänger:** wird vom Team im Ticket bestätigt';
         await channel.send({
-          embeds: [shopEmbed(`💳 Preis bestätigt • ${id}`, `Grundpreis: **${formatEuro(order.basePrice)}**${discount ? `\nRabatt: **${discount} %**\nEndpreis: **${formatEuro(order.finalPrice)}**` : ''}${paypal}\n\nBitte erst nach dieser Bestätigung bezahlen.`)],
+          embeds: [shopEmbed(`💳 Preis bestätigt • ${id}`, `Grundpreis: **${formatEuro(order.basePrice)}**${discount ? `\nAngewendeter Rabatt: **${discount} %**\nEndpreis: **${formatEuro(order.finalPrice)}**` : ''}${paypal}\n\nBitte erst nach dieser Bestätigung bezahlen.`)],
         }).catch(() => {});
       }
       await interaction.reply({ content: `✅ Preis für **${id}**: **${formatEuro(order.finalPrice)}**.`, ephemeral: true });
@@ -1611,7 +2030,8 @@ async function handleSellCommand(interaction) {
       return;
     }
     const text = licenses.slice(0, 10).map(license => {
-      const product = PRODUCT_TYPES[license.productKey]?.label || license.productKey;
+      const keys = Array.isArray(license.productKeys) && license.productKeys.length ? license.productKeys : [license.productKey].filter(Boolean);
+      const product = keys.map(key => PRODUCT_TYPES[key]?.label || key).join(' + ') || 'Unbekannt';
       return `🔐 \`${license.id}\`\nBestellung: **${license.orderId}** • ${product}\nKunde: <@${license.userId}> • Status: **${license.active ? 'Aktiv' : 'Inaktiv'}**\nMarker: \`${license.buyerMarker}\``;
     }).join('\n\n');
     await interaction.reply({ embeds: [shopEmbed('🔐 Lizenzprüfung', text)], ephemeral: true, allowedMentions: { parse: [] } });
@@ -1756,6 +2176,49 @@ async function handleSellCommand(interaction) {
     return;
   }
 
+
+  if (sub === 'queue') {
+    const queue = activeQueue(data);
+    const text = queue.length ? queue.slice(0, 25).map((order, index) => {
+      const q = queueInfoForOrder(data, order);
+      return `**#${index + 1}** • ${order.id} • <@${order.userId}> • ${orderProductLabel(order)}\nStatus: ${orderStatusLabel(order.status)} • ETA: <t:${Math.floor(q.etaFinish / 1000)}:d>`;
+    }).join('\n\n') : 'Keine aktiven Aufträge.';
+    await interaction.reply({ embeds: [shopEmbed('⏱️ Auftrags-Warteschlange', text)], ephemeral: true, allowedMentions: { parse: [] } });
+    return;
+  }
+
+  if (sub === 'receipt') {
+    const id = String(interaction.options.getString('order') || '').trim().toUpperCase();
+    const order = data.orders[id];
+    if (!order) { await interaction.reply({ content: '❌ Bestellung nicht gefunden.', ephemeral: true }); return; }
+    const license = ensureOrderLicense(data, order);
+    saveSellingStore(store);
+    const buffer = await buildReceiptPdf(interaction.guild, order, license);
+    await interaction.reply({ content: `📄 Bestellbeleg für **${id}**`, files: [new AttachmentBuilder(buffer, { name: `${id}-Bestellbeleg.pdf` })], ephemeral: true });
+    return;
+  }
+
+  if (sub === 'watermark') {
+    const id = String(interaction.options.getString('order') || '').trim().toUpperCase();
+    const attachment = interaction.options.getAttachment('datei');
+    const order = data.orders[id];
+    if (!order) { await interaction.reply({ content: '❌ Bestellung nicht gefunden.', ephemeral: true }); return; }
+    await interaction.deferReply({ ephemeral: true });
+    const result = await watermarkOrderImage(interaction.guild, data, order, attachment);
+    saveSellingStore(store);
+    await interaction.editReply({ content: `🕵️ Watermark erstellt für **${id}**. Marker: \`${result.marker}\``, files: [new AttachmentBuilder(result.buffer, { name: result.fileName })] });
+    await logSelling(interaction.guild, `🕵️ Watermark • ${id}`, `<@${interaction.user.id}> hat eine Liefergrafik für <@${order.userId}> mit Lizenz-/Käuferkennung versehen.`);
+    return;
+  }
+
+  if (sub === 'loyalty') {
+    const user = interaction.options.getUser('user');
+    const status = loyaltyForUser(data, user.id);
+    const next = [...LOYALTY_LEVELS].reverse().find(entry => status.count < entry.minOrders);
+    await interaction.reply({ embeds: [shopEmbed(`💠 Kundenstatus • ${user.username}`, `Gelieferte Bestellungen: **${status.count}**\nAktueller Status: **${status.level?.label || 'Standard'}**\nStammkundenrabatt: **${status.discount}%**${next ? `\nNächste Stufe: **${next.label}** ab ${next.minOrders} Lieferungen` : '\nHöchste Stufe erreicht.'}`)], ephemeral: true });
+    return;
+  }
+
   if (sub === 'paypal') {
     const email = interaction.options.getString('email');
     if (email) {
@@ -1840,7 +2303,7 @@ async function runSellingSetup(interaction) {
       `🗑️ Gelöschte alte normale Rollen: **${deleted.deletedRoles}**`,
       deleted.skippedManagedRoles.length ? `🔒 Nicht löschbare Discord-/Bot-Systemrollen: **${deleted.skippedManagedRoles.length}**` : null,
       '',
-      'Neu erstellt wurden professionelle Bereiche für **Thumbnails, NVE/Grafik-Setups, Soundpacks, Designs, FiveM-Assets, Bundles, PayPal-Zahlungen, Lizenzregeln, Support, Kauf-Tickets und Team-Verwaltung**.',
+      'Neu erstellt wurden professionelle Bereiche für **Thumbnails, NVE/Grafik-Setups, Soundpacks, Designs, FiveM-Assets, Bundles, Warenkorb, PayPal, PDF-Belege, Käufer-Watermarking, Lizenzen, Stammkunden/VIP, Queue/ETA, Support, Kauf-Tickets und Team-Verwaltung**.',
       'Der bisherige Command-Channel wird als letzter alter Channel nach dieser Meldung ebenfalls entfernt.',
     ].filter(Boolean).join('\n'));
 
@@ -1878,6 +2341,21 @@ async function handleSellingInteraction(interaction) {
 
   if (interaction.isChatInputCommand?.() && interaction.commandName === 'sell') {
     await handleSellCommand(interaction);
+    return true;
+  }
+
+  if (interaction.isButton?.() && (
+    String(interaction.customId || '').startsWith('selling_cart_add:')
+    || interaction.customId === 'selling_cart_view'
+    || interaction.customId === 'selling_cart_checkout'
+    || interaction.customId === 'selling_cart_clear'
+  )) {
+    await handleCartButton(interaction);
+    return true;
+  }
+
+  if (interaction.isModalSubmit?.() && interaction.customId === 'selling_cart_checkout_modal') {
+    await createCartOrderFromModal(interaction);
     return true;
   }
 
