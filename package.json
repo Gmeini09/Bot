@@ -1,10 +1,11 @@
 {
   "name": "community-allround-bot",
-  "version": "5.0.0",
-  "description": "Discord community allround bot v11 with full server setup, permanent command panels, analytics, weekly reports, ticket SLA, module manager, auto backups, GitHub changelogs and security",
+  "version": "5.1.0",
+  "description": "Discord community allround bot with Unfugstifter selling server setup",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
+    "start": "node selling-entry.js",
+    "start:core": "node index.js",
     "deploy": "node deploy-commands.js"
   },
   "engines": {
