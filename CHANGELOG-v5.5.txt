@@ -1,0 +1,27 @@
+UNFUGSTIFTER SELLING v5.5
+
++ Persistente Bestellungen mit UF-Nummern
++ Bestellformular per Modal
++ PayPal-Konfiguration
++ Preis-/Rabattberechnung
++ Rabattcodes mit Nutzungs-/Ablauflimit
++ Status: offen, bezahlt, Bearbeitung, geliefert, Streitfall
++ Staff-Zuweisung
++ Käufer- und Produktrollen
++ Lizenzsystem + Käuferkennzeichnung
++ Privater Delivery-Bereich pro Bestellung
++ Lizenz-TXT pro Lieferung
++ Revisionen
++ Ticket-Transkripte
++ Verifizierte Bewertungen
++ Blacklist
++ Portfolio-Verwaltung
++ Shop-Auslastung + Lieferzeiten
++ Produkt-Updates mit Käufer-Ping
++ Owner-Dashboard
++ Interaktive FAQ
++ Full Reset aus v5.4 bleibt erhalten
++ Slash-Command-Registrierung auf neu beigetretenen Servern bleibt erhalten
+
+Hinweis Anti-Leak:
+Die Version erstellt eindeutige Käufer-/Lizenzmarker und dokumentiert sie. Sie verändert Produktdateien nicht automatisch binär. Für echte eingebettete Wasserzeichen braucht jedes Dateiformat einen eigenen Watermark-Prozess.
