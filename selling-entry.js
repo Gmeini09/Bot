@@ -10,6 +10,7 @@ const {
   Client,
   EmbedBuilder,
   Events,
+  FileUploadBuilder,
   ModalBuilder,
   PermissionFlagsBits,
   REST,
@@ -21,6 +22,9 @@ const fs = require('fs');
 const path = require('path');
 const PDFDocument = require('pdfkit');
 const sharp = require('sharp');
+const http = require('http');
+const crypto = require('crypto');
+const QRCode = require('qrcode');
 
 // Turbo Design Branding Banner (embedded so Railway only needs selling-entry.js + package.json)
 const TURBO_DESIGN_BANNER_NAME = 'turbo-design-banner.jpeg';
@@ -62,6 +66,7 @@ const SELLING = {
     { name: '🔊・SOUNDPACK KÄUFER', key: 'buyer_soundpack', color: 0x57f287, hoist: false, permissions: [] },
     { name: '🎨・DESIGN KÄUFER', key: 'buyer_grafik', color: 0xeb459e, hoist: false, permissions: [] },
     { name: '🚗・FIVEM KÄUFER', key: 'buyer_fivem', color: 0xfee75c, hoist: false, permissions: [] },
+    { name: '🤖・BOT KÄUFER', key: 'buyer_bot', color: 0x5865f2, hoist: false, permissions: [] },
     { name: '📦・BUNDLE KÄUFER', key: 'buyer_bundle', color: 0xe67e22, hoist: false, permissions: [] },
     { name: '🥉・STAMMKUNDE BRONZE', key: 'loyalty_bronze', color: 0xcd7f32, hoist: false, permissions: [] },
     { name: '🥈・STAMMKUNDE SILBER', key: 'loyalty_silver', color: 0xc0c0c0, hoist: false, permissions: [] },
@@ -80,6 +85,7 @@ const PRODUCT_TYPES = {
   soundpack: { label: 'Soundpack', emoji: '🔊', roleKey: 'buyer_soundpack', revisions: 1, delivery: '1–2 Tage', etaDays: 2 },
   grafik: { label: 'Grafik / Design', emoji: '🎨', roleKey: 'buyer_grafik', revisions: 2, delivery: '1–4 Tage', etaDays: 3 },
   fivem: { label: 'FiveM Asset', emoji: '🚗', roleKey: 'buyer_fivem', revisions: 1, delivery: 'nach Umfang', etaDays: 4 },
+  bot: { label: 'Custom Discord Bot', emoji: '🤖', roleKey: 'buyer_bot', revisions: 2, delivery: 'nach Umfang', etaDays: 4 },
   bundle: { label: 'Bundle / Komplettpaket', emoji: '📦', roleKey: 'buyer_bundle', revisions: 2, delivery: 'nach Umfang', etaDays: 4 },
 };
 
@@ -149,6 +155,41 @@ function firstAttachmentOf(collection) {
 }
 const SELLING_AUTOMATION_TICK_MS = 5 * 60 * 1000;
 let sellingAutomationLastBackupAt = 0;
+
+const TURBO_OUR_AD = `# 🚀・TURBO DESIGNS
+
+Du suchst **hochwertige Designs oder Custom Sachen für FiveM & Discord**?
+
+Dann schau gerne bei **Turbo Designs** vorbei! 👀
+
+## 🎨・WAS WIR ANBIETEN
+
+> 🖼️ **Thumbnails**
+> 🔊 **Custom Soundpacks**
+> 🌆 **Custom NVEs**
+> 🤖 **Custom Discord Bots**
+> 🎨 **Logos & Designs**
+> 🛠️ **Individuelle Anfertigungen**
+> ➕ **und vieles mehr**
+
+Bei uns bekommst du deine Sachen **nach deinen eigenen Vorstellungen** und nicht einfach irgendein 0815 Zeug.
+
+Für **NVEs und Soundpacks** nutzen wir außerdem eigene Tools wodurch wir vieles schnell und unkompliziert umsetzen können. ⚡
+
+## 🤝・PARTNERSCHAFTEN
+
+Wir sind auch offen für **Partnerschaften mit Communities, FiveM Servern, Shops und anderen Projekten**.
+
+Falls ihr Interesse an einer Partnerschaft habt könnt ihr euch jederzeit bei uns melden.
+
+## 🔗・SCHAU VORBEI
+
+> **Turbo Designs – Designs. FiveM. Discord.**
+
+**Discord:** [https://discord.gg/turbodesigns]
+
+Wir freuen uns auf euch! ❤️`;
+
 let sellingStoreCache = null;
 
 const sellingStorageDir = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || __dirname;
@@ -160,13 +201,26 @@ function blankGuildShopData() {
     nextOrder: 1,
     nextLicense: 1,
     nextPortfolio: 1,
+    nextOffer: 1,
+    nextVoucher: 1,
+    nextPartner: 1,
+    nextRefund: 1,
+    nextLeak: 1,
     orders: {},
     licenses: {},
     blacklist: {},
     coupons: {},
+    vouchers: {},
+    offers: {},
     portfolio: {},
     reviews: {},
     carts: {},
+    partnerApplications: {},
+    releases: {},
+    refunds: {},
+    leakReports: {},
+    expenses: {},
+    downloads: {},
     products: Object.fromEntries(Object.entries(PRODUCT_TYPES).map(([key, item]) => [key, { enabled: true, price: null, etaDays: item.etaDays, description: null }])),
     automation: {
       enabled: true,
@@ -177,6 +231,11 @@ function blankGuildShopData() {
       reminderHours: 24,
       autoCloseHours: 72,
       reviewReminderHours: 48,
+      deadlineWarnHours: 24,
+      noResponseHours: 48,
+      partnerRotationHours: 24,
+      lastPartnerRotationAt: 0,
+      ownerAlerts: true,
       lastTickAt: 0,
       lastHealthAt: 0,
       lastDailyReportDate: null,
@@ -189,6 +248,11 @@ function blankGuildShopData() {
       roleIds: {},
       staffDashboardMessageId: null,
       catalogMessageId: null,
+      customerMenuMessageId: null,
+      calendarMessageId: null,
+      partnerSpotlightMessageId: null,
+      teamListMessageId: null,
+      testMode: false,
     },
     security: {
       antiNuke: {
@@ -232,6 +296,43 @@ function migrateSellingStore(store) {
     changed = true;
   }
 
+  // v4 adds advanced automation: offers, vouchers, partner workflows,
+  // refunds/leak reports, one-time delivery tokens, archives and statistics.
+  if (version < 4) {
+    for (const data of Object.values(store.guilds || {})) {
+      if (!data || typeof data !== 'object') continue;
+      data.nextOffer ||= 1;
+      data.nextVoucher ||= 1;
+      data.nextPartner ||= 1;
+      data.nextRefund ||= 1;
+      data.nextLeak ||= 1;
+      data.vouchers ||= {};
+      data.offers ||= {};
+      data.partnerApplications ||= {};
+      data.releases ||= {};
+      data.refunds ||= {};
+      data.leakReports ||= {};
+      data.expenses ||= {};
+      data.downloads ||= {};
+      data.config ||= {};
+      if (typeof data.config.testMode !== 'boolean') data.config.testMode = false;
+      data.automation ||= {};
+      data.automation.deadlineWarnHours ||= 24;
+      data.automation.noResponseHours ||= 48;
+      data.automation.partnerRotationHours ||= 24;
+      data.automation.ownerAlerts = data.automation.ownerAlerts !== false;
+      for (const order of Object.values(data.orders || {})) {
+        if (!order || typeof order !== 'object') continue;
+        order.priority ||= 'normal';
+        order.waitingOn ||= order.paidAt ? 'staff' : 'customer';
+        order.lastActivityAt ||= order.createdAt || Date.now();
+        order.testMode = Boolean(order.testMode);
+      }
+    }
+    version = 4;
+    changed = true;
+  }
+
   store.version = version;
   return changed;
 }
@@ -266,12 +367,12 @@ function loadSellingStore() {
   if (sellingStoreCache) return sellingStoreCache;
   try {
     if (!fs.existsSync(sellingDataPath)) {
-      sellingStoreCache = { version: 3, guilds: {} };
+      sellingStoreCache = { version: 4, guilds: {} };
       return sellingStoreCache;
     }
     const parsed = JSON.parse(fs.readFileSync(sellingDataPath, 'utf8'));
     if (!parsed || typeof parsed !== 'object') {
-      sellingStoreCache = { version: 3, guilds: {} };
+      sellingStoreCache = { version: 4, guilds: {} };
       return sellingStoreCache;
     }
     parsed.version = Number(parsed.version || 1);
@@ -312,13 +413,26 @@ function ensureGuildShopData(store, guildId) {
   data.nextOrder = Number(data.nextOrder || 1);
   data.nextLicense = Number(data.nextLicense || 1);
   data.nextPortfolio = Number(data.nextPortfolio || 1);
+  data.nextOffer = Number(data.nextOffer || 1);
+  data.nextVoucher = Number(data.nextVoucher || 1);
+  data.nextPartner = Number(data.nextPartner || 1);
+  data.nextRefund = Number(data.nextRefund || 1);
+  data.nextLeak = Number(data.nextLeak || 1);
   data.orders = data.orders && typeof data.orders === 'object' ? data.orders : {};
   data.licenses = data.licenses && typeof data.licenses === 'object' ? data.licenses : {};
   data.blacklist = data.blacklist && typeof data.blacklist === 'object' ? data.blacklist : {};
   data.coupons = data.coupons && typeof data.coupons === 'object' ? data.coupons : {};
+  data.vouchers = data.vouchers && typeof data.vouchers === 'object' ? data.vouchers : {};
+  data.offers = data.offers && typeof data.offers === 'object' ? data.offers : {};
   data.portfolio = data.portfolio && typeof data.portfolio === 'object' ? data.portfolio : {};
   data.reviews = data.reviews && typeof data.reviews === 'object' ? data.reviews : {};
   data.carts = data.carts && typeof data.carts === 'object' ? data.carts : {};
+  data.partnerApplications = data.partnerApplications && typeof data.partnerApplications === 'object' ? data.partnerApplications : {};
+  data.releases = data.releases && typeof data.releases === 'object' ? data.releases : {};
+  data.refunds = data.refunds && typeof data.refunds === 'object' ? data.refunds : {};
+  data.leakReports = data.leakReports && typeof data.leakReports === 'object' ? data.leakReports : {};
+  data.expenses = data.expenses && typeof data.expenses === 'object' ? data.expenses : {};
+  data.downloads = data.downloads && typeof data.downloads === 'object' ? data.downloads : {};
   data.products = data.products && typeof data.products === 'object' ? data.products : {};
   for (const [key, item] of Object.entries(PRODUCT_TYPES)) {
     data.products[key] = { enabled: true, price: null, etaDays: item.etaDays, description: null, ...(data.products[key] || {}) };
@@ -456,7 +570,9 @@ function safeAscii(value) {
   return String(value ?? '').replace(/[^\x20-\x7E]/g, '?');
 }
 
-function buildReceiptPdf(guild, order, license) {
+async function buildReceiptPdf(guild, order, license) {
+  const qrPayload = license?.id ? `TURBO-LICENSE:${license.id}|ORDER:${order.id}|USER:${license.userId || orderRecipientId(order)}` : null;
+  const qrBuffer = qrPayload ? await QRCode.toBuffer(qrPayload, { type: 'png', width: 220, margin: 1 }).catch(() => null) : null;
   return new Promise((resolve, reject) => {
     try {
       const doc = new PDFDocument({ size: 'A4', margin: 54, info: { Title: `Bestellbeleg ${order.id}`, Author: 'Unfugstifter Shop' } });
@@ -490,6 +606,13 @@ function buildReceiptPdf(guild, order, license) {
         doc.font('Helvetica').text(` ${safeAscii(value)}`);
       }
 
+      if (qrBuffer) {
+        doc.moveDown();
+        doc.font('Helvetica-Bold').text('Lizenz-QR');
+        doc.image(qrBuffer, { fit: [120, 120], align: 'left' });
+        doc.font('Helvetica').fontSize(8).text('QR enthält Lizenz-ID, Bestellnummer und Lizenzinhaber-ID zur schnellen internen Prüfung.');
+      }
+
       doc.moveDown();
       doc.font('Helvetica-Bold').text('Hinweis');
       doc.font('Helvetica').fontSize(9).text(
@@ -510,7 +633,8 @@ function ensureOrderLicense(data, order) {
   const license = {
     id,
     orderId: order.id,
-    userId: order.userId,
+    userId: orderRecipientId(order),
+    buyerId: order.userId,
     productKey: order.productKey,
     productKeys: orderProductKeys(order),
     issuedAt: Date.now(),
@@ -595,12 +719,57 @@ function getCouponState(data, rawCode) {
   return { code, coupon, error: null };
 }
 
+function getVoucherState(data, rawCode) {
+  const code = String(rawCode || '').trim().toUpperCase();
+  if (!code) return { code: null, voucher: null, error: null };
+  const voucher = data.vouchers?.[code];
+  if (!voucher) return { code, voucher: null, error: 'Der Gutschein existiert nicht.' };
+  if (voucher.expiresAt && voucher.expiresAt <= Date.now()) return { code, voucher: null, error: 'Der Gutschein ist abgelaufen.' };
+  if (voucher.maxUses > 0 && Number(voucher.uses || 0) >= Number(voucher.maxUses)) return { code, voucher: null, error: 'Der Gutschein wurde vollständig eingelöst.' };
+  if (Number(voucher.remainingAmount ?? voucher.amount ?? 0) <= 0) return { code, voucher: null, error: 'Der Gutschein hat kein Restguthaben mehr.' };
+  return { code, voucher, error: null };
+}
+
+function getDiscountCodeState(data, rawCode) {
+  const code = String(rawCode || '').trim().toUpperCase();
+  if (!code) return { code: null, coupon: null, voucher: null, error: null };
+  const coupon = data.coupons?.[code];
+  if (coupon) {
+    const state = getCouponState(data, code);
+    return { code, coupon: state.coupon, voucher: null, error: state.error };
+  }
+  const voucherState = getVoucherState(data, code);
+  if (voucherState.voucher) return { code, coupon: null, voucher: voucherState.voucher, error: null };
+  return { code, coupon: null, voucher: null, error: 'Der Rabatt- oder Gutscheincode existiert nicht.' };
+}
+
+function calculateOrderFinalPrice(order) {
+  const base = Number(order.basePrice);
+  if (!Number.isFinite(base)) return null;
+  const percent = effectiveDiscountForOrder(order);
+  const fixed = Math.max(0, Number(order.voucherAmount || 0));
+  return Math.max(0, Math.round((base * (1 - percent / 100) - fixed) * 100) / 100);
+}
+
+function redeemDiscountCodeForPaidOrder(data, order) {
+  if (order.couponCode && !order.couponRedeemedAt) {
+    const state = getCouponState(data, order.couponCode);
+    if (state.error || !state.coupon) throw new Error(`Rabattcode ${order.couponCode} kann nicht mehr eingelöst werden: ${state.error || 'nicht verfügbar'}`);
+    state.coupon.uses = Number(state.coupon.uses || 0) + 1;
+    order.couponRedeemedAt = Date.now();
+  }
+  if (order.voucherCode && !order.voucherRedeemedAt) {
+    const state = getVoucherState(data, order.voucherCode);
+    if (state.error || !state.voucher) throw new Error(`Gutschein ${order.voucherCode} kann nicht mehr eingelöst werden: ${state.error || 'nicht verfügbar'}`);
+    const applied = Math.min(Number(order.voucherAmount || 0), Number(state.voucher.remainingAmount ?? state.voucher.amount ?? 0));
+    state.voucher.remainingAmount = Math.max(0, Number(state.voucher.remainingAmount ?? state.voucher.amount ?? 0) - applied);
+    state.voucher.uses = Number(state.voucher.uses || 0) + 1;
+    order.voucherRedeemedAt = Date.now();
+  }
+}
+
 function redeemCouponForPaidOrder(data, order) {
-  if (!order?.couponCode || order.couponRedeemedAt) return;
-  const state = getCouponState(data, order.couponCode);
-  if (state.error || !state.coupon) throw new Error(`Rabattcode ${order.couponCode} kann nicht mehr eingelöst werden: ${state.error || 'nicht verfügbar'}`);
-  state.coupon.uses = Number(state.coupon.uses || 0) + 1;
-  order.couponRedeemedAt = Date.now();
+  return redeemDiscountCodeForPaidOrder(data, order);
 }
 
 function findSellingTextChannel(guild, name) {
@@ -622,6 +791,418 @@ function findSellingRole(guild, key) {
   return guild.roles.cache.find(role => role.name === definition.name) || null;
 }
 
+
+
+const PRODUCT_ORDER_TEMPLATES = {
+  thumbnail: { details: 'Was soll auf das Thumbnail?', style: 'Stil (Clean / Dark / GTA / Gambo ...)', hint: 'Charaktere, Text, Logos, Farben, Format und gewünschte Stimmung.' },
+  nve: { details: 'Welche NVE-/Grafik-Anpassung?', style: 'Look / Stil / Farben', hint: 'Gewünschter Look, Helligkeit, Farben, Performance-Wünsche und Referenz.' },
+  soundpack: { details: 'Welche Sounds sollen angepasst werden?', style: 'Sound-Stil / Referenz', hint: 'Waffen, Reload, Fahrzeug, UI; gewünschter Stil und Beispiele.' },
+  grafik: { details: 'Was soll gestaltet werden?', style: 'Design-Stil', hint: 'Logo, Banner, Socials, Farben, Text, Abmessungen und Stil.' },
+  fivem: { details: 'Welches FiveM-Asset / Setup?', style: 'Server-/Design-Stil', hint: 'Ressource, Framework, Build, gewünschte Funktionen und Referenz.' },
+  bot: { details: 'Was soll der Discord Bot können?', style: 'Bot-Stil / Server-Design', hint: 'Commands, Panels, Rollen, Tickets, Automationen, Hosting und besondere Wünsche.' },
+  bundle: { details: 'Was soll im Bundle enthalten sein?', style: 'Gesamtstil', hint: 'Alle gewünschten Produkte, gemeinsamer Stil und Prioritäten.' },
+};
+
+const ORDER_PRIORITY = {
+  normal: { label: 'Normal', emoji: '⚪', rank: 1 },
+  high: { label: 'Hoch', emoji: '🟠', rank: 2 },
+  vip: { label: 'VIP', emoji: '💎', rank: 3 },
+  urgent: { label: 'Dringend', emoji: '🔴', rank: 4 },
+};
+
+function nextAdvancedId(data, counterKey, prefix, pad = 4) {
+  const number = Math.max(1, Number(data[counterKey] || 1));
+  data[counterKey] = number + 1;
+  return `${prefix}-${String(number).padStart(pad, '0')}`;
+}
+
+function orderRecipientId(order) {
+  return String(order?.giftRecipientId || order?.userId || '');
+}
+
+function orderBuyerId(order) {
+  return String(order?.userId || '');
+}
+
+function orderPriorityInfo(order) {
+  return ORDER_PRIORITY[order?.priority] || ORDER_PRIORITY.normal;
+}
+
+function waitingOnLabel(order) {
+  if (order?.waitingOn === 'customer') return '👤 Kunde';
+  if (order?.waitingOn === 'staff') return '🛠️ Team';
+  return '—';
+}
+
+function parseDiscordUserId(raw) {
+  const match = String(raw || '').match(/\d{16,22}/);
+  return match ? match[0] : null;
+}
+
+function parseDeadlineToTimestamp(raw, fallbackDays = null) {
+  const value = String(raw || '').trim();
+  if (!value) return fallbackDays ? Date.now() + Number(fallbackDays) * 86400000 : null;
+  const inDays = value.match(/(?:in\s*)?(\d+)\s*(?:tag|tage|tagen|d)\b/i);
+  if (inDays) return Date.now() + Math.max(1, Number(inDays[1])) * 86400000;
+  const de = value.match(/\b(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})\b/);
+  if (de) {
+    const year = Number(de[3].length === 2 ? `20${de[3]}` : de[3]);
+    const date = new Date(year, Number(de[2]) - 1, Number(de[1]), 18, 0, 0);
+    if (!Number.isNaN(date.getTime())) return date.getTime();
+  }
+  return fallbackDays ? Date.now() + Number(fallbackDays) * 86400000 : null;
+}
+
+function publicBaseUrl() {
+  const raw = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (raw) return raw;
+  const railway = String(process.env.RAILWAY_PUBLIC_DOMAIN || '').trim();
+  return railway ? `https://${railway.replace(/^https?:\/\//, '').replace(/\/+$/, '')}` : null;
+}
+
+function safeDownloadName(name) {
+  return String(name || 'download.bin').replace(/[\r\n"]/g, '_').slice(0, 180);
+}
+
+function findDownloadToken(token) {
+  const store = loadSellingStore();
+  for (const [guildId, raw] of Object.entries(store.guilds || {})) {
+    const data = ensureGuildShopData(store, guildId);
+    const entry = data.downloads?.[token];
+    if (entry) return { store, data, guildId, entry };
+  }
+  return null;
+}
+
+const originalHttpCreateServer = http.createServer;
+if (!http.__turboSellingDownloadPatch) {
+  http.__turboSellingDownloadPatch = true;
+  http.createServer = function patchedTurboCreateServer(...args) {
+    const originalListener = typeof args[0] === 'function' ? args[0] : null;
+    if (originalListener) {
+      args[0] = async function turboDownloadAwareListener(req, res) {
+        try {
+          const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+          const match = url.pathname.match(/^\/turbo-download\/([a-f0-9]{32,128})$/i);
+          if (match) {
+            const found = findDownloadToken(match[1]);
+            if (!found) {
+              res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+              res.end('Download nicht gefunden.');
+              return;
+            }
+            const { store, entry } = found;
+            if (entry.usedAt) {
+              res.writeHead(410, { 'Content-Type': 'text/plain; charset=utf-8' });
+              res.end('Dieser einmalige Download wurde bereits verwendet.');
+              return;
+            }
+            if (entry.expiresAt && Date.now() > entry.expiresAt) {
+              res.writeHead(410, { 'Content-Type': 'text/plain; charset=utf-8' });
+              res.end('Dieser Download-Link ist abgelaufen.');
+              return;
+            }
+            if (!entry.filePath || !fs.existsSync(entry.filePath)) {
+              res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+              res.end('Die Datei ist nicht mehr verfügbar.');
+              return;
+            }
+            const stat = fs.statSync(entry.filePath);
+            res.writeHead(200, {
+              'Content-Type': entry.contentType || 'application/octet-stream',
+              'Content-Length': stat.size,
+              'Content-Disposition': `attachment; filename="${safeDownloadName(entry.fileName)}"`,
+              'Cache-Control': 'no-store',
+            });
+            entry.usedAt = Date.now();
+            entry.downloadedAt = entry.usedAt;
+            saveSellingStore(store);
+            fs.createReadStream(entry.filePath).pipe(res);
+            return;
+          }
+        } catch (_) {}
+        return originalListener(req, res);
+      };
+    }
+    return originalHttpCreateServer.apply(this, args);
+  };
+}
+
+async function createOneTimeDownload(guild, data, order, attachment, buffer) {
+  const base = publicBaseUrl();
+  if (!base || !buffer?.length) return null;
+  const token = crypto.randomBytes(24).toString('hex');
+  const dir = path.join(sellingStorageDir, 'delivery-files', guild.id, order.id);
+  fs.mkdirSync(dir, { recursive: true });
+  const fileName = safeDownloadName(attachment?.name || `${order.id}-delivery.bin`);
+  const filePath = path.join(dir, `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${fileName}`);
+  fs.writeFileSync(filePath, buffer);
+  data.downloads[token] = {
+    token,
+    orderId: order.id,
+    userId: orderRecipientId(order),
+    buyerId: orderBuyerId(order),
+    fileName,
+    filePath,
+    contentType: attachment?.contentType || 'application/octet-stream',
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 7 * 24 * 3600000,
+    usedAt: null,
+  };
+  return { token, url: `${base}/turbo-download/${token}`, expiresAt: data.downloads[token].expiresAt };
+}
+
+async function alertSellingOwner(guild, title, description) {
+  const { data } = getGuildShopData(guild.id);
+  if (data.automation?.ownerAlerts === false) return;
+  const owner = await guild.fetchOwner().catch(() => null);
+  if (!owner) return;
+  await owner.send({ embeds: [shopEmbed(title, description)], allowedMentions: { parse: [] } }).catch(() => {});
+}
+
+
+function orderTicketStateSlug(order) {
+  if (order.disputedAt || order.status === 'disputed') return 'dispute';
+  if (order.acceptedAt || order.closedAt) return 'done';
+  if (order.deliveryReadyAt || order.status === 'delivered') return 'review';
+  if (order.waitingOn === 'customer') return 'wait-customer';
+  if (order.waitingOn === 'staff') return 'wait-staff';
+  if (order.status === 'processing') return 'work';
+  if (order.paidAt) return 'paid';
+  return 'pay';
+}
+
+async function autoRenameOrderTicket(guild, order) {
+  if (!order?.channelId) return null;
+  const channel = await guild.channels.fetch(order.channelId).catch(() => null);
+  if (!channel || channel.type !== ChannelType.GuildText) return null;
+  const customer = await guild.members.fetch(order.userId).catch(() => null);
+  const priority = orderPriorityInfo(order);
+  const prioritySlug = order.priority && order.priority !== 'normal' ? `${order.priority}-` : '';
+  const target = `${orderTicketStateSlug(order)}-${prioritySlug}${order.id.toLowerCase()}-${sanitizeName(customer?.user?.username || 'kunde')}`.slice(0, 95);
+  if (channel.name !== target) await channel.setName(target, `Selling Auto-Rename ${order.id}`).catch(() => {});
+  const nextTopic = [
+    `selling-owner:${order.userId}`,
+    'selling-kind:order',
+    `selling-order:${order.id}`,
+    `selling-product:${order.productKey || 'cart'}`,
+    `selling-status:${order.closedAt ? 'closed' : 'open'}`,
+    `selling-waiting:${order.waitingOn || 'none'}`,
+    `selling-priority:${order.priority || 'normal'}`,
+  ].join('|').slice(0, 1024);
+  if (channel.topic !== nextTopic) await channel.setTopic(nextTopic, `Selling Workflow Sync ${order.id}`).catch(() => {});
+  return channel;
+}
+
+async function fetchRecentOrderConversation(channel, limit = 12) {
+  if (!channel?.isTextBased?.()) return [];
+  const messages = await channel.messages.fetch({ limit: Math.min(25, Math.max(1, limit)) }).catch(() => null);
+  if (!messages) return [];
+  return [...messages.values()]
+    .filter(message => !message.author.bot && String(message.content || '').trim())
+    .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+    .slice(-limit)
+    .map(message => ({
+      userId: message.author.id,
+      text: String(message.content || '').replace(/\s+/g, ' ').slice(0, 220),
+      at: message.createdTimestamp,
+    }));
+}
+
+async function buildOrderConversationSummary(guild, order) {
+  const channel = order.channelId ? await guild.channels.fetch(order.channelId).catch(() => null) : null;
+  const recent = await fetchRecentOrderConversation(channel, 8);
+  const recentText = recent.length
+    ? recent.map(item => `• <@${item.userId}>: ${item.text}`).join('\n').slice(0, 1800)
+    : 'Noch keine relevante Textkommunikation.';
+  return {
+    recent,
+    text: [
+      `**Produkt:** ${orderProductLabel(order)}`,
+      `**Priorität:** ${orderPriorityInfo(order).emoji} ${orderPriorityInfo(order).label}`,
+      `**Status:** ${orderStatusLabel(order.status)}`,
+      `**Wartet auf:** ${waitingOnLabel(order)}`,
+      `**Zuständig:** ${order.assignedTo ? `<@${order.assignedTo}>` : 'nicht zugewiesen'}`,
+      `**Deadline:** ${order.dueAt ? `<t:${Math.floor(order.dueAt / 1000)}:F>` : (order.deadline || 'nicht gesetzt')}`,
+      `**Stil:** ${order.style || '—'}`,
+      `**Referenz:** ${order.referenceUploadUrl ? `[Upload](${order.referenceUploadUrl})` : (order.references || '—')}`,
+      '',
+      '**Letzte Kunden-/Teamnachrichten:**',
+      recentText,
+    ].join('\n').slice(0, 3900),
+  };
+}
+
+async function refreshPinnedOrderSummary(guild, data, order, force = false) {
+  if (!order?.channelId) return null;
+  const channel = await guild.channels.fetch(order.channelId).catch(() => null);
+  if (!channel?.isTextBased?.()) return null;
+  let message = order.summaryMessageId ? await channel.messages.fetch(order.summaryMessageId).catch(() => null) : null;
+  const summary = await buildOrderConversationSummary(guild, order);
+  const payload = {
+    embeds: [shopEmbed(`📌 Auftragsübersicht • ${order.id}`, summary.text)],
+    allowedMentions: { parse: [] },
+  };
+  if (message) await message.edit(payload).catch(() => { message = null; });
+  if (!message) {
+    message = await channel.send(payload).catch(() => null);
+    if (message) {
+      order.summaryMessageId = message.id;
+      await message.pin(`Selling Auftragsübersicht ${order.id}`).catch(() => {});
+    }
+  }
+  order.lastSummaryAt = Date.now();
+  if (force) saveSellingStore(loadSellingStore());
+  return message;
+}
+
+async function syncOrderWorkflow(guild, data, order, { pin = true } = {}) {
+  if (!order) return;
+  await autoRenameOrderTicket(guild, order).catch(() => {});
+  if (pin) await refreshPinnedOrderSummary(guild, data, order).catch(() => {});
+}
+
+function customerMenuRows() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('selling_customer:shop').setLabel('Shop').setEmoji('🛒').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('selling_customer:cart').setLabel('Warenkorb').setEmoji('🧺').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('selling_customer:orders').setLabel('Meine Käufe').setEmoji('📦').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_customer:licenses').setLabel('Meine Lizenzen').setEmoji('🔐').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_customer:support').setLabel('Support').setEmoji('🎫').setStyle(ButtonStyle.Success),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('selling_customer:gift').setLabel('Geschenk bestellen').setEmoji('🎁').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_customer:partner').setLabel('Partnerschaft').setEmoji('🤝').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_customer:refund').setLabel('Refund anfragen').setEmoji('💸').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_customer:leak').setLabel('Leak melden').setEmoji('🚨').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('selling_customer:faq').setLabel('FAQ').setEmoji('❓').setStyle(ButtonStyle.Secondary),
+    ),
+  ];
+}
+
+async function refreshCustomerMenu(guild, data) {
+  const channel = findSellingTextChannel(guild, '🧭・kunden-menü');
+  if (!channel) return null;
+  let message = data.config.customerMenuMessageId
+    ? await channel.messages.fetch(data.config.customerMenuMessageId).catch(() => null)
+    : null;
+  const payload = {
+    embeds: [shopEmbed('🧭 Turbo Designs • Kundenmenü', 'Alles an einem Ort: **Shop, Warenkorb, eigene Käufe, Lizenzen, Support, Geschenkbestellungen, Partnerschaften, Refunds und Leak-Meldungen**.\n\nDu brauchst dafür im normalen Ablauf keine Commands.')],
+    components: customerMenuRows(),
+    allowedMentions: { parse: [] },
+  };
+  if (message) await message.edit(payload).catch(() => { message = null; });
+  if (!message) {
+    message = await channel.send(payload);
+    data.config.customerMenuMessageId = message.id;
+  }
+  return message;
+}
+
+function staffPerformance(data) {
+  const stats = new Map();
+  for (const order of Object.values(data.orders || {})) {
+    if (!order.assignedTo || order.testMode) continue;
+    const record = stats.get(order.assignedTo) || { userId: order.assignedTo, assigned: 0, delivered: 0, accepted: 0, revenue: 0, deliveryMs: [] };
+    record.assigned += 1;
+    if (order.deliveredAt) {
+      record.delivered += 1;
+      record.revenue += Number(order.finalPrice ?? order.basePrice ?? 0);
+      if (order.processingAt && order.deliveredAt > order.processingAt) record.deliveryMs.push(order.deliveredAt - order.processingAt);
+    }
+    if (order.acceptedAt) record.accepted += 1;
+    stats.set(order.assignedTo, record);
+  }
+  return [...stats.values()].map(record => ({
+    ...record,
+    avgHours: record.deliveryMs.length ? record.deliveryMs.reduce((a, b) => a + b, 0) / record.deliveryMs.length / 3600000 : null,
+  })).sort((a, b) => b.delivered - a.delivered || b.accepted - a.accepted);
+}
+
+function staffStatsEmbed(data) {
+  const stats = staffPerformance(data);
+  const text = stats.length ? stats.slice(0, 20).map((s, i) =>
+    `**${i + 1}.** <@${s.userId}> • geliefert **${s.delivered}** / zugewiesen **${s.assigned}** • akzeptiert **${s.accepted}**${s.avgHours !== null ? ` • Ø ${s.avgHours.toFixed(1)}h` : ''}`
+  ).join('\n') : 'Noch keine Mitarbeiterdaten.';
+  return shopEmbed('🏆 Staff-Statistik', text);
+}
+
+function calendarEmbed(data) {
+  const orders = Object.values(data.orders || {})
+    .filter(order => !order.closedAt && !order.acceptedAt && order.dueAt)
+    .sort((a, b) => Number(a.dueAt) - Number(b.dueAt))
+    .slice(0, 25);
+  const text = orders.length ? orders.map(order => {
+    const prio = orderPriorityInfo(order);
+    return `${prio.emoji} **${order.id}** • ${orderProductLabel(order)} • <t:${Math.floor(order.dueAt / 1000)}:R> • ${order.assignedTo ? `<@${order.assignedTo}>` : 'offen'}`;
+  }).join('\n') : 'Keine aktiven Aufträge mit Deadline.';
+  return shopEmbed('📅 Auftragskalender', text);
+}
+
+async function refreshCalendarPanel(guild, data) {
+  const channel = findSellingTextChannel(guild, '📅・auftragskalender');
+  if (!channel) return null;
+  let message = data.config.calendarMessageId ? await channel.messages.fetch(data.config.calendarMessageId).catch(() => null) : null;
+  const payload = { embeds: [calendarEmbed(data)], allowedMentions: { parse: [] } };
+  if (message) await message.edit(payload).catch(() => { message = null; });
+  if (!message) {
+    message = await channel.send(payload);
+    data.config.calendarMessageId = message.id;
+  }
+  return message;
+}
+
+async function archiveCompletedProject(guild, order) {
+  if (!order || order.projectArchivedAt) return;
+  const channel = findSellingTextChannel(guild, '📁・projekt-archiv');
+  if (!channel) return;
+  await channel.send({
+    embeds: [shopEmbed(`📁 Projekt abgeschlossen • ${order.id}`, [
+      `**Kunde:** <@${order.userId}>`,
+      order.giftRecipientId ? `**Geschenk für:** <@${order.giftRecipientId}>` : null,
+      `**Produkt:** ${orderProductLabel(order)}`,
+      `**Preis:** ${formatEuro(order.finalPrice ?? order.basePrice)}`,
+      `**Lizenz:** \`${order.licenseId || '—'}\``,
+      `**Zuständig:** ${order.assignedTo ? `<@${order.assignedTo}>` : '—'}`,
+      `**Abgenommen:** ${order.acceptedAt ? `<t:${Math.floor(order.acceptedAt / 1000)}:F>` : '—'}`,
+    ].filter(Boolean).join('\n'))],
+    allowedMentions: { parse: [] },
+  }).catch(() => {});
+  order.projectArchivedAt = Date.now();
+}
+
+function currentMonthRange() {
+  const now = new Date();
+  return { start: new Date(now.getFullYear(), now.getMonth(), 1).getTime(), end: new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime() };
+}
+
+function financeReportEmbed(data) {
+  const { start, end } = currentMonthRange();
+  const orders = Object.values(data.orders || {}).filter(order => !order.testMode && order.paidAt >= start && order.paidAt < end);
+  const revenue = orders.reduce((sum, order) => sum + Number(order.finalPrice ?? order.basePrice ?? 0), 0);
+  const expenses = Object.values(data.expenses || {}).filter(item => item.at >= start && item.at < end);
+  const costs = expenses.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  return shopEmbed('💰 Monatsübersicht', `**Umsatz:** ${formatEuro(revenue)}\n**Erfasste Kosten:** ${formatEuro(costs)}\n**Differenz:** ${formatEuro(revenue - costs)}\n**Bezahlte Bestellungen:** ${orders.length}\n**Kostenpositionen:** ${expenses.length}\n\nHinweis: Diese interne Übersicht ist keine Steuerberatung oder Buchhaltungssoftware.`);
+}
+
+function productStatsEmbed(data) {
+  const counts = {};
+  for (const order of Object.values(data.orders || {})) {
+    if (order.testMode) continue;
+    for (const key of orderProductKeys(order)) {
+      const s = counts[key] ||= { orders: 0, delivered: 0, revenue: 0, revisions: 0 };
+      s.orders += 1;
+      if (order.deliveredAt) s.delivered += 1;
+      if (order.paidAt) s.revenue += Number(order.finalPrice ?? order.basePrice ?? 0);
+      s.revisions += Number(order.initialRevisions || PRODUCT_TYPES[key]?.revisions || 0) - Number(order.revisionsRemaining || 0);
+    }
+  }
+  const text = Object.entries(counts).sort((a, b) => b[1].orders - a[1].orders).map(([key, s]) =>
+    `${PRODUCT_TYPES[key]?.emoji || '📦'} **${PRODUCT_TYPES[key]?.label || key}** • ${s.orders} Aufträge • ${s.delivered} geliefert • ${formatEuro(s.revenue)}`
+  ).join('\n') || 'Noch keine Produktdaten.';
+  return shopEmbed('📊 Produkt-Statistik', text);
+}
 
 function buildSellCommandDefinition() {
   const productChoices = Object.entries(PRODUCT_TYPES).map(([value, info]) => ({ name: info.label, value }));
@@ -764,6 +1345,93 @@ function buildSellCommandDefinition() {
         type: 1, name: 'deliver', description: 'Liefert eine Datei direkt zu einer Bestellung.', options: [
           { type: 3, name: 'order', description: 'Bestellnummer', required: true },
           { type: 11, name: 'datei', description: 'Produktdatei', required: true },
+        ],
+      },
+      {
+        type: 2, name: 'tools', description: 'Erweiterte Shop-Automatisierung.', options: [
+          {
+            type: 1, name: 'offer', description: 'Erstellt ein verbindliches Angebot im Bestell-Ticket.', options: [
+              { type: 3, name: 'order', description: 'Bestellnummer', required: true },
+              { type: 10, name: 'preis', description: 'Angebotspreis in EUR', required: true, min_value: 0 },
+              { type: 4, name: 'tage', description: 'Geplante Lieferzeit in Tagen', required: true, min_value: 1, max_value: 365 },
+              { type: 3, name: 'umfang', description: 'Leistungsumfang / Angebotstext', required: true, max_length: 1500 },
+            ],
+          },
+          {
+            type: 1, name: 'priority', description: 'Setzt die Ticket-Priorität.', options: [
+              { type: 3, name: 'order', description: 'Bestellnummer', required: true },
+              { type: 3, name: 'level', description: 'Priorität', required: true, choices: [
+                { name: 'Normal', value: 'normal' }, { name: 'Hoch', value: 'high' }, { name: 'VIP', value: 'vip' }, { name: 'Dringend', value: 'urgent' },
+              ] },
+            ],
+          },
+          { type: 1, name: 'calendar', description: 'Zeigt den internen Auftragskalender.' },
+          { type: 1, name: 'staffstats', description: 'Zeigt Mitarbeiter-Statistiken und Ranking.' },
+          { type: 1, name: 'teamlist', description: 'Aktualisiert und zeigt die öffentliche Teamliste.' },
+          { type: 1, name: 'productstats', description: 'Zeigt Produkt- und Verkaufsstatistiken.' },
+          {
+            type: 1, name: 'finance', description: 'Monatsumsatz und Kosten verwalten.', options: [
+              { type: 3, name: 'action', description: 'Aktion', required: true, choices: [
+                { name: 'Monatsbericht', value: 'report' }, { name: 'Kosten hinzufügen', value: 'expense-add' }, { name: 'Kostenliste', value: 'expense-list' },
+              ] },
+              { type: 10, name: 'betrag', description: 'Kostenbetrag in EUR', required: false, min_value: 0 },
+              { type: 3, name: 'text', description: 'Beschreibung', required: false, max_length: 300 },
+            ],
+          },
+          {
+            type: 1, name: 'voucher', description: 'Verwaltet Gutscheine mit Euro-Guthaben.', options: [
+              { type: 3, name: 'action', description: 'Aktion', required: true, choices: [
+                { name: 'Erstellen', value: 'add' }, { name: 'Entfernen', value: 'remove' }, { name: 'Liste', value: 'list' },
+              ] },
+              { type: 3, name: 'code', description: 'Gutscheincode', required: false, max_length: 30 },
+              { type: 10, name: 'betrag', description: 'Guthaben in EUR', required: false, min_value: 0.01 },
+              { type: 4, name: 'nutzungen', description: 'Maximale Nutzungen, 0 = unbegrenzt', required: false, min_value: 0, max_value: 100000 },
+              { type: 4, name: 'tage', description: 'Gültigkeit in Tagen, 0 = unbegrenzt', required: false, min_value: 0, max_value: 3650 },
+            ],
+          },
+          {
+            type: 1, name: 'release', description: 'Erstellt Produktrelease + Käufer-Ping.', options: [
+              { type: 3, name: 'produkt', description: 'Produkt', required: true, choices: productChoices },
+              { type: 3, name: 'version', description: 'Version, z. B. 1.2.0', required: true, max_length: 30 },
+              { type: 3, name: 'text', description: 'Changelog / Release-Text', required: true, max_length: 1500 },
+              { type: 11, name: 'datei', description: 'Optionaler Release-Anhang', required: false },
+            ],
+          },
+          {
+            type: 1, name: 'refund', description: 'Verwaltet Refund-Anfragen.', options: [
+              { type: 3, name: 'id', description: 'Refund-ID', required: true },
+              { type: 3, name: 'action', description: 'Aktion', required: true, choices: [
+                { name: 'Info', value: 'info' }, { name: 'Genehmigen', value: 'approve' }, { name: 'Ablehnen', value: 'deny' },
+              ] },
+              { type: 3, name: 'notiz', description: 'Interne / Kunden-Notiz', required: false, max_length: 500 },
+            ],
+          },
+          {
+            type: 1, name: 'partner', description: 'Verwaltet Partnerschaftsanfragen.', options: [
+              { type: 3, name: 'id', description: 'Partner-ID', required: true },
+              { type: 3, name: 'action', description: 'Aktion', required: true, choices: [
+                { name: 'Info', value: 'info' }, { name: 'Annehmen', value: 'approve' }, { name: 'Ablehnen', value: 'deny' },
+              ] },
+            ],
+          },
+          {
+            type: 1, name: 'testmode', description: 'Aktiviert/deaktiviert Testbestellungen.', options: [
+              { type: 3, name: 'status', description: 'Status', required: true, choices: [
+                { name: 'Status', value: 'status' }, { name: 'An', value: 'on' }, { name: 'Aus', value: 'off' },
+              ] },
+            ],
+          },
+          { type: 1, name: 'export', description: 'Exportiert Shop-Konfiguration und Produkte als JSON.' },
+          {
+            type: 1, name: 'import', description: 'Importiert Shop-Konfiguration aus JSON.', options: [
+              { type: 11, name: 'datei', description: 'JSON Export-Datei', required: true },
+            ],
+          },
+          {
+            type: 1, name: 'summary', description: 'Erstellt eine kompakte Ticket-Zusammenfassung.', options: [
+              { type: 3, name: 'order', description: 'Bestellnummer', required: true },
+            ],
+          },
         ],
       },
       {
@@ -1223,12 +1891,14 @@ async function createSellingStructure(guild) {
   channels.verify = await ensureChannel(guild, categories.info, '✅・verifizierung', { readOnly: true, roleMap, writerKeys: ['owner','management'], topic: 'Verifiziere dich hier, um Zugriff auf Shop, Community und Support zu erhalten.' });
   channels.news = await ensureChannel(guild, categories.info, '📢・ankündigungen', { readOnly: true, roleMap, writerKeys: ['owner','management'], topic: 'Shop-News, Releases und Updates.' });
   channels.faq = await ensureChannel(guild, categories.info, '❓・faq', { readOnly: true, roleMap, writerKeys: ['owner','management','support'], topic: 'Häufig gestellte Fragen.' });
+  channels.teamList = await ensureChannel(guild, categories.info, '👥・teamliste', { readOnly: true, roleMap, writerKeys: ['owner','management'], topic: 'Automatisch aktualisierte Teamliste von Turbo Designs.', verifiedOnly: true });
 
   channels.thumbnails = await ensureChannel(guild, categories.shop, '🖼️・thumbnails', { readOnly: true, roleMap, writerKeys: ['owner','management','designer'], topic: 'Thumbnail-Angebote, Beispiele und Pakete.', verifiedOnly: true});
   channels.nve = await ensureChannel(guild, categories.shop, '🌆・nve-presets', { readOnly: true, roleMap, writerKeys: ['owner','management','designer','developer'], topic: 'Eigene oder lizenzierte NVE-Presets, Grafik-Setups und Anpassungen.', verifiedOnly: true});
   channels.soundpacks = await ensureChannel(guild, categories.shop, '🔊・soundpacks', { readOnly: true, roleMap, writerKeys: ['owner','management','sound'], topic: 'Eigene Soundpacks und Audio-Pakete.', verifiedOnly: true});
   channels.graphics = await ensureChannel(guild, categories.shop, '🎨・grafik-designs', { readOnly: true, roleMap, writerKeys: ['owner','management','designer'], topic: 'Logos, Banner, Thumbnails und weitere Designs.', verifiedOnly: true});
   channels.fivem = await ensureChannel(guild, categories.shop, '🚗・fivem-assets', { readOnly: true, roleMap, writerKeys: ['owner','management','developer'], topic: 'Eigene oder lizenzierte FiveM-Assets und Setups.', verifiedOnly: true});
+  channels.bots = await ensureChannel(guild, categories.shop, '🤖・discord-bots', { readOnly: true, roleMap, writerKeys: ['owner','management','developer'], topic: 'Custom Discord Bots, Automationen und individuelle Bot-Systeme.', verifiedOnly: true});
   channels.bundles = await ensureChannel(guild, categories.shop, '📦・bundles', { readOnly: true, roleMap, writerKeys: ['owner','management','designer','sound','developer'], topic: 'Produkt-Bundles und Pakete.', verifiedOnly: true});
   channels.newProducts = await ensureChannel(guild, categories.shop, '🆕・neuheiten', { readOnly: true, roleMap, writerKeys: ['owner','management'], topic: 'Neue Produkte und Updates.', verifiedOnly: true});
   channels.productUpdates = await ensureChannel(guild, categories.shop, '🔄・produkt-updates', { readOnly: true, roleMap, writerKeys: ['owner','management','designer','sound','developer'], topic: 'Updates für bereits gekaufte Produkte.', verifiedOnly: true});
@@ -1239,6 +1909,7 @@ async function createSellingStructure(guild) {
   channels.payment = await ensureChannel(guild, categories.buy, '💳・zahlung', { readOnly: true, roleMap, writerKeys: ['owner','management','support'], topic: 'Zahlungsinformationen werden vom Shop-Team gepflegt.', verifiedOnly: true});
   channels.reviews = await ensureChannel(guild, categories.buy, '⭐・bewertungen', { readOnly: true, roleMap, writerKeys: ['owner','management','support'], topic: 'Verifizierte Bewertungen aus abgeschlossenen Bestellungen.', verifiedOnly: true});
   channels.customerStatus = await ensureChannel(guild, categories.buy, '💠・kundenstatus', { readOnly: true, roleMap, writerKeys: ['owner','management','support'], topic: 'Stammkunden-, VIP- und Rabattvorteile.', verifiedOnly: true});
+  channels.customerMenu = await ensureChannel(guild, categories.buy, '🧭・kunden-menü', { readOnly: true, roleMap, writerKeys: ['owner','management','support'], topic: 'Zentrales Kundenmenü für Shop, Bestellungen, Käufe, Lizenzen, Support und Partnerschaften.', verifiedOnly: true});
   channels.results = await ensureChannel(guild, categories.buy, '📸・kunden-ergebnisse', { roleMap, topic: 'Ergebnisse und Showcase von Kunden.', verifiedOnly: true});
   channels.requests = await ensureChannel(guild, categories.buy, '💡・produkt-wünsche', { roleMap, topic: 'Wünsche für neue Produkte oder individuelle Aufträge.', verifiedOnly: true});
 
@@ -1262,6 +1933,13 @@ async function createSellingStructure(guild) {
   channels.dashboard = await ensureChannel(guild, categories.team, '📊・shop-dashboard', { roleMap, teamWriteKeys: ['owner','management'], topic: 'Zentrales Management-Control-Panel: Umsatz, Bestellungen, Kunden, Lizenzen, Security und Automatisierung.' });
   channels.queue = await ensureChannel(guild, categories.team, '⏱️・auftrags-warteschlange', { roleMap, teamWriteKeys: ['owner','management','support'], teamReadKeys: ['designer','sound','developer'], topic: 'Automatische Auftragsreihenfolge, Positionen und ETA.' });
   channels.automation = await ensureChannel(guild, categories.team, '🤖・automation-log', { roleMap, teamWriteKeys: ['owner','management'], teamReadKeys: ['support'], topic: 'Reminder, Auto-Close, Health-Checks, Backups und automatische Shop-Aktionen.' });
+  channels.calendar = await ensureChannel(guild, categories.team, '📅・auftragskalender', { roleMap, teamWriteKeys: ['owner','management','support'], teamReadKeys: ['designer','sound','developer'], topic: 'Deadlines, Prioritäten und fällige Aufträge.' });
+  channels.projectArchive = await ensureChannel(guild, categories.team, '📁・projekt-archiv', { roleMap, teamWriteKeys: ['owner','management'], teamReadKeys: ['support','designer','sound','developer'], topic: 'Automatisches Archiv abgeschlossener Kundenprojekte.' });
+  channels.staffStats = await ensureChannel(guild, categories.team, '🏆・staff-stats', { roleMap, teamWriteKeys: ['owner','management'], teamReadKeys: ['support','designer','sound','developer'], topic: 'Interne Mitarbeiter-Statistiken und Ranking.' });
+  channels.partnerApps = await ensureChannel(guild, categories.team, '🤝・partner-anfragen', { roleMap, teamWriteKeys: ['owner','management'], topic: 'Partnerschaftsanfragen und Partner-Freigaben.' });
+  channels.refunds = await ensureChannel(guild, categories.team, '💸・refunds', { roleMap, teamWriteKeys: ['owner','management'], teamReadKeys: ['support'], topic: 'Rückerstattungsanfragen und Entscheidungen.' });
+  channels.leakReports = await ensureChannel(guild, categories.team, '🚨・leak-reports', { roleMap, teamWriteKeys: ['owner','management'], teamReadKeys: ['support'], topic: 'Meldungen zu geleakten oder unerlaubt weitergegebenen Produkten.' });
+  channels.releaseLog = await ensureChannel(guild, categories.team, '🚀・release-log', { roleMap, teamWriteKeys: ['owner','management','designer','sound','developer'], topic: 'Produkt-Releases, Versionen und Käufer-Updates.' });
   channels.teamVoice = await ensureChannel(guild, categories.team, '🔊・Team Talk', { type: ChannelType.GuildVoice, roleMap, teamWriteKeys: ['owner','management','support','designer','sound','developer'] });
 
   return { roleMap, categories, channels };
@@ -1354,6 +2032,111 @@ async function seedCompleteRulebook(channel) {
   }
 }
 
+async function ensureTurboOurAd(channel) {
+  if (!channel?.isTextBased?.()) return null;
+  const me = channel.guild.members.me;
+  const messages = await channel.messages.fetch({ limit: 100 }).catch(() => null);
+  const existing = messages?.find(message =>
+    message.author.id === me?.id
+      && String(message.content || '').startsWith('# 🚀・TURBO DESIGNS')
+  );
+
+  if (existing) {
+    if (existing.content !== TURBO_OUR_AD) {
+      await existing.edit({ content: TURBO_OUR_AD, allowedMentions: { parse: [] } }).catch(() => {});
+    }
+    return existing;
+  }
+
+  return channel.send({
+    content: TURBO_OUR_AD,
+    allowedMentions: { parse: [] },
+  }).catch(() => null);
+}
+
+
+const PUBLIC_TEAM_ROLE_KEYS = ['owner', 'management', 'support', 'designer', 'sound', 'developer'];
+
+function teamRoleLabel(key) {
+  const role = SELLING.roles.find(entry => entry.key === key);
+  return role?.name || key;
+}
+
+async function buildTeamListEmbeds(guild) {
+  await guild.members.fetch().catch(() => {});
+  const embeds = [];
+  const overview = shopEmbed('👥 Turbo Designs • Teamliste', 'Hier siehst du das aktuell eingetragene **Turbo Designs Team**. Die Liste wird automatisch aus den Teamrollen aktualisiert.');
+  let total = 0;
+  for (const key of PUBLIC_TEAM_ROLE_KEYS) {
+    const role = findSellingRole(guild, key);
+    if (!role) continue;
+    const members = [...role.members.values()]
+      .filter(member => !member.user.bot)
+      .sort((a, b) => (a.displayName || a.user.username).localeCompare(b.displayName || b.user.username, 'de'));
+    total += members.length;
+    let value = members.length
+      ? members.map(member => `• <@${member.id}>`).join('\n')
+      : '*Aktuell niemand eingetragen.*';
+    if (value.length > 1000) {
+      const lines = value.split('\n');
+      let kept = [];
+      let used = 0;
+      for (const line of lines) {
+        if (used + line.length + 1 > 930) break;
+        kept.push(line); used += line.length + 1;
+      }
+      value = `${kept.join('\n')}\n… und **${Math.max(0, members.length - kept.length)}** weitere`;
+    }
+    overview.addFields({ name: `${teamRoleLabel(key)} • ${members.length}`, value, inline: false });
+  }
+  overview.setFooter({ text: `Teammitglieder nach Rollen: ${total} • automatisch aktualisiert` }).setTimestamp();
+  embeds.push(overview);
+  return embeds;
+}
+
+async function refreshTeamList(guild, data = null) {
+  const shopData = data || getGuildShopData(guild.id).data;
+  const channelId = shopData.config?.channelIds?.teamList;
+  const channel = channelId
+    ? await guild.channels.fetch(channelId).catch(() => null)
+    : findSellingTextChannel(guild, '👥・teamliste');
+  if (!channel?.isTextBased?.()) return null;
+
+  const embeds = await buildTeamListEmbeds(guild);
+  const payload = { embeds, allowedMentions: { parse: [] } };
+  let message = shopData.config.teamListMessageId
+    ? await channel.messages.fetch(shopData.config.teamListMessageId).catch(() => null)
+    : null;
+  if (!message) {
+    const recent = await channel.messages.fetch({ limit: 25 }).catch(() => null);
+    message = recent?.find(msg => msg.author.id === guild.members.me?.id && msg.embeds?.[0]?.title === '👥 Turbo Designs • Teamliste') || null;
+  }
+  if (message) await message.edit(payload).catch(() => {});
+  else message = await channel.send(payload).catch(() => null);
+  if (message) shopData.config.teamListMessageId = message.id;
+  return message;
+}
+
+
+async function cleanupDuplicateSellingPanels(channels) {
+  const specs = [
+    [channels.verify, msg => msg.components?.some(row => row.components?.some(c => c.customId === 'selling_verify_start'))],
+    [channels.order, msg => msg.components?.some(row => row.components?.some(c => String(c.customId || '').startsWith('selling_cart_')))],
+    [channels.supportTicket, msg => msg.components?.some(row => row.components?.some(c => String(c.customId || '').startsWith('selling_support:')))],
+    [channels.customerMenu, msg => msg.components?.some(row => row.components?.some(c => String(c.customId || '').startsWith('selling_customer:')))],
+    [channels.dashboard, msg => msg.components?.some(row => row.components?.some(c => String(c.customId || '').startsWith('selling_staff:')))],
+  ];
+  for (const [channel, matcher] of specs) {
+    if (!channel?.isTextBased?.()) continue;
+    const messages = await channel.messages.fetch({ limit: 50 }).catch(() => null);
+    if (!messages) continue;
+    const matches = [...messages.values()]
+      .filter(msg => msg.author.id === channel.guild.members.me?.id && matcher(msg))
+      .sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+    for (const duplicate of matches.slice(1)) await duplicate.delete().catch(() => {});
+  }
+}
+
 async function seedSellingServer(structure) {
   const { channels } = structure;
 
@@ -1370,12 +2153,15 @@ async function seedSellingServer(structure) {
     embeds: [shopEmbed('❓ FAQ', '**Wie bestelle ich?**\nWähle in **🛒・bestellen** dein Produkt. Der Bot erstellt ein privates Kauf-Ticket.\n\n**Wann ist ein Preis verbindlich?**\nErst wenn Preis und Lieferumfang im privaten Ticket bestätigt wurden.\n\n**Wie bezahle ich?**\nAusschließlich über **PayPal** an die im Ticket bestätigte Empfängeradresse.\n\n**Wo bekomme ich Support?**\nNutze **🎫・support-ticket** und wähle den passenden Bereich.\n\n**Darf ich gekaufte Dateien weitergeben?**\nNein. Weiterverkauf, Leaks, Reuploads und Weitergabe an Dritte sind ohne ausdrückliche Erlaubnis untersagt.')],
   });
 
+  await refreshTeamList(channels.teamList.guild, getGuildShopData(channels.teamList.guild.id).data).catch(() => {});
+
   const productSeeds = [
     [channels.thumbnails, '🖼️ Thumbnails', 'Individuelle Thumbnails für FiveM, YouTube, Twitch und Social Media.\n\nHier können Beispiele, Pakete und Preise eingetragen werden.'],
     [channels.nve, '🌆 NVE Presets / Grafik-Setups', 'Eigene oder lizenzierte Presets, Grafik-Setups und Anpassungen für dein GTA/FiveM-Setup.\n\nKeine unerlaubte Weitergabe fremder Premium-Dateien.'],
     [channels.soundpacks, '🔊 Soundpacks', 'Eigene Soundpacks für Waffen-, Reload-, UI- oder Fahrzeug-Sounds.\n\nHier können Vorschauen und Produktvarianten gepostet werden.'],
     [channels.graphics, '🎨 Grafik & Designs', 'Logos, Banner, Discord-Grafiken, Stream-Assets und individuelle Designs.'],
     [channels.fivem, '🚗 FiveM Assets', 'Eigene oder lizenzierte FiveM-Ressourcen, Setups und weitere digitale Assets.'],
+    [channels.bots, '🤖 Custom Discord Bots', 'Individuelle Discord Bots mit Commands, Tickets, Panels, Automationen und auf Wunsch Railway-/Hosting-Setup.'],
     [channels.bundles, '📦 Bundles', 'Mehrere Produkte als Paket – ideal für komplette FiveM-, Stream- oder Community-Setups.'],
   ];
   for (const [channel, title, description] of productSeeds) {
@@ -1394,14 +2180,18 @@ async function seedSellingServer(structure) {
   const orderRow2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('selling_cart_add:grafik').setLabel('Design +').setEmoji('🎨').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('selling_cart_add:fivem').setLabel('FiveM +').setEmoji('🚗').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('selling_cart_add:bot').setLabel('Discord Bot +').setEmoji('🤖').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('selling_cart_add:bundle').setLabel('Bundle +').setEmoji('📦').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('selling_cart_view').setLabel('Warenkorb').setEmoji('🛒').setStyle(ButtonStyle.Success),
+  );
+  const orderRow3 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('selling_support:general').setLabel('Support').setEmoji('🎫').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('selling_customer:gift').setLabel('Geschenkbestellung').setEmoji('🎁').setStyle(ButtonStyle.Secondary),
   );
   await seedIfEmpty(channels.order, {
     embeds: [withTurboBanner(shopEmbed('🛒 Turbo Design Shop', 'Lege ein oder mehrere Produkte über die **+ Buttons** in deinen Warenkorb. Öffne danach **🛒 Warenkorb → Checkout**. Der Bot erstellt eine gemeinsame **UF-Bestellung** mit privatem Kauf-Ticket. Dort werden Preis, Rabatt, Queue/ETA, Lieferumfang, Revisionen und PayPal-Zahlung final bestätigt.\n\nMit Abschluss der Bestellung gelten die veröffentlichten **Shop- und Lizenzbedingungen** in 📜・regelwerk.'))],
     files: [turboBannerAttachment()],
-    components: [orderRow1, orderRow2],
+    components: [orderRow1, orderRow2, orderRow3],
   });
 
   await seedIfEmpty(channels.payment, {
@@ -1444,7 +2234,24 @@ async function seedSellingServer(structure) {
   await seedIfEmpty(channels.automation, { embeds: [shopEmbed('🤖 Automation Log', 'Hier protokolliert der Bot Reminder, Auto-Close, Auto-Assign, automatische Auslastung, Health-Checks, Self-Heal und Backups.')] });
   await seedIfEmpty(channels.securityLogs, { embeds: [shopEmbed('🛡️ Security Center', 'Der **Anti-Nuke-Schutz ist standardmäßig aktiviert**. Kritische Audit-Log-Aktionen werden bewertet und bei Überschreitung des Schwellenwerts automatisch quarantänisiert.\n\nVerwaltung ausschließlich durch den Server-Inhaber über `/sell antinuke`. Verify-Ereignisse und Anti-Nuke-Maßnahmen werden in diesem Channel dokumentiert.')] });
 
+  // Eigene Partner-Werbung: wird auch auf bestehenden Servern automatisch erstellt/aktualisiert.
+  await ensureTurboOurAd(channels.partners);
+  const partnerMessages = await channels.partners.messages.fetch({ limit: 50 }).catch(() => null);
+  const partnerPanel = partnerMessages?.find(message => message.author.id === channels.partners.guild.members.me?.id && message.components?.some(row => row.components?.some(component => component.customId === 'selling_customer:partner')));
+  if (!partnerPanel) {
+    await channels.partners.send({
+      embeds: [shopEmbed('🤝 Partnerschaft mit Turbo Designs', 'Du möchtest mit **Turbo Designs** zusammenarbeiten? Nutze den Button und sende deine Anfrage direkt an das Management.')],
+      components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('selling_customer:partner').setLabel('Partnerschaft anfragen').setEmoji('🤝').setStyle(ButtonStyle.Primary))],
+    }).catch(() => {});
+  }
+
+  const { store: seedStore, data: seedData } = getGuildShopData(channels.welcome.guild.id);
+  await refreshCustomerMenu(channels.welcome.guild, seedData).catch(() => {});
+  await refreshCalendarPanel(channels.welcome.guild, seedData).catch(() => {});
+  saveSellingStore(seedStore);
+
   // Existing installations are branded too; no /setup reset is required.
+  await cleanupDuplicateSellingPanels(channels).catch(() => {});
   await ensureTurboBrandingOnExistingPanels(channels);
 }
 
@@ -1539,7 +2346,7 @@ function producerRoleKeysForProducts(productKeys = []) {
       keys.add('developer');
     }
     if (productKey === 'soundpack') keys.add('sound');
-    if (productKey === 'fivem') keys.add('developer');
+    if (productKey === 'fivem' || productKey === 'bot') keys.add('developer');
     if (productKey === 'bundle') {
       keys.add('designer');
       keys.add('sound');
@@ -1699,6 +2506,8 @@ function orderActionRows(order) {
       new ButtonBuilder().setCustomId(`selling_deliver_start:${id}`).setLabel('Produkt liefern').setEmoji('📤').setStyle(ButtonStyle.Success),
     ),
     new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`selling_offer_start:${id}`).setLabel('Angebot').setEmoji('🧾').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`selling_priority_cycle:${id}`).setLabel('Priorität').setEmoji('🚦').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`selling_revision:${id}`).setLabel(`Revision (${Math.max(0, Number(order.revisionsRemaining || 0))})`).setEmoji('🔄').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`selling_dispute:${id}`).setLabel('Problem / Streitfall').setEmoji('⚠️').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`selling_close:${id}`).setLabel('Ticket schließen').setEmoji('🔒').setStyle(ButtonStyle.Danger),
@@ -1731,7 +2540,10 @@ function orderInfoEmbed(order, data = null) {
 
   return shopEmbed(`${emoji} Bestellung ${order.id} • ${productLabel}`.slice(0, 256), [
     `**Status:** ${orderStatusLabel(order.status)}`,
-    `**Kunde:** <@${order.userId}>`,
+    `**Priorität:** ${orderPriorityInfo(order).emoji} ${orderPriorityInfo(order).label}`,
+    `**Wartet auf:** ${waitingOnLabel(order)}`,
+    `**Käufer:** <@${order.userId}>`,
+    order.giftRecipientId ? `**Geschenk-Empfänger:** <@${order.giftRecipientId}>` : null,
     `**Zuständig:** ${assigned}`,
     `**Preis:** ${basePrice}${effectiveDiscount ? ` → **${finalPrice}**` : ''}`,
     `**Rabatt:** ${discountParts.length ? discountParts.join(' • ') : 'Keiner'}`,
@@ -1742,8 +2554,9 @@ function orderInfoEmbed(order, data = null) {
   ].join('\n'), [
     { name: 'Auftrag', value: String(order.details || 'Keine Angaben').slice(0, 1024) },
     { name: 'Produkte', value: orderProductKeys(order).map(key => `${PRODUCT_TYPES[key].emoji} ${PRODUCT_TYPES[key].label}`).join('\n').slice(0, 1024) || productLabel },
-    { name: 'Referenzen', value: String(order.references || '—').slice(0, 1024) },
-    { name: 'Wunschtermin', value: String(order.deadline || '—').slice(0, 1024), inline: true },
+    { name: 'Stil', value: String(order.style || '—').slice(0, 1024), inline: true },
+    { name: 'Referenzen', value: orderReferenceText(order) },
+    { name: 'Wunschtermin', value: order.dueAt ? `<t:${Math.floor(order.dueAt / 1000)}:F>` : String(order.deadline || '—').slice(0, 1024), inline: true },
     { name: 'Zusatz', value: String(order.notes || '—').slice(0, 1024), inline: true },
   ]);
 }
@@ -1790,6 +2603,29 @@ function dashboardEmbed(guild, data) {
   ]);
 }
 
+
+
+function modalUploadedReferences(interaction, customId = 'references') {
+  try {
+    const files = interaction.fields?.getUploadedFiles?.(customId, false);
+    if (!files) return [];
+    return [...files.values()].slice(0, 3).map(file => ({
+      id: file.id,
+      name: String(file.name || 'reference').slice(0, 180),
+      url: file.url,
+      contentType: file.contentType || null,
+      size: Number(file.size || 0),
+    })).filter(file => file.url);
+  } catch (_) {
+    return [];
+  }
+}
+
+function orderReferenceText(order) {
+  const uploaded = Array.isArray(order.referenceUploads) ? order.referenceUploads : [];
+  if (uploaded.length) return uploaded.map((file, index) => `[Referenz ${index + 1} • ${file.name}](${file.url})`).join('\n').slice(0, 1024);
+  return String(order.referenceUploadUrl || order.references || '—').slice(0, 1024);
+}
 
 async function handleCartButton(interaction) {
   if (!interaction.inGuild()) return;
@@ -1838,10 +2674,10 @@ async function handleCartButton(interaction) {
     const modal = new ModalBuilder().setCustomId('selling_cart_checkout_modal').setTitle('Warenkorb bestellen');
     modal.addComponents(
       new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('details').setLabel('Auftrag / Wünsche').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1500)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('references').setLabel('Referenzen / Links').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1000)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('style').setLabel('Stil / Look / Richtung').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(200)),
       new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('deadline').setLabel('Wunschtermin').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(100)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('coupon').setLabel('Rabattcode').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(30)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('notes').setLabel('Zusätzliche Hinweise').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(800)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('coupon').setLabel('Rabatt-/Gutscheincode').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(30)),
+      new FileUploadBuilder().setCustomId('references').setMinValues(0).setMaxValues(3).setFileTypes('image', '.pdf', '.zip').setRequired(false),
     );
     await interaction.showModal(modal);
   }
@@ -1875,7 +2711,7 @@ async function createCartOrderFromModal(interaction) {
     await interaction.reply({ content: `❌ Mindestens ein Produkt im Warenkorb ist inzwischen deaktiviert: **${disabledCartItems.map(key => PRODUCT_TYPES[key]?.label || key).join(', ')}**. Entferne es und versuche es erneut.`, ephemeral: true });
     return;
   }
-  const couponState = getCouponState(data, interaction.fields.getTextInputValue('coupon'));
+  const couponState = getDiscountCodeState(data, interaction.fields.getTextInputValue('coupon'));
   if (couponState.error) {
     await interaction.reply({ content: `❌ Rabattcode ungültig: ${couponState.error}`, ephemeral: true });
     return;
@@ -1890,13 +2726,20 @@ async function createCartOrderFromModal(interaction) {
   const revisions = Math.max(...keys.map(key => Number(PRODUCT_TYPES[key]?.revisions || 0)), 0);
   const order = {
     id: orderId, userId: interaction.user.id, productKey: keys.length === 1 ? keys[0] : 'cart', cartItems: keys,
-    details: interaction.fields.getTextInputValue('details').trim(), references: interaction.fields.getTextInputValue('references').trim(),
-    deadline: interaction.fields.getTextInputValue('deadline').trim(), notes: interaction.fields.getTextInputValue('notes').trim(),
-    couponCode: couponState.code, discountPercent: couponState.coupon ? Number(couponState.coupon.percent || 0) : 0,
+    details: interaction.fields.getTextInputValue('details').trim(), style: interaction.fields.getTextInputValue('style').trim(),
+    references: '', referenceUploadUrl: modalUploadedReferences(interaction)[0]?.url || null, referenceUploads: modalUploadedReferences(interaction),
+    deadline: interaction.fields.getTextInputValue('deadline').trim(), dueAt: parseDeadlineToTimestamp(interaction.fields.getTextInputValue('deadline'), orderEtaDays({ productKey: keys.length === 1 ? keys[0] : 'cart', cartItems: keys })),
+    notes: '',
+    couponCode: couponState.coupon ? couponState.code : null,
+    voucherCode: couponState.voucher ? couponState.code : null,
+    voucherAmount: couponState.voucher ? Number(couponState.voucher.remainingAmount ?? couponState.voucher.amount ?? 0) : 0,
+    discountPercent: couponState.coupon ? Number(couponState.coupon.percent || 0) : 0,
     loyaltyDiscountPercent: loyalty.discount, loyaltyLabel: loyalty.level?.label || null,
     basePrice: null, finalPrice: null, status: 'pending', revisionsRemaining: revisions, assignedTo: null,
     createdAt: Date.now(), paidAt: null, deliveredAt: null, closedAt: null, channelId: null, deliveryChannelId: null,
-    licenseId: null, reviewSubmitted: false, couponRedeemedAt: null,
+    licenseId: null, reviewSubmitted: false, couponRedeemedAt: null, voucherRedeemedAt: null,
+    priority: 'normal', waitingOn: 'staff', lastActivityAt: Date.now(), lastCustomerAt: Date.now(),
+    initialRevisions: revisions, testMode: Boolean(data.config.testMode),
   };
   data.orders[orderId] = order;
   data.carts[interaction.user.id] = { items: [], updatedAt: Date.now() };
@@ -1925,10 +2768,12 @@ async function createCartOrderFromModal(interaction) {
   }
   order.channelId = channel.id;
   const autoPrice = configuredOrderPrice(data, keys);
-  if (autoPrice !== null) { order.basePrice = autoPrice; order.finalPrice = Math.round(autoPrice * (1 - effectiveDiscountForOrder(order) / 100) * 100) / 100; }
+  if (autoPrice !== null) { order.basePrice = autoPrice; order.finalPrice = calculateOrderFinalPrice(order); }
   await automateNewOrder(interaction.guild, data, order, channel).catch(() => {});
   saveSellingStore(store);
   await channel.send({ content: `<@${interaction.user.id}>`, embeds: [orderInfoEmbed(order, data)], components: orderActionRows(order), allowedMentions: { users: [interaction.user.id] } });
+  await channel.send({ content: '📎 **Referenzen:** Du kannst Referenzen bereits im Bestellformular hochladen. Weitere Beispielbilder, Screenshots oder Dateien kannst du jederzeit direkt in dieses Ticket schicken; passende Uploads werden automatisch der Bestellung zugeordnet.' }).catch(() => {});
+  await syncOrderWorkflow(interaction.guild, data, order).catch(() => {});
   const internal = findSellingTextChannel(interaction.guild, '📦・bestellungen');
   if (internal) await internal.send({ embeds: [shopEmbed(`🛒 Neue Warenkorb-Bestellung ${orderId}`, `<@${interaction.user.id}>\n${keys.map(key => `${PRODUCT_TYPES[key].emoji} ${PRODUCT_TYPES[key].label}`).join('\n')}\nTicket: <#${channel.id}>`)], allowedMentions: { parse: [] } }).catch(() => {});
   await refreshOrderStatusPanel(interaction.guild, data).catch(() => {});
@@ -1977,20 +2822,20 @@ async function showOrderModal(interaction, productKey) {
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
         .setCustomId('details')
-        .setLabel('Was genau möchtest du?')
-        .setPlaceholder('Produkt, Stil, Umfang, gewünschte Änderungen ...')
+        .setLabel((PRODUCT_ORDER_TEMPLATES[productKey]?.details || 'Was genau möchtest du?').slice(0, 45))
+        .setPlaceholder((PRODUCT_ORDER_TEMPLATES[productKey]?.hint || 'Produkt, Stil, Umfang, gewünschte Änderungen ...').slice(0, 100))
         .setStyle(TextInputStyle.Paragraph)
         .setRequired(true)
         .setMaxLength(1500),
     ),
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
-        .setCustomId('references')
-        .setLabel('Referenzen / Links')
-        .setPlaceholder('Optional: Beispielbilder, Videos, Links ...')
-        .setStyle(TextInputStyle.Paragraph)
+        .setCustomId('style')
+        .setLabel((PRODUCT_ORDER_TEMPLATES[productKey]?.style || 'Stil / Look').slice(0, 45))
+        .setPlaceholder('z. B. Clean, Dark, GTA, Gambo, Luxury ...')
+        .setStyle(TextInputStyle.Short)
         .setRequired(false)
-        .setMaxLength(1000),
+        .setMaxLength(200),
     ),
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
@@ -2010,15 +2855,12 @@ async function showOrderModal(interaction, productKey) {
         .setRequired(false)
         .setMaxLength(30),
     ),
-    new ActionRowBuilder().addComponents(
-      new TextInputBuilder()
-        .setCustomId('notes')
-        .setLabel('Zusätzliche Hinweise')
-        .setPlaceholder('Format, Plattform, besondere Anforderungen ...')
-        .setStyle(TextInputStyle.Paragraph)
-        .setRequired(false)
-        .setMaxLength(800),
-    ),
+    new FileUploadBuilder()
+      .setCustomId('references')
+      .setMinValues(0)
+      .setMaxValues(3)
+      .setFileTypes('image', '.pdf', '.zip')
+      .setRequired(false),
   );
 
   await interaction.showModal(modal);
@@ -2053,7 +2895,7 @@ async function createOrderFromModal(interaction, productKey) {
     return;
   }
 
-  const couponState = getCouponState(data, interaction.fields.getTextInputValue('coupon'));
+  const couponState = getDiscountCodeState(data, interaction.fields.getTextInputValue('coupon'));
   if (couponState.error) {
     await interaction.reply({ content: `❌ Rabattcode ungültig: ${couponState.error}`, ephemeral: true });
     return;
@@ -2070,10 +2912,16 @@ async function createOrderFromModal(interaction, productKey) {
     userId: interaction.user.id,
     productKey,
     details: interaction.fields.getTextInputValue('details').trim(),
-    references: interaction.fields.getTextInputValue('references').trim(),
+    style: interaction.fields.getTextInputValue('style').trim(),
+    references: '',
+    referenceUploadUrl: modalUploadedReferences(interaction)[0]?.url || null,
+    referenceUploads: modalUploadedReferences(interaction),
     deadline: interaction.fields.getTextInputValue('deadline').trim(),
-    notes: interaction.fields.getTextInputValue('notes').trim(),
-    couponCode: couponState.code,
+    dueAt: parseDeadlineToTimestamp(interaction.fields.getTextInputValue('deadline'), product.etaDays),
+    notes: '',
+    couponCode: couponState.coupon ? couponState.code : null,
+    voucherCode: couponState.voucher ? couponState.code : null,
+    voucherAmount: couponState.voucher ? Number(couponState.voucher.remainingAmount ?? couponState.voucher.amount ?? 0) : 0,
     discountPercent: couponState.coupon ? Number(couponState.coupon.percent || 0) : 0,
     loyaltyDiscountPercent: loyalty.discount,
     loyaltyLabel: loyalty.level?.label || null,
@@ -2091,6 +2939,13 @@ async function createOrderFromModal(interaction, productKey) {
     licenseId: null,
     reviewSubmitted: false,
     couponRedeemedAt: null,
+    voucherRedeemedAt: null,
+    priority: 'normal',
+    waitingOn: 'staff',
+    lastActivityAt: Date.now(),
+    lastCustomerAt: Date.now(),
+    initialRevisions: Number(product.revisions || 0),
+    testMode: Boolean(data.config.testMode),
   };
   data.orders[orderId] = order;
   saveSellingStore(store);
@@ -2122,7 +2977,7 @@ async function createOrderFromModal(interaction, productKey) {
 
   order.channelId = channel.id;
   const autoPrice = configuredOrderPrice(data, [productKey]);
-  if (autoPrice !== null) { order.basePrice = autoPrice; order.finalPrice = Math.round(autoPrice * (1 - effectiveDiscountForOrder(order) / 100) * 100) / 100; }
+  if (autoPrice !== null) { order.basePrice = autoPrice; order.finalPrice = calculateOrderFinalPrice(order); }
   await automateNewOrder(interaction.guild, data, order, channel).catch(() => {});
   saveSellingStore(store);
 
@@ -2132,6 +2987,8 @@ async function createOrderFromModal(interaction, productKey) {
     components: orderActionRows(order),
     allowedMentions: { users: [interaction.user.id] },
   });
+  await channel.send({ content: '📎 **Referenzen:** Du kannst Referenzen bereits im Bestellformular hochladen. Weitere Beispielbilder, Screenshots oder Dateien kannst du jederzeit direkt in dieses Ticket schicken; passende Uploads werden automatisch der Bestellung zugeordnet.' }).catch(() => {});
+  await syncOrderWorkflow(interaction.guild, data, order).catch(() => {});
 
   const internal = findSellingTextChannel(interaction.guild, '📦・bestellungen');
   if (internal) {
@@ -2263,7 +3120,8 @@ async function archiveSellingTranscript(channel, title, extra = '') {
 }
 
 async function grantBuyerRoles(guild, order) {
-  const member = await guild.members.fetch(order.userId).catch(() => null);
+  if (order?.testMode) return;
+  const member = await guild.members.fetch(orderRecipientId(order)).catch(() => null);
   if (!member) return;
   const customerRole = findSellingRole(guild, 'customer');
   if (customerRole) await member.roles.add(customerRole, `Selling Bestellung ${order.id}`).catch(() => {});
@@ -2281,6 +3139,7 @@ function licenseText(guild, order, license) {
     `Lizenz-ID: ${license.id}`,
     `Bestellung: ${order.id}`,
     `Käufer Discord-ID: ${order.userId}`,
+    `Lizenzinhaber Discord-ID: ${orderRecipientId(order)}`,
     `Produkt(e): ${orderProductLabel(order)}`,
     `Ausgestellt: ${new Date(license.issuedAt).toISOString()}`,
     `Käuferkennzeichnung: ${license.buyerMarker}`,
@@ -2316,16 +3175,18 @@ async function deliverOrder(guild, orderId, actorId = null) {
   ensureOrderLicense(data, order);
   order.status = 'delivered';
   order.deliveredAt ||= Date.now();
+  order.waitingOn = 'customer';
   order.updatedAt = Date.now();
+  order.lastActivityAt = Date.now();
   saveSellingStore(store);
 
   if (!deliveryChannel) {
     deliveryChannel = await guild.channels.create({
-      name: `delivery-${order.id.toLowerCase()}-${sanitizeName((await guild.members.fetch(order.userId).catch(() => null))?.user?.username || 'kunde')}`.slice(0, 95),
+      name: `delivery-${order.id.toLowerCase()}-${sanitizeName((await guild.members.fetch(orderRecipientId(order)).catch(() => null))?.user?.username || 'kunde')}`.slice(0, 95),
       type: ChannelType.GuildText,
       parent: category.id,
-      topic: `selling-delivery:${order.id}|selling-owner:${order.userId}|selling-license:${order.licenseId}`,
-      permissionOverwrites: sellingDeliveryOverwrites(guild, order.userId, orderProductKeys(order)),
+      topic: `selling-delivery:${order.id}|selling-owner:${orderRecipientId(order)}|selling-buyer:${order.userId}|selling-license:${order.licenseId}`,
+      permissionOverwrites: sellingDeliveryOverwrites(guild, orderRecipientId(order), orderProductKeys(order)),
       reason: `Selling Delivery ${order.id}`,
     });
     order.deliveryChannelId = deliveryChannel.id;
@@ -2341,11 +3202,11 @@ async function deliverOrder(guild, orderId, actorId = null) {
 
   if (!order.deliveryPostedAt) {
     await deliveryChannel.send({
-      content: `<@${order.userId}>`,
-      embeds: [shopEmbed(`${product.emoji} Lieferung • ${order.id}`, `Deine Bestellung wurde als **geliefert** markiert.\n\n**Produkt:** ${product.label}\n**Lizenz:** \`${order.licenseId}\`\n**Käuferkennzeichnung:** \`${license.buyerMarker}\`\n\nDie eigentlichen Produktdateien werden hier vom Shop-Team bereitgestellt. Bewahre deine Lizenz-ID für Support und Updates auf.`)],
+      content: `<@${orderRecipientId(order)}>`,
+      embeds: [shopEmbed(`${product.emoji} Lieferung • ${order.id}`, `${order.giftRecipientId ? `🎁 Diese Bestellung wurde dir von <@${order.userId}> geschenkt.\n\n` : ''}Deine Bestellung wurde als **geliefert** markiert.\n\n**Produkt:** ${product.label}\n**Lizenz:** \`${order.licenseId}\`\n**Käuferkennzeichnung:** \`${license.buyerMarker}\`\n\nDie eigentlichen Produktdateien werden hier vom Shop-Team bereitgestellt. Bewahre deine Lizenz-ID für Support und Updates auf.`)],
       files: [attachment, receiptAttachment],
       components: customerRows,
-      allowedMentions: { users: [order.userId] },
+      allowedMentions: { users: [orderRecipientId(order)] },
     });
     order.deliveryPostedAt = Date.now();
     saveSellingStore(store);
@@ -2362,13 +3223,16 @@ async function deliverOrder(guild, orderId, actorId = null) {
 
   order.updatedAt = Date.now();
   saveSellingStore(store);
+  await syncOrderWorkflow(guild, data, order).catch(() => {});
+  await refreshCalendarPanel(guild, data).catch(() => {});
+  await refreshTeamList(guild, data).catch(() => {});
   await refreshOrderStatusPanel(guild, data).catch(() => {});
   return { order, deliveryChannel, license };
 }
 
 async function finalizeSuccessfulDelivery(guild, data, order, actorId = null, deliveryChannel = null) {
   await grantBuyerRoles(guild, order);
-  if (!order.saleLoggedAt) {
+  if (!order.testMode && !order.saleLoggedAt) {
     const sales = findSellingTextChannel(guild, '💰・verkäufe');
     if (sales) {
       await sales.send({
@@ -2381,7 +3245,7 @@ Geliefert von: <@${actorId}>` : ''}`)],
     }
     order.saleLoggedAt = Date.now();
   }
-  const loyaltyStatus = await applyLoyaltyRole(guild, data, order.userId).catch(() => null);
+  const loyaltyStatus = order.testMode ? null : await applyLoyaltyRole(guild, data, order.userId).catch(() => null);
   if (loyaltyStatus?.level && deliveryChannel?.isTextBased()) {
     await deliveryChannel.send({ embeds: [shopEmbed('💠 Kundenstatus aktualisiert', `Du hast jetzt **${loyaltyStatus.level.label}** mit **${loyaltyStatus.discount}% Stammkundenrabatt** für zukünftige Bestellungen.`)] }).catch(() => {});
   }
@@ -2422,10 +3286,11 @@ async function setOrderStatus(guild, orderId, status, actorId) {
 
     if (status === 'paid' && !order.paidAt) redeemCouponForPaidOrder(data, order);
     order.status = status;
-    if (status === 'paid') order.paidAt ||= Date.now();
-    if (status === 'processing') order.processingAt ||= Date.now();
-    if (status === 'disputed') order.disputedAt ||= Date.now();
+    if (status === 'paid') { order.paidAt ||= Date.now(); order.waitingOn = 'staff'; }
+    if (status === 'processing') { order.processingAt ||= Date.now(); order.waitingOn = 'staff'; }
+    if (status === 'disputed') { order.disputedAt ||= Date.now(); order.waitingOn = 'staff'; }
     order.updatedAt = Date.now();
+    order.lastActivityAt = Date.now();
 
     // Persist payment/coupon state before any Discord API await. This prevents a
     // second interaction from redeeming the last coupon use in the same process.
@@ -2439,6 +3304,8 @@ async function setOrderStatus(guild, orderId, status, actorId) {
         allowedMentions: { parse: [] },
       }).catch(() => {});
     }
+    await syncOrderWorkflow(guild, data, order).catch(() => {});
+    await refreshCalendarPanel(guild, data).catch(() => {});
     await logSelling(guild, `📊 ${order.id} • ${orderStatusLabel(status)}`, `<@${actorId}> hat den Bestellstatus geändert.`);
     return { order };
   } finally {
@@ -2480,6 +3347,7 @@ async function requestRevision(interaction, orderId) {
   }
   order.revisionsRemaining = Number(order.revisionsRemaining || 0) - 1;
   order.status = 'processing';
+  order.waitingOn = 'staff';
   order.lastRevisionAt = Date.now();
   order.deliveryReadyAt = null;
   order.updatedAt = Date.now();
@@ -2488,6 +3356,7 @@ async function requestRevision(interaction, orderId) {
     content: `🔄 Revision für **${order.id}** wurde registriert. Verbleibend: **${order.revisionsRemaining}**.\nBitte beschreibe die gewünschte Änderung jetzt möglichst genau.`,
   });
   if (interaction.message?.editable) await interaction.message.edit({ components: customerDeliveryRows(order, true) }).catch(() => {});
+  await syncOrderWorkflow(interaction.guild, data, order).catch(() => {});
   await logSelling(interaction.guild, `🔄 Revision • ${order.id}`, `<@${interaction.user.id}> hat eine Revision angefordert. Verbleibend: **${order.revisionsRemaining}**.`);
   } finally {
     releaseSellingActionLock(lockKey);
@@ -2502,7 +3371,7 @@ function isOrderDeliveryContext(interaction, order) {
   if (!interaction?.channelId || !order) return false;
   if (order.deliveryChannelId && String(order.deliveryChannelId) === String(interaction.channelId)) return true;
   const topic = String(interaction.channel?.topic || '');
-  return topic.includes(`selling-delivery:${order.id}`) && topic.includes(`selling-owner:${order.userId}`);
+  return topic.includes(`selling-delivery:${order.id}`) && topic.includes(`selling-owner:${orderRecipientId(order)}`);
 }
 
 function orderHasDeliveredFile(order) {
@@ -2512,7 +3381,7 @@ function orderHasDeliveredFile(order) {
 function isOrderCustomer(interaction, order) {
   if (!interaction?.user?.id || !order) return false;
   const userId = String(interaction.user.id);
-  if (String(order.userId || '') === userId) return true;
+  if (String(order.userId || '') === userId || String(orderRecipientId(order)) === userId) return true;
 
   // Fallback for existing v5.8.1 delivery channels: the channel topic stores
   // the customer ID explicitly. This keeps old orders usable after upgrading.
@@ -3027,16 +3896,52 @@ async function handleAntiNukeAuditEvent(guild, label, types, options = {}) {
 
   const target = options.targetText || (entry.targetId ? `<@${entry.targetId}> / \`${entry.targetId}\`` : '—');
   await recordAntiNukeAction(guild, entry.executorId, label, target);
+  if (/gelöscht|Berechtigungen geändert|Webhook/i.test(label)) {
+    await alertSellingOwner(guild, '⚠️ Turbo Designs • Security Alarm', `**Aktion:** ${label}
+**Ausgeführt von:** <@${entry.executorId}>
+**Ziel:** ${target}
+
+Bitte prüfe bei unbekannten Änderungen die Audit-Logs.`).catch(() => {});
+  }
 }
 
 async function handleSellingMemberJoin(member) {
   if (!member || member.user.bot) return;
   const { data } = getGuildShopData(member.guild.id);
+
+  // Neue Mitglieder bekommen weiterhin automatisch die Unverified-Rolle.
   const unverifiedId = data.config.roleIds.unverified;
   const verifiedId = data.config.roleIds.verified;
-  if (!unverifiedId || (verifiedId && member.roles.cache.has(verifiedId))) return;
-  const role = await member.guild.roles.fetch(unverifiedId).catch(() => null);
-  if (role) await member.roles.add(role, 'Selling Verify: neues Mitglied').catch(() => {});
+  if (unverifiedId && !(verifiedId && member.roles.cache.has(verifiedId))) {
+    const role = await member.guild.roles.fetch(unverifiedId).catch(() => null);
+    if (role) await member.roles.add(role, 'Selling Verify: neues Mitglied').catch(() => {});
+  }
+
+  // Zusätzlich wird jeder echte neue User im öffentlichen Willkommens-Channel
+  // einmal direkt erwähnt. allowedMentions verhindert Rollen-/@everyone-Pings.
+  let welcomeChannel = null;
+  const welcomeId = data.config.channelIds?.welcome;
+  if (welcomeId) welcomeChannel = await member.guild.channels.fetch(welcomeId).catch(() => null);
+  if (!welcomeChannel?.isTextBased?.()) welcomeChannel = findSellingTextChannel(member.guild, '👋・willkommen');
+
+  if (welcomeChannel?.isTextBased?.()) {
+    await welcomeChannel.send({
+      content: `👋 Willkommen <@${member.id}> bei **Turbo Designs**!`,
+      embeds: [shopEmbed(
+        '🚀 Willkommen bei Turbo Designs',
+        `Schön dass du da bist <@${member.id}>!\n\nLies dir bitte zuerst **📜・regelwerk** durch und verifiziere dich danach in **✅・verifizierung**. Anschließend erhältst du Zugriff auf den kompletten öffentlichen Shop-, Community- und Supportbereich.`
+      )],
+      allowedMentions: { users: [member.id], roles: [], parse: [] },
+    }).catch(error => console.error('❌ Welcome Ping konnte nicht gesendet werden:', error));
+  }
+
+  const verifyChannel = data.config.channelIds?.verify ? await member.guild.channels.fetch(data.config.channelIds.verify).catch(() => null) : findSellingTextChannel(member.guild, '✅・verifizierung');
+  const rulesChannel = data.config.channelIds?.rules ? await member.guild.channels.fetch(data.config.channelIds.rules).catch(() => null) : findSellingTextChannel(member.guild, '📜・regelwerk');
+  const menuChannel = data.config.channelIds?.customerMenu ? await member.guild.channels.fetch(data.config.channelIds.customerMenu).catch(() => null) : findSellingTextChannel(member.guild, '🧭・kunden-menü');
+  await member.send({
+    embeds: [shopEmbed('🚀 Willkommen bei Turbo Designs', `Willkommen auf **${member.guild.name}**!\n\n1. ${rulesChannel ? `<#${rulesChannel.id}>` : 'Regelwerk lesen'}\n2. ${verifyChannel ? `<#${verifyChannel.id}>` : 'Verifizierung abschließen'}\n3. ${menuChannel ? `<#${menuChannel.id}>` : 'Kundenmenü öffnen'}\n\nÜber das Kundenmenü findest du Shop, Bestellungen, Lizenzen, Support und Partnerschaften.`)],
+    allowedMentions: { parse: [] },
+  }).catch(() => {});
 }
 
 
@@ -3068,7 +3973,7 @@ function configuredOrderPrice(data, keys) {
 function teamRoleKeyForProduct(key) {
   if (key === 'thumbnail' || key === 'grafik' || key === 'nve') return 'designer';
   if (key === 'soundpack') return 'sound';
-  if (key === 'fivem') return 'developer';
+  if (key === 'fivem' || key === 'bot') return 'developer';
   return 'support';
 }
 
@@ -3119,6 +4024,13 @@ function staffDashboardRows() {
       new ButtonBuilder().setCustomId('selling_staff:portfolio').setLabel('Portfolio').setEmoji('🖼️').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('selling_staff:security').setLabel('Security').setEmoji('🛡️').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('selling_staff:health').setLabel('Health Check').setEmoji('❤️').setStyle(ButtonStyle.Danger),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('selling_staff:calendar').setLabel('Kalender').setEmoji('📅').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_staff:stats').setLabel('Staff Stats').setEmoji('🏆').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_staff:finance').setLabel('Finanzen').setEmoji('💰').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_staff:refunds').setLabel('Refunds').setEmoji('💸').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_staff:partners').setLabel('Partner').setEmoji('🤝').setStyle(ButtonStyle.Secondary),
     ),
   ];
 }
@@ -3210,7 +4122,7 @@ async function submitPriceModal(interaction, orderId) {
   if (!canHandleOrder(interaction.member, order)) return interaction.reply({ content: '❌ Du bist für diese Produktart nicht zuständig.', ephemeral: true });
   if (order.closedAt || order.acceptedAt || order.paidAt) return interaction.reply({ content: '❌ Der Preis kann nach Zahlung, Annahme oder Ticket-Abschluss nicht mehr geändert werden.', ephemeral: true });
   order.basePrice = Math.round(amount*100)/100;
-  order.finalPrice = Math.round(order.basePrice*(1-effectiveDiscountForOrder(order)/100)*100)/100;
+  order.finalPrice = calculateOrderFinalPrice(order);
   if (revisionsRaw) order.revisionsRemaining = Math.max(0, Math.min(99, Number.parseInt(revisionsRaw,10) || 0));
   order.updatedAt = Date.now(); saveSellingStore(store);
   const paypal = data.config.paypalEmail ? `\n**PayPal:** \`${data.config.paypalEmail}\`` : '\n**PayPal:** wird im Ticket bestätigt';
@@ -3255,21 +4167,26 @@ async function processDeliveryAttachments(message, orderId) {
     const order = data.orders[orderId];
     if (!order) throw new Error('Bestellung nach Lieferung nicht mehr gefunden.');
     const sentUrls = [];
+    const oneTimeUrls = [];
   for (const attachment of [...message.attachments.values()].slice(0, 5)) {
     try {
       const type = String(attachment.contentType || '').toLowerCase();
       if (type.startsWith('image/')) {
         const watermarked = await watermarkOrderImage(message.guild, data, order, attachment);
+        const oneTime = await createOneTimeDownload(message.guild, data, order, { name: watermarked.fileName, contentType: 'image/png' }, watermarked.buffer).catch(() => null);
         const sent = await deliveryChannel.send({ content: `📦 **Produktdatei • ${order.id}**
-Automatisch mit Käufer-/Lizenzkennung versehen.`, files: [new AttachmentBuilder(watermarked.buffer, { name: watermarked.fileName })] });
+Automatisch mit Käufer-/Lizenzkennung versehen.${oneTime ? `\n🔐 **Einmaliger Download:** ${oneTime.url}\nLäuft ab: <t:${Math.floor(oneTime.expiresAt/1000)}:R>` : ''}`, files: [new AttachmentBuilder(watermarked.buffer, { name: watermarked.fileName })] });
         const first = sent.attachments.first();
         if (first) sentUrls.push(first.url);
+        if (oneTime) oneTimeUrls.push(oneTime.url);
       } else {
         const buffer = await downloadAttachmentBuffer(attachment);
         if (buffer) {
-          const sent = await deliveryChannel.send({ content: `📦 **Produktdatei • ${order.id}**`, files: [new AttachmentBuilder(buffer, { name: attachment.name || `${order.id}-delivery.bin` })] });
+          const oneTime = await createOneTimeDownload(message.guild, data, order, attachment, buffer).catch(() => null);
+          const sent = await deliveryChannel.send({ content: `📦 **Produktdatei • ${order.id}**${oneTime ? `\n🔐 **Einmaliger Download:** ${oneTime.url}\nLäuft ab: <t:${Math.floor(oneTime.expiresAt/1000)}:R>` : ''}`, files: [new AttachmentBuilder(buffer, { name: attachment.name || `${order.id}-delivery.bin` })] });
           const first = sent.attachments.first();
           if (first) sentUrls.push(first.url);
+          if (oneTime) oneTimeUrls.push(oneTime.url);
         } else {
           const sent = await deliveryChannel.send({ content: `📦 **Produktdatei • ${order.id}**
 ${attachment.url}` });
@@ -3283,6 +4200,7 @@ Originaldatei: ${attachment.url}` }).catch(() => null);
     }
   }
   order.deliveryFiles = sentUrls;
+  order.oneTimeDownloadUrls = oneTimeUrls;
   order.deliveryFileUrl = sentUrls[0] || null;
   order.deliveryFileName = firstAttachmentOf(message.attachments)?.name || null;
   order.deliveryReadyAt = sentUrls.length ? Date.now() : null;
@@ -3299,11 +4217,70 @@ Originaldatei: ${attachment.url}` }).catch(() => null);
   await finalizeSuccessfulDelivery(message.guild, data, order, message.author.id, deliveryChannel);
   saveSellingStore(store);
   const customerRows = customerDeliveryRows(order, true);
-  await deliveryChannel.send({ content: `<@${order.userId}>`, embeds: [shopEmbed('✅ Lieferung bereit', 'Bitte prüfe die Datei. Wenn alles passt, bestätige **Produkt akzeptieren**. Falls eine inkludierte Revision nötig ist, nutze **Änderung anfordern**. Mit **Portfolio erlauben** darf das Ergebnis öffentlich als Referenz gezeigt werden.')], components: customerRows, allowedMentions:{users:[order.userId]} });
+  await deliveryChannel.send({ content: `<@${orderRecipientId(order)}>`, embeds: [shopEmbed('✅ Lieferung bereit', `Bitte prüfe die Datei. Wenn alles passt, bestätige **Produkt akzeptieren**. Falls eine inkludierte Revision nötig ist, nutze **Änderung anfordern**. Mit **Portfolio erlauben** darf das Ergebnis öffentlich als Referenz gezeigt werden.${oneTimeUrls.length ? '\n\n🔐 Einmalige Download-Links werden beim ersten Abruf automatisch als verwendet markiert.' : ''}`)], components: customerRows, allowedMentions:{users:[orderRecipientId(order)]} });
   await message.reply(`✅ **${order.id} automatisch geliefert.** Kundenbereich: <#${deliveryChannel.id}>`);
   await refreshStaffDashboard(message.guild, data).catch(()=>{}); saveSellingStore(store);
   } finally {
     releaseSellingActionLock(lockKey);
+  }
+}
+
+
+async function handleSellingTicketActivityMessage(message) {
+  if (!message?.guild || message.author?.bot || !message.channel?.isTextBased?.()) return;
+  const topic = String(message.channel.topic || '');
+  if (!topic.includes('selling-kind:')) return;
+
+  if (topic.includes('selling-kind:order')) {
+    const orderId = topic.match(/selling-order:([^|]+)/)?.[1]?.toUpperCase();
+    if (!orderId) return;
+    const { store, data } = getGuildShopData(message.guild.id);
+    const order = data.orders?.[orderId];
+    if (!order || order.closedAt || order.channelId !== message.channel.id) return;
+
+    const beforeWaiting = order.waitingOn;
+    if (message.author.id === order.userId) {
+      order.waitingOn = 'staff';
+      order.lastCustomerAt = Date.now();
+      if (message.attachments?.size && !order.referenceUploadUrl && !order.paidAt) {
+        const ref = message.attachments.first();
+        if (ref?.url) {
+          order.referenceUploadUrl = ref.url;
+          order.referenceFileName = ref.name || null;
+          order.referenceCapturedAt = Date.now();
+          await message.reply('📎 Referenz wurde automatisch bei deiner Bestellung gespeichert.').catch(() => {});
+        }
+      }
+    } else if (message.member && canHandleOrder(message.member, order)) {
+      order.waitingOn = 'customer';
+      order.lastStaffAt = Date.now();
+    } else {
+      return;
+    }
+
+    order.lastActivityAt = Date.now();
+    saveSellingStore(store);
+
+    if (beforeWaiting !== order.waitingOn) await autoRenameOrderTicket(message.guild, order).catch(() => {});
+    if (!order.lastSummaryAt || Date.now() - Number(order.lastSummaryAt) > 2 * 60 * 1000 || beforeWaiting !== order.waitingOn) {
+      await refreshPinnedOrderSummary(message.guild, data, order).catch(() => {});
+      saveSellingStore(store);
+    }
+    return;
+  }
+
+  if (topic.includes('selling-kind:support')) {
+    const ownerId = topic.match(/selling-owner:(\d+)/)?.[1];
+    if (!ownerId) return;
+    const customer = await message.guild.members.fetch(ownerId).catch(() => null);
+    const suffix = sanitizeName(customer?.user?.username || 'kunde');
+    if (message.author.id === ownerId) {
+      const name = `support-wait-staff-${suffix}`.slice(0,95);
+      if (message.channel.name !== name) await message.channel.setName(name, 'Support Auto-Rename: wartet auf Team').catch(() => {});
+    } else if (message.member && canHandleSupportTicket(message.member)) {
+      const name = `support-wait-customer-${suffix}`.slice(0,95);
+      if (message.channel.name !== name) await message.channel.setName(name, 'Support Auto-Rename: wartet auf Kunde').catch(() => {});
+    }
   }
 }
 
@@ -3349,7 +4326,7 @@ async function acceptDeliveredOrder(interaction, orderId) {
     if(!order||!isOrderCustomer(interaction,order)||!isOrderDeliveryContext(interaction,order)||!order.deliveredAt||order.status!=='delivered'||!orderHasDeliveredFile(order)) return interaction.reply({content:'❌ Diese Lieferung kannst du noch nicht bestätigen. Nutze den Button im privaten Kundenbereich, nachdem eine Produktdatei vollständig geliefert wurde.',ephemeral:true});
     if(order.acceptedAt) return interaction.reply({content:'✅ Diese Bestellung wurde bereits akzeptiert.',ephemeral:true});
     if(isSellingActionLocked(`delivery:${interaction.guildId}:${orderId}`)) return interaction.reply({content:'⏳ Die Produktdatei wird gerade noch verarbeitet. Bitte versuche es gleich erneut.',ephemeral:true});
-    order.acceptedAt = Date.now(); order.status='delivered'; order.updatedAt=Date.now(); saveSellingStore(store);
+    order.acceptedAt = Date.now(); order.status='delivered'; order.waitingOn=null; order.updatedAt=Date.now(); saveSellingStore(store);
     await interaction.reply({content:`✅ Danke! **${orderId}** wurde als angenommen markiert. Du kannst die Bestellung jetzt direkt bewerten.`,components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`selling_review_open:${orderId}`).setLabel('Jetzt bewerten').setEmoji('⭐').setStyle(ButtonStyle.Success))],ephemeral:true});
     if (interaction.message?.editable) await interaction.message.edit({ components: customerDeliveryRows(order, true) }).catch(()=>{});
     const ticket=order.channelId?await interaction.guild.channels.fetch(order.channelId).catch(()=>null):null;
@@ -3358,7 +4335,10 @@ async function acceptDeliveredOrder(interaction, orderId) {
       order.closedAt ||= Date.now(); order.channelId = null; saveSellingStore(store);
       setTimeout(()=>ticket.delete(`Bestellung ${orderId} vom Kunden akzeptiert`).catch(()=>{}),5000);
     }
-    await refreshStaffDashboard(interaction.guild,data).catch(()=>{}); saveSellingStore(store);
+    await archiveCompletedProject(interaction.guild, order).catch(()=>{});
+    await refreshStaffDashboard(interaction.guild,data).catch(()=>{});
+    await refreshCalendarPanel(interaction.guild,data).catch(()=>{});
+    saveSellingStore(store);
   } finally {
     releaseSellingActionLock(lockKey);
   }
@@ -3393,11 +4373,16 @@ async function handleStaffPanelButton(interaction, action) {
   if(action==='licenses') text=Object.values(data.licenses||{}).slice(-25).reverse().map(l=>`• \`${l.id}\` • <@${l.userId}> • ${l.active?'aktiv':'inaktiv'}`).join('\n')||'Keine Lizenzen.';
   if(action==='portfolio') text=Object.values(data.portfolio||{}).slice(-25).reverse().map(e=>`• \`${e.id}\` • ${e.title}`).join('\n')||'Portfolio leer.';
   if(action==='security') text=`Anti-Nuke: **${data.security.antiNuke.enabled?'aktiv':'inaktiv'}**\nWhitelist: **${data.security.antiNuke.whitelist.length}**\nLimit: **${data.security.antiNuke.threshold} Aktionen / ${Math.round(data.security.antiNuke.windowMs/1000)}s**`;
+  if(action==='calendar') return interaction.reply({embeds:[calendarEmbed(data)],ephemeral:true,allowedMentions:{parse:[]}});
+  if(action==='stats') return interaction.reply({embeds:[staffStatsEmbed(data)],ephemeral:true,allowedMentions:{parse:[]}});
+  if(action==='finance') return interaction.reply({embeds:[financeReportEmbed(data)],ephemeral:true});
+  if(action==='refunds') text=Object.values(data.refunds||{}).filter(r=>r.status==='pending').slice(-25).reverse().map(r=>`• **${r.id}** • ${r.orderId} • <@${r.userId}>`).join('\n')||'Keine offenen Refunds.';
+  if(action==='partners') text=Object.values(data.partnerApplications||{}).filter(r=>r.status==='pending').slice(-25).reverse().map(r=>`• **${r.id}** • ${r.project} • <@${r.userId}>`).join('\n')||'Keine offenen Partnerschaftsanfragen.';
   await interaction.reply({embeds:[shopEmbed(`🧭 Staff • ${action}`,text||'Keine Daten.')],ephemeral:true,allowedMentions:{parse:[]}});
 }
 
 async function sellingHealthCheck(guild,data,selfHeal=false){
-  const requiredChannels=['📜・regelwerk','✅・verifizierung','🛒・bestellen','🎫・support-ticket','📊・shop-dashboard','📋・logs','🛡️・security-logs','🤖・automation-log'];
+  const requiredChannels=['📜・regelwerk','✅・verifizierung','👥・teamliste','🛒・bestellen','🎫・support-ticket','📊・shop-dashboard','📋・logs','🛡️・security-logs','🤖・automation-log'];
   const missingChannels=requiredChannels.filter(name=>!findSellingTextChannel(guild,name));
   const missingRoles=['owner','management','support','verified'].filter(key=>!findSellingRole(guild,key));
   let healed=false;
@@ -3445,28 +4430,531 @@ async function backupSellingStore(){
 
 async function runSellingAutomationForGuild(guild){
   if (sellingResetGuilds.has(guild.id)) return;
-  const {store,data}=getGuildShopData(guild.id);if(!data.automation.enabled)return;
-  const now=Date.now();data.automation.lastTickAt=now;
-  const queue=activeQueue(data);
-  if(data.automation.autoAvailability){const old=data.config.availability;data.config.availability=queue.length>=Number(data.automation.closeAt)?'closed':queue.length>=Number(data.automation.busyAt)?'busy':'open';if(old!==data.config.availability)await logAutomation(guild,'🚦 Shop-Status automatisch geändert',`${availabilityLabel(old)} → **${availabilityLabel(data.config.availability)}** • aktive Queue: ${queue.length}`);}
-  for(const order of Object.values(data.orders||{})){
-    if(order.closedAt)continue;
-    const ticket=order.channelId?await guild.channels.fetch(order.channelId).catch(()=>null):null;
-    if(order.channelId && !ticket){order.closedAt ||= now; order.orphanedAt ||= now; order.channelId=null; await logAutomation(guild,'🧹 Verwaiste Bestellung bereinigt',`**${order.id}** hatte keinen vorhandenen Bestell-Channel mehr und wurde aus der offenen Ticket-Sperre entfernt.`); continue;}
-    if(!order.paidAt&&Number.isFinite(Number(order.finalPrice??order.basePrice))&&now-Number(order.lastPaymentReminderAt||order.createdAt)>=Number(data.automation.reminderHours)*3600000){if(ticket?.isTextBased())await ticket.send({content:`<@${order.userId}> 💳 Erinnerung: Für **${order.id}** ist noch keine Zahlung bestätigt. Wenn du bereits bezahlt hast, sende bitte nur die benötigte Transaktionsreferenz ins Ticket.`,allowedMentions:{users:[order.userId]}}).catch(()=>{});order.lastPaymentReminderAt=now;}
-    if(order.deliveryReadyAt&&!order.acceptedAt&&now-Number(order.deliveryReadyAt)>=Number(data.automation.autoCloseHours)*3600000){closeTicketAutomatically(guild,data,order,`Automatisch ${data.automation.autoCloseHours}h nach Lieferung archiviert.`);}
-    if(order.acceptedAt&&!order.reviewSubmitted&&now-Number(order.lastReviewReminderAt||order.acceptedAt)>=Number(data.automation.reviewReminderHours)*3600000){const delivery=order.deliveryChannelId?await guild.channels.fetch(order.deliveryChannelId).catch(()=>null):null;if(delivery?.isTextBased())await delivery.send({content:`<@${order.userId}> ⭐ Wenn alles passt, kannst du deine Bestellung **${order.id}** noch bewerten.`,components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`selling_review_open:${order.id}`).setLabel('Bewertung abgeben').setEmoji('⭐').setStyle(ButtonStyle.Success))],allowedMentions:{users:[order.userId]}}).catch(()=>{});order.lastReviewReminderAt=now;}
+  const { store, data } = getGuildShopData(guild.id);
+  if (!data.automation.enabled) return;
+
+  const now = Date.now();
+  data.automation.lastTickAt = now;
+  const queue = activeQueue(data);
+
+  // Auto-Auslastung ändert einen bewusst manuell gesperrten Shop nicht.
+  if (data.automation.autoAvailability && !data.config.availabilityManual) {
+    const old = data.config.availability;
+    data.config.availability = queue.length >= Number(data.automation.closeAt)
+      ? 'closed'
+      : queue.length >= Number(data.automation.busyAt) ? 'busy' : 'open';
+    if (old !== data.config.availability) {
+      await logAutomation(guild, '🚦 Shop-Status automatisch geändert', `${availabilityLabel(old)} → **${availabilityLabel(data.config.availability)}** • aktive Queue: ${queue.length}`);
+    }
   }
-  await refreshOrderStatusPanel(guild,data).catch(()=>{});await refreshStaffDashboard(guild,data).catch(()=>{});await refreshShopCatalog(guild,data).catch(()=>{});
-  if(now-Number(data.automation.lastHealthAt||0)>30*60*1000){const report=await sellingHealthCheck(guild,data,true);await logAutomation(guild,'❤️ Automatischer Health Check',report);}
-  const dateKey=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Vienna',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
-  const hour=Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Vienna',hour:'2-digit',hour12:false}).format(new Date()));
-  if(hour>=19&&data.automation.lastDailyReportDate!==dateKey){data.automation.lastDailyReportDate=dateKey;const open=Object.values(data.orders||{}).filter(o=>!o.closedAt).length;const delivered=Object.values(data.orders||{}).filter(o=>o.deliveredAt&&new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Vienna',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(o.deliveredAt))===dateKey).length;await logAutomation(guild,'📈 Tagesbericht',`Offene Bestellungen: **${open}**\nQueue: **${queue.length}**\nHeute geliefert: **${delivered}**\nShop: **${availabilityLabel(data.config.availability)}**`);}
+
+  for (const order of Object.values(data.orders || {})) {
+    if (!order || order.closedAt) continue;
+    const ticket = order.channelId ? await guild.channels.fetch(order.channelId).catch(() => null) : null;
+
+    if (order.channelId && !ticket) {
+      order.closedAt ||= now;
+      order.orphanedAt ||= now;
+      order.channelId = null;
+      await logAutomation(guild, '🧹 Verwaiste Bestellung bereinigt', `**${order.id}** hatte keinen vorhandenen Bestell-Channel mehr und wurde aus der offenen Ticket-Sperre entfernt.`);
+      continue;
+    }
+
+    const reminderMs = Math.max(1, Number(data.automation.reminderHours || 24)) * 3600000;
+    const noResponseMs = Math.max(2, Number(data.automation.noResponseHours || 48)) * 3600000;
+
+    if (!order.paidAt && Number.isFinite(Number(order.finalPrice ?? order.basePrice)) && now - Number(order.lastPaymentReminderAt || order.createdAt) >= reminderMs) {
+      if (ticket?.isTextBased()) {
+        await ticket.send({
+          content: `<@${order.userId}> 💳 Erinnerung: Für **${order.id}** ist noch keine Zahlung bestätigt. Wenn du bereits bezahlt hast, sende bitte nur die benötigte Transaktionsreferenz ins Ticket.`,
+          allowedMentions: { users: [order.userId] },
+        }).catch(() => {});
+      }
+      order.lastPaymentReminderAt = now;
+    }
+
+    // Wartet das Team auf den Kunden, wird zunächst erinnert. Nur unbezahlte/
+    // noch nicht gestartete Tickets werden nach sehr langer Funkstille archiviert.
+    if (order.waitingOn === 'customer' && ticket?.isTextBased()) {
+      const since = now - Number(order.lastCustomerAt || order.lastStaffAt || order.lastActivityAt || order.createdAt);
+      if (since >= reminderMs && now - Number(order.lastCustomerFollowupAt || 0) >= reminderMs) {
+        await ticket.send({
+          content: `<@${order.userId}> 🔔 Für **${order.id}** wartet das Team noch auf deine Rückmeldung. Wenn du den Auftrag nicht mehr möchtest, sag bitte kurz Bescheid.`,
+          allowedMentions: { users: [order.userId] },
+        }).catch(() => {});
+        order.lastCustomerFollowupAt = now;
+      }
+      if (!order.paidAt && since >= noResponseMs * 2 && !order.offerId) {
+        closeTicketAutomatically(guild, data, order, `Automatisch wegen ausbleibender Kundenantwort nach ${Math.round(noResponseMs*2/3600000)}h archiviert.`);
+        continue;
+      }
+    }
+
+    // Wartet der Kunde auf das Team, bekommt der zuständige Mitarbeiter intern
+    // einen Reminder; der Kunde wird dadurch nicht zugespammt.
+    if (order.waitingOn === 'staff') {
+      const since = now - Number(order.lastStaffAt || order.lastActivityAt || order.createdAt);
+      if (since >= reminderMs && now - Number(order.lastStaffFollowupAt || 0) >= reminderMs) {
+        const internal = findSellingTextChannel(guild, '📦・bestellungen');
+        if (internal) {
+          await internal.send({
+            content: order.assignedTo ? `<@${order.assignedTo}>` : undefined,
+            embeds: [shopEmbed(`🔔 Team-Reminder • ${order.id}`, `Der Kunde wartet seit längerem auf eine Team-Antwort.\nTicket: ${ticket ? `<#${ticket.id}>` : '—'}\nPriorität: ${orderPriorityInfo(order).emoji} **${orderPriorityInfo(order).label}**`)],
+            allowedMentions: { users: order.assignedTo ? [order.assignedTo] : [] },
+          }).catch(() => {});
+        }
+        order.lastStaffFollowupAt = now;
+      }
+    }
+
+    if (order.dueAt && !order.deliveredAt) {
+      const remaining = Number(order.dueAt) - now;
+      const warnMs = Math.max(1, Number(data.automation.deadlineWarnHours || 24)) * 3600000;
+      if (remaining <= warnMs && !order.deadlineWarnedAt) {
+        const internal = findSellingTextChannel(guild, '📅・auftragskalender') || findSellingTextChannel(guild, '📦・bestellungen');
+        if (internal) {
+          await internal.send({
+            content: order.assignedTo ? `<@${order.assignedTo}>` : undefined,
+            embeds: [shopEmbed(remaining < 0 ? `🚨 Deadline überschritten • ${order.id}` : `⏰ Deadline bald fällig • ${order.id}`, `**Produkt:** ${orderProductLabel(order)}\n**Deadline:** <t:${Math.floor(order.dueAt/1000)}:F>\n**Priorität:** ${orderPriorityInfo(order).emoji} ${orderPriorityInfo(order).label}\n**Ticket:** ${ticket ? `<#${ticket.id}>` : '—'}`)],
+            allowedMentions: { users: order.assignedTo ? [order.assignedTo] : [] },
+          }).catch(() => {});
+        }
+        order.deadlineWarnedAt = now;
+      }
+    }
+
+    if (order.deliveryReadyAt && !order.acceptedAt && now - Number(order.deliveryReadyAt) >= Number(data.automation.autoCloseHours) * 3600000) {
+      closeTicketAutomatically(guild, data, order, `Automatisch ${data.automation.autoCloseHours}h nach Lieferung archiviert.`);
+    }
+
+    if (order.acceptedAt && !order.reviewSubmitted && now - Number(order.lastReviewReminderAt || order.acceptedAt) >= Number(data.automation.reviewReminderHours) * 3600000) {
+      const delivery = order.deliveryChannelId ? await guild.channels.fetch(order.deliveryChannelId).catch(() => null) : null;
+      if (delivery?.isTextBased()) {
+        await delivery.send({
+          content: `<@${orderRecipientId(order)}> ⭐ Wenn alles passt, kannst du **${order.id}** noch bewerten.`,
+          components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`selling_review_open:${order.id}`).setLabel('Bewertung abgeben').setEmoji('⭐').setStyle(ButtonStyle.Success))],
+          allowedMentions: { users: [orderRecipientId(order)] },
+        }).catch(() => {});
+      }
+      order.lastReviewReminderAt = now;
+    }
+  }
+
+  await refreshOrderStatusPanel(guild, data).catch(() => {});
+  await refreshStaffDashboard(guild, data).catch(() => {});
+  await refreshShopCatalog(guild, data).catch(() => {});
+  await refreshCustomerMenu(guild, data).catch(() => {});
+  await refreshCalendarPanel(guild, data).catch(() => {});
+
+  const statsChannel = findSellingTextChannel(guild, '🏆・staff-stats');
+  if (statsChannel) {
+    const messages = await statsChannel.messages.fetch({ limit: 25 }).catch(() => null);
+    let msg = messages?.find(m => m.author.id === guild.members.me?.id && m.embeds?.[0]?.title === '🏆 Staff-Statistik');
+    const payload = { embeds: [staffStatsEmbed(data)], allowedMentions: { parse: [] } };
+    if (msg) await msg.edit(payload).catch(() => {});
+    else await statsChannel.send(payload).catch(() => {});
+  }
+
+  if (now - Number(data.automation.lastHealthAt || 0) > 30 * 60 * 1000) {
+    const beforeMissing = ['📜・regelwerk','✅・verifizierung','🛒・bestellen','🎫・support-ticket','📊・shop-dashboard'].filter(name => !findSellingTextChannel(guild,name));
+    const report = await sellingHealthCheck(guild, data, true);
+    await logAutomation(guild, '❤️ Automatischer Health Check', report);
+    if (beforeMissing.length) await alertSellingOwner(guild, '⚠️ Turbo Designs • Self-Heal', `Es wurden fehlende kritische Shop-Strukturen erkannt und der Self-Heal wurde ausgeführt.\n\n${report}`).catch(() => {});
+  }
+
+  if (now - Number(data.automation.lastPartnerRotationAt || 0) >= Number(data.automation.partnerRotationHours || 24) * 3600000) {
+    await rotatePartnerSpotlight(guild, data).catch(() => {});
+  }
+
+  const dateKey = new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Vienna',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+  const hour = Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Vienna',hour:'2-digit',hour12:false}).format(new Date()));
+  if (hour >= 19 && data.automation.lastDailyReportDate !== dateKey) {
+    data.automation.lastDailyReportDate = dateKey;
+    const open = Object.values(data.orders || {}).filter(o => !o.closedAt).length;
+    const delivered = Object.values(data.orders || {}).filter(o => o.deliveredAt && new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Vienna',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(o.deliveredAt)) === dateKey).length;
+    await logAutomation(guild,'📈 Tagesbericht',`Offene Bestellungen: **${open}**\nQueue: **${queue.length}**\nHeute geliefert: **${delivered}**\nShop: **${availabilityLabel(data.config.availability)}**`);
+  }
+
   saveSellingStore(store);
-  if(now-sellingAutomationLastBackupAt>24*3600000){await backupSellingStore().catch(()=>{});sellingAutomationLastBackupAt=now;await logAutomation(guild,'💾 Auto-Backup','Selling-Daten wurden gesichert. Es werden maximal die letzten 5 Backups behalten.');}
+  if (now - sellingAutomationLastBackupAt > 24 * 3600000) {
+    await backupSellingStore().catch(() => {});
+    sellingAutomationLastBackupAt = now;
+    await logAutomation(guild,'💾 Auto-Backup','Selling-Daten wurden gesichert. Es werden maximal die letzten 5 Backups behalten.');
+  }
+}
+async function runSellingAutomation(client){for(const guild of client.guilds.cache.values())await runSellingAutomationForGuild(guild).catch(error=>console.error('Selling automation tick:',error));}
+
+
+async function createOfferForOrder(guild, data, order, { price, days, scope, by }) {
+  if (!order || order.closedAt || order.acceptedAt) throw new Error('Diese Bestellung ist bereits abgeschlossen.');
+  if (order.paidAt) throw new Error('Nach bestätigter Zahlung kann kein neues Angebot erstellt werden.');
+  const id = nextAdvancedId(data, 'nextOffer', 'OF');
+  const offer = {
+    id, orderId: order.id, userId: order.userId, price: Math.round(Number(price) * 100) / 100,
+    days: Math.max(1, Number(days || 1)), scope: String(scope || '').trim(),
+    createdBy: by, createdAt: Date.now(), status: 'pending', acceptedAt: null, declinedAt: null,
+  };
+  data.offers[id] = offer;
+  order.offerId = id;
+  order.waitingOn = 'customer';
+  order.lastStaffAt = Date.now();
+  order.lastActivityAt = Date.now();
+  const channel = order.channelId ? await guild.channels.fetch(order.channelId).catch(() => null) : null;
+  if (channel?.isTextBased()) {
+    await channel.send({
+      content: `<@${order.userId}>`,
+      embeds: [shopEmbed(`🧾 Angebot ${id} • ${order.id}`, `**Preis:** ${formatEuro(offer.price)}\n**Geplante Lieferzeit:** ${offer.days} Tag(e)\n\n**Leistungsumfang**\n${offer.scope}\n\nBitte bestätige oder lehne dieses Angebot über die Buttons ab.`)],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`selling_offer_accept:${id}`).setLabel('Angebot annehmen').setEmoji('✅').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`selling_offer_decline:${id}`).setLabel('Ablehnen').setEmoji('❌').setStyle(ButtonStyle.Danger),
+      )],
+      allowedMentions: { users: [order.userId] },
+    });
+    await syncOrderWorkflow(guild, data, order).catch(() => {});
+  }
+  return offer;
 }
 
-async function runSellingAutomation(client){for(const guild of client.guilds.cache.values())await runSellingAutomationForGuild(guild).catch(error=>console.error('Selling automation tick:',error));}
+async function handleOfferButton(interaction, action, offerId) {
+  if (!interaction.inGuild()) return;
+  const lock = `offer:${interaction.guildId}:${offerId}`;
+  if (!acquireSellingActionLock(lock)) return interaction.reply({ content: '⏳ Dieses Angebot wird gerade verarbeitet.', ephemeral: true });
+  try {
+    const { store, data } = getGuildShopData(interaction.guildId);
+    const offer = data.offers?.[offerId];
+    const order = offer ? data.orders?.[offer.orderId] : null;
+    if (!offer || !order) return interaction.reply({ content: '❌ Angebot nicht gefunden.', ephemeral: true });
+    if (interaction.user.id !== order.userId) return interaction.reply({ content: '❌ Nur der Käufer dieser Bestellung kann das Angebot bearbeiten.', ephemeral: true });
+    if (!isOrderTicketContext(interaction, order)) return interaction.reply({ content: '❌ Nutze diesen Button im zugehörigen Bestell-Ticket.', ephemeral: true });
+    if (offer.status !== 'pending') return interaction.reply({ content: `ℹ️ Dieses Angebot ist bereits **${offer.status}**.`, ephemeral: true });
+
+    if (action === 'accept') {
+      offer.status = 'accepted'; offer.acceptedAt = Date.now();
+      order.basePrice = offer.price;
+      order.finalPrice = calculateOrderFinalPrice(order);
+      order.dueAt = Date.now() + offer.days * 86400000;
+      order.deadline = `${offer.days} Tag(e) ab Angebotsannahme`;
+      order.waitingOn = 'staff';
+      order.lastCustomerAt = Date.now();
+      order.lastActivityAt = Date.now();
+      await interaction.update({ content: `✅ <@${order.userId}> hat **${offerId}** angenommen.`, embeds: interaction.message.embeds, components: [] }).catch(() => {});
+      await interaction.followUp({ content: `✅ Angebot angenommen. Endpreis: **${formatEuro(order.finalPrice)}**. Das Team kann jetzt die Zahlung bestätigen.`, ephemeral: true }).catch(() => {});
+    } else {
+      offer.status = 'declined'; offer.declinedAt = Date.now();
+      order.waitingOn = 'staff';
+      order.lastCustomerAt = Date.now();
+      order.lastActivityAt = Date.now();
+      await interaction.update({ content: `❌ <@${order.userId}> hat **${offerId}** abgelehnt.`, embeds: interaction.message.embeds, components: [] }).catch(() => {});
+    }
+    saveSellingStore(store);
+    await syncOrderWorkflow(interaction.guild, data, order).catch(() => {});
+    await refreshCalendarPanel(interaction.guild, data).catch(() => {});
+  } finally {
+    releaseSellingActionLock(lock);
+  }
+}
+
+async function openOfferModal(interaction, orderId) {
+  const { data } = getGuildShopData(interaction.guildId);
+  const order = data.orders?.[orderId];
+  if (!order || !canHandleOrder(interaction.member, order)) return interaction.reply({ content: '❌ Keine Berechtigung für diese Bestellung.', ephemeral: true });
+  if (!isOrderTicketContext(interaction, order)) return interaction.reply({ content: '❌ Öffne das Angebot im zugehörigen Bestell-Ticket.', ephemeral: true });
+  const modal = new ModalBuilder().setCustomId(`selling_offer_modal:${orderId}`).setTitle(`Angebot • ${orderId}`);
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price').setLabel('Preis in EUR').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(20)),
+    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('days').setLabel('Lieferzeit in Tagen').setStyle(TextInputStyle.Short).setRequired(true).setValue(String(orderEtaDays(order))).setMaxLength(4)),
+    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('scope').setLabel('Leistungsumfang').setStyle(TextInputStyle.Paragraph).setRequired(true).setValue(String(order.details || '').slice(0, 1500)).setMaxLength(1500)),
+  );
+  await interaction.showModal(modal);
+}
+
+async function submitOfferModal(interaction, orderId) {
+  if (!interaction.inGuild()) return;
+  const { store, data } = getGuildShopData(interaction.guildId);
+  const order = data.orders?.[orderId];
+  if (!order || !canHandleOrder(interaction.member, order)) return interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+  const price = Number(String(interaction.fields.getTextInputValue('price')).replace(',', '.'));
+  const days = Number.parseInt(interaction.fields.getTextInputValue('days'), 10);
+  const scope = interaction.fields.getTextInputValue('scope');
+  if (!Number.isFinite(price) || price < 0 || !Number.isFinite(days) || days < 1) return interaction.reply({ content: '❌ Preis oder Lieferzeit ungültig.', ephemeral: true });
+  const offer = await createOfferForOrder(interaction.guild, data, order, { price, days, scope, by: interaction.user.id });
+  saveSellingStore(store);
+  await interaction.reply({ content: `✅ Angebot **${offer.id}** wurde im Ticket gepostet.`, ephemeral: true });
+}
+
+async function cycleOrderPriority(interaction, orderId) {
+  const { store, data } = getGuildShopData(interaction.guildId);
+  const order = data.orders?.[orderId];
+  if (!order || !canHandleOrder(interaction.member, order)) return interaction.reply({ content: '❌ Keine Berechtigung.', ephemeral: true });
+  const sequence = ['normal', 'high', 'vip', 'urgent'];
+  const next = sequence[(sequence.indexOf(order.priority || 'normal') + 1) % sequence.length];
+  order.priority = next;
+  order.updatedAt = Date.now();
+  saveSellingStore(store);
+  await syncOrderWorkflow(interaction.guild, data, order).catch(() => {});
+  await refreshCalendarPanel(interaction.guild, data).catch(() => {});
+  await interaction.reply({ content: `${orderPriorityInfo(order).emoji} Priorität für **${order.id}**: **${orderPriorityInfo(order).label}**`, ephemeral: true });
+}
+
+async function handleCustomerMenuButton(interaction, action) {
+  if (!interaction.inGuild()) return;
+  const { store, data } = getGuildShopData(interaction.guildId);
+  if (action === 'shop') {
+    const channel = findSellingTextChannel(interaction.guild, '🛒・bestellen');
+    return interaction.reply({ content: channel ? `🛒 Shop & Bestellen: <#${channel.id}>` : '❌ Shop-Channel fehlt.', ephemeral: true });
+  }
+  if (action === 'cart') {
+    return interaction.reply({ embeds: [cartEmbed(data, interaction.user.id)], components: [cartActionRow()], ephemeral: true });
+  }
+  if (action === 'orders') {
+    const orders = Object.values(data.orders || {}).filter(o => o.userId === interaction.user.id || o.giftRecipientId === interaction.user.id).sort((a,b)=>Number(b.createdAt)-Number(a.createdAt)).slice(0, 15);
+    const text = orders.length ? orders.map(o => `• **${o.id}** • ${orderStatusLabel(o.status)} • ${orderProductLabel(o)}${o.deliveryChannelId ? ` • <#${o.deliveryChannelId}>` : ''}`).join('\n') : 'Du hast noch keine Bestellungen.';
+    return interaction.reply({ embeds: [shopEmbed('📦 Meine Käufe', text)], ephemeral: true, allowedMentions:{parse:[]} });
+  }
+  if (action === 'licenses') {
+    const licenses = Object.values(data.licenses || {}).filter(l => l.userId === interaction.user.id).slice(-20).reverse();
+    const text = licenses.length ? licenses.map(l => `🔐 \`${l.id}\` • Bestellung **${l.orderId}** • ${l.active ? '✅ aktiv' : '❌ inaktiv'}`).join('\n') : 'Du hast noch keine Lizenz.';
+    return interaction.reply({ embeds: [shopEmbed('🔐 Meine Lizenzen', text)], ephemeral: true });
+  }
+  if (action === 'support') {
+    const channel = findSellingTextChannel(interaction.guild, '🎫・support-ticket');
+    return interaction.reply({ content: channel ? `🎫 Support: <#${channel.id}>` : '❌ Support-Channel fehlt.', ephemeral: true });
+  }
+  if (action === 'faq') {
+    const channel = findSellingTextChannel(interaction.guild, '❓・faq');
+    return interaction.reply({ content: channel ? `❓ FAQ: <#${channel.id}>` : '❌ FAQ-Channel fehlt.', ephemeral: true });
+  }
+  if (action === 'gift') {
+    const modal = new ModalBuilder().setCustomId('selling_gift_modal').setTitle('🎁 Geschenkbestellung');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('product').setLabel('Produkt: thumbnail/nve/soundpack/grafik/fivem/bot').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(20)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('recipient').setLabel('Discord-ID des Empfängers').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(25)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('details').setLabel('Wünsche / Auftrag').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1500)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('style').setLabel('Stil / Referenz').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(200)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('code').setLabel('Rabatt-/Gutscheincode').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(30)),
+    );
+    return interaction.showModal(modal);
+  }
+  if (action === 'partner') {
+    const modal = new ModalBuilder().setCustomId('selling_partner_modal').setTitle('🤝 Partnerschaft anfragen');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('project').setLabel('Projekt / Community / Server').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(100)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('members').setLabel('Mitglieder / Reichweite').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(100)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('invite').setLabel('Discord / Website / Link').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(300)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('reason').setLabel('Warum eine Partnerschaft?').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1000)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ad').setLabel('Eure Partner-Ad (optional)').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1500)),
+    );
+    return interaction.showModal(modal);
+  }
+  if (action === 'refund') {
+    const modal = new ModalBuilder().setCustomId('selling_refund_modal').setTitle('💸 Refund anfragen');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('order').setLabel('Bestellnummer (UF-....)').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(30)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('reason').setLabel('Grund').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1200)),
+    );
+    return interaction.showModal(modal);
+  }
+  if (action === 'leak') {
+    const modal = new ModalBuilder().setCustomId('selling_leak_modal').setTitle('🚨 Leak melden');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('url').setLabel('Fundstelle / Link').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(500)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('details').setLabel('Beschreibung / betroffenes Produkt').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1200)),
+    );
+    return interaction.showModal(modal);
+  }
+}
+
+async function submitGiftOrder(interaction) {
+  if (!interaction.inGuild()) return;
+  const { store, data } = getGuildShopData(interaction.guildId);
+  if (data.blacklist[interaction.user.id] || data.config.availability === 'closed') return interaction.reply({ content: '❌ Geschenkbestellung aktuell nicht möglich.', ephemeral: true });
+  const duplicate = Object.values(data.orders).find(order => order.userId === interaction.user.id && !order.closedAt);
+  if (duplicate) return interaction.reply({ content: `❌ Du hast bereits eine offene Bestellung **${duplicate.id}**.`, ephemeral: true });
+  const productKey = String(interaction.fields.getTextInputValue('product') || '').trim().toLowerCase();
+  if (!PRODUCT_TYPES[productKey] || !productConfig(data, productKey)?.enabled) return interaction.reply({ content: '❌ Unbekanntes oder deaktiviertes Produkt.', ephemeral: true });
+  const recipientId = parseDiscordUserId(interaction.fields.getTextInputValue('recipient'));
+  if (!recipientId) return interaction.reply({ content: '❌ Ungültige Discord-ID.', ephemeral: true });
+  const recipient = await interaction.guild.members.fetch(recipientId).catch(() => null);
+  if (!recipient || recipient.user.bot) return interaction.reply({ content: '❌ Empfänger muss ein echter User auf diesem Server sein.', ephemeral: true });
+  const discount = getDiscountCodeState(data, interaction.fields.getTextInputValue('code'));
+  if (discount.error) return interaction.reply({ content: `❌ Code ungültig: ${discount.error}`, ephemeral: true });
+  const loyalty = loyaltyForUser(data, interaction.user.id);
+  const orderId = nextOrderId(data);
+  const order = {
+    id: orderId, userId: interaction.user.id, giftRecipientId: recipientId, productKey,
+    details: interaction.fields.getTextInputValue('details').trim(),
+    style: interaction.fields.getTextInputValue('style').trim(), references: '', referenceUploadUrl: null,
+    deadline: '', dueAt: null, notes: '🎁 Geschenkbestellung',
+    couponCode: discount.coupon ? discount.code : null, voucherCode: discount.voucher ? discount.code : null,
+    voucherAmount: discount.voucher ? Number(discount.voucher.remainingAmount ?? discount.voucher.amount ?? 0) : 0,
+    discountPercent: discount.coupon ? Number(discount.coupon.percent || 0) : 0,
+    loyaltyDiscountPercent: loyalty.discount, loyaltyLabel: loyalty.level?.label || null,
+    basePrice: null, finalPrice: null, status: 'pending', revisionsRemaining: Number(PRODUCT_TYPES[productKey].revisions || 0),
+    initialRevisions: Number(PRODUCT_TYPES[productKey].revisions || 0), assignedTo: null,
+    priority: 'normal', waitingOn: 'staff', createdAt: Date.now(), lastActivityAt: Date.now(), lastCustomerAt: Date.now(),
+    paidAt: null, deliveredAt: null, closedAt: null, channelId: null, deliveryChannelId: null,
+    licenseId: null, reviewSubmitted: false, couponRedeemedAt: null, voucherRedeemedAt: null, testMode: Boolean(data.config.testMode),
+  };
+  const category = findSellingCategory(interaction.guild, SELLING.categories.orders);
+  if (!category) return interaction.reply({ content: '❌ Ticket-Kategorie fehlt.', ephemeral: true });
+  data.orders[orderId] = order; saveSellingStore(store);
+  const channel = await interaction.guild.channels.create({
+    name: `gift-${orderId.toLowerCase()}-${sanitizeName(interaction.user.username)}`.slice(0,95),
+    type: ChannelType.GuildText, parent: category.id,
+    topic: `selling-owner:${interaction.user.id}|selling-kind:order|selling-order:${orderId}|selling-product:${productKey}|selling-status:open`,
+    permissionOverwrites: sellingOrderTicketOverwrites(interaction.guild, interaction.user.id, [productKey]),
+    reason: `Selling Geschenkbestellung ${orderId}`,
+  });
+  order.channelId = channel.id;
+  const autoPrice = configuredOrderPrice(data, [productKey]);
+  if (autoPrice !== null) { order.basePrice = autoPrice; order.finalPrice = calculateOrderFinalPrice(order); }
+  await automateNewOrder(interaction.guild, data, order, channel).catch(() => {});
+  saveSellingStore(store);
+  await channel.send({ content:`<@${interaction.user.id}>`, embeds:[orderInfoEmbed(order,data)], components:orderActionRows(order), allowedMentions:{users:[interaction.user.id]} });
+  await syncOrderWorkflow(interaction.guild, data, order).catch(() => {});
+  await interaction.reply({ content:`✅ Geschenkbestellung **${orderId}** erstellt: <#${channel.id}>\nEmpfänger nach erfolgreicher Lieferung: <@${recipientId}>`, ephemeral:true, allowedMentions:{parse:[]} });
+}
+
+async function submitPartnerApplication(interaction) {
+  const { store, data } = getGuildShopData(interaction.guildId);
+  if (!consumeSellingRateLimit(`partner:${interaction.guildId}:${interaction.user.id}`, 2, 24*3600000)) return interaction.reply({ content:'⏳ Du hast bereits kürzlich eine Partnerschaftsanfrage gestellt.', ephemeral:true });
+  const id = nextAdvancedId(data, 'nextPartner', 'PA');
+  const app = {
+    id, userId:interaction.user.id, project:interaction.fields.getTextInputValue('project').trim(),
+    members:interaction.fields.getTextInputValue('members').trim(), invite:interaction.fields.getTextInputValue('invite').trim(),
+    reason:interaction.fields.getTextInputValue('reason').trim(), ad:interaction.fields.getTextInputValue('ad').trim(),
+    status:'pending', createdAt:Date.now(),
+  };
+  data.partnerApplications[id]=app; saveSellingStore(store);
+  const channel=findSellingTextChannel(interaction.guild,'🤝・partner-anfragen');
+  if(channel) await channel.send({embeds:[shopEmbed(`🤝 Partnerschaft ${id}`,`**Antragsteller:** <@${app.userId}>\n**Projekt:** ${app.project}\n**Reichweite:** ${app.members||'—'}\n**Link:** ${app.invite}\n\n**Grund:**\n${app.reason}\n\n**Ad:**\n${app.ad||'—'}`)],allowedMentions:{parse:[]}}).catch(()=>{});
+  await interaction.reply({content:`✅ Partnerschaftsanfrage **${id}** wurde eingereicht.`,ephemeral:true});
+}
+
+async function submitRefundRequest(interaction) {
+  const {store,data}=getGuildShopData(interaction.guildId);
+  const orderId=String(interaction.fields.getTextInputValue('order')).trim().toUpperCase();
+  const order=data.orders?.[orderId];
+  if(!order || (order.userId!==interaction.user.id && order.giftRecipientId!==interaction.user.id)) return interaction.reply({content:'❌ Diese Bestellung gehört nicht zu deinem Account.',ephemeral:true});
+  if(!order.paidAt) return interaction.reply({content:'❌ Für eine nicht bezahlte Bestellung ist kein Refund-Antrag nötig.',ephemeral:true});
+  if(Object.values(data.refunds||{}).some(r=>r.orderId===orderId&&r.status==='pending')) return interaction.reply({content:'⏳ Für diese Bestellung gibt es bereits einen offenen Refund-Antrag.',ephemeral:true});
+  const id=nextAdvancedId(data,'nextRefund','RF');
+  const request={id,orderId,userId:interaction.user.id,reason:interaction.fields.getTextInputValue('reason').trim(),status:'pending',createdAt:Date.now()};
+  data.refunds[id]=request;saveSellingStore(store);
+  const channel=findSellingTextChannel(interaction.guild,'💸・refunds');
+  if(channel) await channel.send({embeds:[shopEmbed(`💸 Refund ${id}`,`**Bestellung:** ${orderId}\n**User:** <@${interaction.user.id}>\n**Betrag:** ${formatEuro(order.finalPrice??order.basePrice)}\n\n**Grund:** ${request.reason}`)],allowedMentions:{parse:[]}}).catch(()=>{});
+  await interaction.reply({content:`✅ Refund-Antrag **${id}** wurde an das Management übermittelt.`,ephemeral:true});
+}
+
+async function submitLeakReport(interaction) {
+  const {store,data}=getGuildShopData(interaction.guildId);
+  if(!consumeSellingRateLimit(`leak:${interaction.guildId}:${interaction.user.id}`,5,24*3600000)) return interaction.reply({content:'⏳ Zu viele Meldungen in kurzer Zeit.',ephemeral:true});
+  const id=nextAdvancedId(data,'nextLeak','LR');
+  const report={id,userId:interaction.user.id,url:interaction.fields.getTextInputValue('url').trim(),details:interaction.fields.getTextInputValue('details').trim(),status:'open',createdAt:Date.now()};
+  data.leakReports[id]=report;saveSellingStore(store);
+  const channel=findSellingTextChannel(interaction.guild,'🚨・leak-reports');
+  if(channel) await channel.send({embeds:[shopEmbed(`🚨 Leak Report ${id}`,`**Gemeldet von:** <@${report.userId}>\n**Fundstelle:** ${report.url}\n\n${report.details}`)],allowedMentions:{parse:[]}}).catch(()=>{});
+  await interaction.reply({content:`✅ Meldung **${id}** wurde intern weitergegeben.`,ephemeral:true});
+}
+
+async function publishRelease(guild, data, productKey, version, releaseText, attachment, actorId) {
+  const product=PRODUCT_TYPES[productKey]; if(!product) throw new Error('Produkt unbekannt.');
+  const id=`${productKey}-${String(version).trim()}`;
+  data.releases[id]={id,productKey,version:String(version).trim(),text:String(releaseText).trim(),createdAt:Date.now(),createdBy:actorId,attachmentUrl:attachment?.url||null};
+  const role=product.roleKey?findSellingRole(guild,product.roleKey):null;
+  const updateChannel=findSellingTextChannel(guild,'🔄・produkt-updates');
+  const news=findSellingTextChannel(guild,'🆕・neuheiten');
+  const payload={
+    content:role?`<@&${role.id}>`:undefined,
+    embeds:[shopEmbed(`🚀 ${product.label} • v${version}`,`${releaseText}${attachment?.url?`\n\n**Download/Anhang:** ${attachment.url}`:''}`)],
+    allowedMentions:{roles:role?[role.id]:[]},
+  };
+  if(updateChannel) await updateChannel.send(payload).catch(()=>{});
+  if(news) await news.send({embeds:payload.embeds,allowedMentions:{parse:[]}}).catch(()=>{});
+  const log=findSellingTextChannel(guild,'🚀・release-log');
+  if(log) await log.send({embeds:[shopEmbed(`🚀 Release gespeichert • ${id}`,`Von <@${actorId}>\nKäuferrolle: ${role?`<@&${role.id}>`:'—'}`)],allowedMentions:{parse:[]}}).catch(()=>{});
+}
+
+async function rotatePartnerSpotlight(guild,data){
+  const approved=Object.values(data.partnerApplications||{}).filter(app=>app.status==='approved'&&app.ad);
+  if(!approved.length)return;
+  const channel=findSellingTextChannel(guild,'🤝・partner');if(!channel)return;
+  const current=Number(data.automation.partnerRotationIndex||0)%approved.length;
+  const app=approved[current]; data.automation.partnerRotationIndex=(current+1)%approved.length; data.automation.lastPartnerRotationAt=Date.now();
+  let msg=data.config.partnerSpotlightMessageId?await channel.messages.fetch(data.config.partnerSpotlightMessageId).catch(()=>null):null;
+  const payload={embeds:[shopEmbed(`🤝 Partner Spotlight • ${app.project}`,`${app.ad}\n\n**Partner-ID:** \`${app.id}\``)],allowedMentions:{parse:[]}};
+  if(msg)await msg.edit(payload).catch(()=>{msg=null;});
+  if(!msg){msg=await channel.send(payload);data.config.partnerSpotlightMessageId=msg.id;}
+}
+
+async function handleAdvancedToolsCommand(interaction, sub, data, store) {
+  const manage = canManageSellingShop(interaction.member);
+  if (sub === 'calendar') return interaction.reply({ embeds:[calendarEmbed(data)], ephemeral:true, allowedMentions:{parse:[]} });
+  if (sub === 'staffstats') return interaction.reply({ embeds:[staffStatsEmbed(data)], ephemeral:true, allowedMentions:{parse:[]} });
+  if (sub === 'teamlist') { await refreshTeamList(interaction.guild, data); saveSellingStore(store); return interaction.reply({ content:'✅ Teamliste wurde aktualisiert.', ephemeral:true }); }
+  if (sub === 'productstats') return interaction.reply({ embeds:[productStatsEmbed(data)], ephemeral:true });
+  if (sub === 'summary') {
+    const id=String(interaction.options.getString('order')||'').trim().toUpperCase(); const order=data.orders?.[id];
+    if(!order||!canHandleOrder(interaction.member,order)) return interaction.reply({content:'❌ Bestellung nicht gefunden oder keine Berechtigung.',ephemeral:true});
+    const summary=await buildOrderConversationSummary(interaction.guild,order); return interaction.reply({embeds:[shopEmbed(`📝 Zusammenfassung • ${id}`,summary.text)],ephemeral:true,allowedMentions:{parse:[]}});
+  }
+  if (!manage) return interaction.reply({content:'❌ Dieses erweiterte Tool ist nur für Management / Inhaber.',ephemeral:true});
+  if(sub==='offer'){
+    const id=String(interaction.options.getString('order')).trim().toUpperCase();const order=data.orders?.[id];
+    if(!order) return interaction.reply({content:'❌ Bestellung nicht gefunden.',ephemeral:true});
+    const offer=await createOfferForOrder(interaction.guild,data,order,{price:interaction.options.getNumber('preis'),days:interaction.options.getInteger('tage'),scope:interaction.options.getString('umfang'),by:interaction.user.id});
+    saveSellingStore(store);return interaction.reply({content:`✅ Angebot **${offer.id}** wurde gepostet.`,ephemeral:true});
+  }
+  if(sub==='priority'){
+    const id=String(interaction.options.getString('order')).trim().toUpperCase();const order=data.orders?.[id];if(!order)return interaction.reply({content:'❌ Bestellung nicht gefunden.',ephemeral:true});
+    order.priority=interaction.options.getString('level');order.updatedAt=Date.now();saveSellingStore(store);await syncOrderWorkflow(interaction.guild,data,order).catch(()=>{});await refreshCalendarPanel(interaction.guild,data).catch(()=>{});
+    return interaction.reply({content:`✅ ${id}: ${orderPriorityInfo(order).emoji} **${orderPriorityInfo(order).label}**`,ephemeral:true});
+  }
+  if(sub==='finance'){
+    const action=interaction.options.getString('action');
+    if(action==='report')return interaction.reply({embeds:[financeReportEmbed(data)],ephemeral:true});
+    if(action==='expense-add'){const amount=interaction.options.getNumber('betrag');const desc=interaction.options.getString('text')||'Kosten';if(amount===null)return interaction.reply({content:'❌ Betrag fehlt.',ephemeral:true});const id=`EX-${Date.now().toString(36).toUpperCase()}`;data.expenses[id]={id,amount,description:desc,at:Date.now(),by:interaction.user.id};saveSellingStore(store);return interaction.reply({content:`✅ Kosten **${formatEuro(amount)}** als \`${id}\` gespeichert.`,ephemeral:true});}
+    const list=Object.values(data.expenses||{}).slice(-25).reverse();return interaction.reply({embeds:[shopEmbed('💸 Kostenliste',list.length?list.map(x=>`• \`${x.id}\` • ${formatEuro(x.amount)} • ${x.description}`).join('\n'):'Keine Kosten erfasst.')],ephemeral:true});
+  }
+  if(sub==='voucher'){
+    const action=interaction.options.getString('action');const code=String(interaction.options.getString('code')||'').trim().toUpperCase();
+    if(action==='list'){const list=Object.values(data.vouchers||{});return interaction.reply({embeds:[shopEmbed('🎟️ Gutscheine',list.length?list.map(v=>`• \`${v.code}\` • Rest ${formatEuro(v.remainingAmount)} / ${formatEuro(v.amount)} • ${v.maxUses?`${v.uses}/${v.maxUses}`:`${v.uses} Nutzungen`}`).join('\n'):'Keine Gutscheine.')],ephemeral:true});}
+    if(!code)return interaction.reply({content:'❌ Code fehlt.',ephemeral:true});
+    if(action==='remove'){delete data.vouchers[code];saveSellingStore(store);return interaction.reply({content:`✅ Gutschein \`${code}\` entfernt.`,ephemeral:true});}
+    const amount=interaction.options.getNumber('betrag');if(amount===null)return interaction.reply({content:'❌ Betrag fehlt.',ephemeral:true});
+    const maxUses=interaction.options.getInteger('nutzungen')??1;const days=interaction.options.getInteger('tage')??0;
+    data.vouchers[code]={code,amount,remainingAmount:amount,uses:0,maxUses,expiresAt:days?Date.now()+days*86400000:null,createdAt:Date.now(),by:interaction.user.id};saveSellingStore(store);
+    return interaction.reply({content:`✅ Gutschein \`${code}\` mit **${formatEuro(amount)}** erstellt.`,ephemeral:true});
+  }
+  if(sub==='release'){const productKey=interaction.options.getString('produkt');if(!canPublishProductUpdate(interaction.member,productKey))return interaction.reply({content:'❌ Keine Berechtigung für dieses Produkt.',ephemeral:true});await publishRelease(interaction.guild,data,productKey,interaction.options.getString('version'),interaction.options.getString('text'),interaction.options.getAttachment('datei'),interaction.user.id);saveSellingStore(store);return interaction.reply({content:'✅ Release veröffentlicht und Käufer informiert.',ephemeral:true});}
+  if(sub==='refund'){
+    const id=String(interaction.options.getString('id')).trim().toUpperCase();const item=data.refunds?.[id];if(!item)return interaction.reply({content:'❌ Refund nicht gefunden.',ephemeral:true});const action=interaction.options.getString('action');
+    if(action==='info')return interaction.reply({embeds:[shopEmbed(`💸 ${id}`,`Bestellung: **${item.orderId}**\nUser: <@${item.userId}>\nStatus: **${item.status}**\nGrund: ${item.reason}`)],ephemeral:true,allowedMentions:{parse:[]}});
+    item.status=action==='approve'?'approved':'denied';item.decidedAt=Date.now();item.decidedBy=interaction.user.id;item.note=interaction.options.getString('notiz')||null;saveSellingStore(store);
+    const member=await interaction.guild.members.fetch(item.userId).catch(()=>null);if(member)await member.send({embeds:[shopEmbed(`💸 Refund ${id} • ${item.status}`,`Bestellung **${item.orderId}**\n${item.note||'Das Management hat deine Anfrage bearbeitet.'}`)]}).catch(()=>{});
+    return interaction.reply({content:`✅ ${id} wurde **${item.status}**.`,ephemeral:true});
+  }
+  if(sub==='partner'){
+    const id=String(interaction.options.getString('id')).trim().toUpperCase();const app=data.partnerApplications?.[id];if(!app)return interaction.reply({content:'❌ Partnerschaftsanfrage nicht gefunden.',ephemeral:true});const action=interaction.options.getString('action');
+    if(action==='info')return interaction.reply({embeds:[shopEmbed(`🤝 ${id}`,`Projekt: **${app.project}**\nUser: <@${app.userId}>\nStatus: **${app.status}**\nLink: ${app.invite}\nGrund: ${app.reason}`)],ephemeral:true,allowedMentions:{parse:[]}});
+    app.status=action==='approve'?'approved':'denied';app.decidedAt=Date.now();app.decidedBy=interaction.user.id;saveSellingStore(store);
+    const member=await interaction.guild.members.fetch(app.userId).catch(()=>null);if(member&&app.status==='approved'){const role=findSellingRole(interaction.guild,'partner');if(role)await member.roles.add(role,'Partnerschaft angenommen').catch(()=>{});}if(member)await member.send({embeds:[shopEmbed(`🤝 Partnerschaft ${id}`,app.status==='approved'?'✅ Eure Partnerschaft wurde angenommen.':'❌ Eure Partnerschaft wurde aktuell nicht angenommen.')] }).catch(()=>{});
+    return interaction.reply({content:`✅ ${id}: **${app.status}**.`,ephemeral:true});
+  }
+  if(sub==='testmode'){
+    const status=interaction.options.getString('status');if(status==='on')data.config.testMode=true;if(status==='off')data.config.testMode=false;saveSellingStore(store);return interaction.reply({content:`🧪 Testmodus: **${data.config.testMode?'AN':'AUS'}**. Neue Bestellungen werden ${data.config.testMode?'als Test markiert und aus Umsatz/Loyalty ausgeschlossen':'wieder normal erfasst'}.`,ephemeral:true});
+  }
+  if(sub==='export'){
+    const exportData={version:1,exportedAt:Date.now(),products:data.products,coupons:data.coupons,vouchers:data.vouchers,automation:data.automation,config:{paypalEmail:data.config.paypalEmail,availability:data.config.availability,availabilityNote:data.config.availabilityNote}};
+    return interaction.reply({content:'✅ Shop-Konfiguration exportiert.',files:[new AttachmentBuilder(Buffer.from(JSON.stringify(exportData,null,2),'utf8'),{name:`turbo-shop-export-${interaction.guildId}.json`})],ephemeral:true});
+  }
+  if(sub==='import'){
+    const attachment=interaction.options.getAttachment('datei');if(!attachment?.url)return interaction.reply({content:'❌ Datei fehlt.',ephemeral:true});
+    const response=await fetch(attachment.url);if(!response.ok)return interaction.reply({content:'❌ Importdatei konnte nicht geladen werden.',ephemeral:true});
+    const parsed=JSON.parse(await response.text());if(!parsed||typeof parsed!=='object')return interaction.reply({content:'❌ Ungültiges JSON.',ephemeral:true});
+    if(parsed.products&&typeof parsed.products==='object')data.products={...data.products,...parsed.products};if(parsed.coupons&&typeof parsed.coupons==='object')data.coupons={...data.coupons,...parsed.coupons};if(parsed.vouchers&&typeof parsed.vouchers==='object')data.vouchers={...data.vouchers,...parsed.vouchers};if(parsed.automation&&typeof parsed.automation==='object')data.automation={...data.automation,...parsed.automation};if(parsed.config&&typeof parsed.config==='object'){data.config.paypalEmail=parsed.config.paypalEmail??data.config.paypalEmail;data.config.availability=parsed.config.availability??data.config.availability;data.config.availabilityNote=parsed.config.availabilityNote??data.config.availabilityNote;}saveSellingStore(store);await refreshShopCatalog(interaction.guild,data).catch(()=>{});return interaction.reply({content:'✅ Shop-Konfiguration importiert.',ephemeral:true});
+  }
+}
 
 async function handleSellCommand(interaction) {
   if (!interaction.inGuild()) return;
@@ -3475,8 +4963,13 @@ async function handleSellCommand(interaction) {
     return;
   }
 
+  const group = interaction.options.getSubcommandGroup(false);
   const sub = interaction.options.getSubcommand();
   const { store, data } = getGuildShopData(interaction.guildId);
+  if (group === 'tools') {
+    await handleAdvancedToolsCommand(interaction, sub, data, store);
+    return;
+  }
   const managementOnly = new Set(['product', 'automation', 'wizard', 'blacklist', 'coupon', 'availability', 'paypal']);
   if (managementOnly.has(sub) && !canManageSellingShop(interaction.member)) {
     await interaction.reply({ content: '❌ Diese Shop-Verwaltung ist nur für **Management / Server-Inhaber** verfügbar.', ephemeral: true });
@@ -3595,7 +5088,7 @@ async function handleSellCommand(interaction) {
       }
       order.basePrice = Math.round(Number(amount) * 100) / 100;
       const discount = effectiveDiscountForOrder(order);
-      order.finalPrice = Math.round(order.basePrice * (1 - discount / 100) * 100) / 100;
+      order.finalPrice = calculateOrderFinalPrice(order);
       saveSellingStore(store);
       const channel = order.channelId ? await interaction.guild.channels.fetch(order.channelId).catch(() => null) : null;
       if (channel?.isTextBased()) {
@@ -3780,6 +5273,7 @@ async function handleSellCommand(interaction) {
   if (sub === 'availability') {
     data.config.availability = interaction.options.getString('status');
     data.config.availabilityNote = interaction.options.getString('hinweis') || null;
+    data.config.availabilityManual = true;
     saveSellingStore(store);
     await refreshOrderStatusPanel(interaction.guild, data);
     await interaction.reply({ content: `✅ Shop-Status: **${availabilityLabel(data.config.availability)}**.`, ephemeral: true });
@@ -4069,6 +5563,37 @@ async function handleSellingInteraction(interaction) {
     await handleStaffPanelButton(interaction, String(interaction.customId).split(':')[1]); return true;
   }
 
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_customer:')) {
+    await handleCustomerMenuButton(interaction, String(interaction.customId).split(':')[1]); return true;
+  }
+  if (interaction.isModalSubmit?.() && interaction.customId === 'selling_gift_modal') {
+    await submitGiftOrder(interaction); return true;
+  }
+  if (interaction.isModalSubmit?.() && interaction.customId === 'selling_partner_modal') {
+    await submitPartnerApplication(interaction); return true;
+  }
+  if (interaction.isModalSubmit?.() && interaction.customId === 'selling_refund_modal') {
+    await submitRefundRequest(interaction); return true;
+  }
+  if (interaction.isModalSubmit?.() && interaction.customId === 'selling_leak_modal') {
+    await submitLeakReport(interaction); return true;
+  }
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_offer_start:')) {
+    await openOfferModal(interaction, String(interaction.customId).split(':')[1]); return true;
+  }
+  if (interaction.isModalSubmit?.() && String(interaction.customId || '').startsWith('selling_offer_modal:')) {
+    await submitOfferModal(interaction, String(interaction.customId).split(':')[1]); return true;
+  }
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_offer_accept:')) {
+    await handleOfferButton(interaction, 'accept', String(interaction.customId).split(':')[1]); return true;
+  }
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_offer_decline:')) {
+    await handleOfferButton(interaction, 'decline', String(interaction.customId).split(':')[1]); return true;
+  }
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_priority_cycle:')) {
+    await cycleOrderPriority(interaction, String(interaction.customId).split(':')[1]); return true;
+  }
+
   if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_price:')) {
     await openPriceModal(interaction, String(interaction.customId).split(':')[1]); return true;
   }
@@ -4156,10 +5681,14 @@ Client.prototype.login = function patchedLogin(...args) {
 
     this.on(Events.GuildMemberAdd, async member => {
       await handleSellingMemberJoin(member).catch(error => console.error('❌ Verify Join Fehler:', error));
+      const { store, data } = getGuildShopData(member.guild.id);
+      await refreshTeamList(member.guild, data).catch(() => {});
+      saveSellingStore(store);
     });
 
     this.on(Events.MessageCreate, async message => {
       await handlePendingDeliveryMessage(message).catch(error => console.error('❌ Direct Delivery Fehler:', error));
+      await handleSellingTicketActivityMessage(message).catch(error => console.error('❌ Ticket Workflow Fehler:', error));
     });
 
     this.once(Events.ClientReady, async () => {
@@ -4167,6 +5696,7 @@ Client.prototype.login = function patchedLogin(...args) {
         try {
           const { store, data } = getGuildShopData(guild.id);
           await sellingHealthCheck(guild, data, true);
+          await refreshTeamList(guild, data).catch(() => {});
           saveSellingStore(store);
         } catch (error) {
           console.error(`❌ Permission Sync auf ${guild.name}:`, error);
@@ -4208,6 +5738,17 @@ Client.prototype.login = function patchedLogin(...args) {
     });
     this.on(Events.GuildMemberRemove, async member => {
       await handleAntiNukeAuditEvent(member.guild, 'Mitglied gekickt', [AuditLogEvent.MemberKick], { targetId: member.id, targetText: `<@${member.id}>`, maxAgeMs: 4000 }).catch(() => {});
+      const { store, data } = getGuildShopData(member.guild.id);
+      await refreshTeamList(member.guild, data).catch(() => {});
+      saveSellingStore(store);
+    });
+    this.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
+      const watched = PUBLIC_TEAM_ROLE_KEYS.map(key => findSellingRole(newMember.guild, key)?.id).filter(Boolean);
+      const changed = watched.some(roleId => oldMember.roles.cache.has(roleId) !== newMember.roles.cache.has(roleId));
+      if (!changed) return;
+      const { store, data } = getGuildShopData(newMember.guild.id);
+      await refreshTeamList(newMember.guild, data).catch(() => {});
+      saveSellingStore(store);
     });
     this.on(Events.WebhooksUpdate, async channel => {
       await handleAntiNukeAuditEvent(channel.guild, 'Webhook geändert', [AuditLogEvent.WebhookCreate, AuditLogEvent.WebhookUpdate, AuditLogEvent.WebhookDelete], { channelId: channel.id, targetText: `#${channel.name}` }).catch(() => {});

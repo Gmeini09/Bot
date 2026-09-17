@@ -1,0 +1,19 @@
+# v5.9 – Workflow Automation
+
+Diese Version erweitert v5.8.7 um den vollständigen Shop-Workflow.
+
+Besonders neu:
+- Auto-Ticket-Renames
+- automatische Teamliste
+- Angebote, Prioritäten, Deadlines und Kalender
+- Waiting-State + Follow-ups
+- Gutscheine/Gifts
+- QR-Lizenzen und Download-Bestätigung
+- Refund/Dispute/Leak-Workflows
+- Partner-Bewerbungen
+- Releases + Käufer-Pings
+- Kunden- und Team-Hauptmenüs
+- Export/Import und Test-Modus
+
+Fix:
+- `qrcode` als notwendige Runtime-Dependency in package.json ergänzt.

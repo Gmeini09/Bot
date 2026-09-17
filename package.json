@@ -1,7 +1,7 @@
 {
   "name": "community-allround-bot",
-  "version": "5.8.5",
-  "description": "Discord selling automation with Turbo Design branding banner, hardened permissions, full shop automation, verify, anti-nuke, delivery, portfolio and security fixes",
+  "version": "5.9.0",
+  "description": "Turbo Designs selling bot v5.9 with advanced workflow automation, auto ticket renames, team list, offers, deadlines, vouchers, partner workflow, releases, customer/staff menus, QR licenses and hardened shop security",
   "main": "index.js",
   "scripts": {
     "start": "node selling-entry.js",
@@ -15,6 +15,7 @@
     "discord.js": "14.27.0",
     "ws": "^8.18.3",
     "pdfkit": "^0.15.0",
-    "sharp": "^0.33.5"
+    "sharp": "^0.33.5",
+    "qrcode": "^1.5.4"
   }
 }
