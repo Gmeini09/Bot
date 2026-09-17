@@ -36,8 +36,8 @@ const SELLING = {
   },
   roles: [
     { name: '👑・INHABER', key: 'owner', color: 0x8b5cf6, hoist: true, permissions: [PermissionFlagsBits.Administrator] },
-    { name: '⚜️・MANAGEMENT', key: 'management', color: 0x6d5dd3, hoist: true, permissions: [PermissionFlagsBits.ManageGuild, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ManageRoles, PermissionFlagsBits.ManageMessages, PermissionFlagsBits.KickMembers, PermissionFlagsBits.BanMembers, PermissionFlagsBits.ModerateMembers] },
-    { name: '🎫・SUPPORT', key: 'support', color: 0x5865f2, hoist: true, permissions: [PermissionFlagsBits.ManageMessages, PermissionFlagsBits.ModerateMembers] },
+    { name: '⚜️・MANAGEMENT', key: 'management', color: 0x6d5dd3, hoist: true, permissions: [PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ManageMessages, PermissionFlagsBits.ModerateMembers] },
+    { name: '🎫・SUPPORT', key: 'support', color: 0x5865f2, hoist: true, permissions: [] },
     { name: '🎨・DESIGNER', key: 'designer', color: 0xeb459e, hoist: true, permissions: [] },
     { name: '🎧・SOUND DESIGNER', key: 'sound', color: 0x57f287, hoist: true, permissions: [] },
     { name: '🛠️・DEVELOPER', key: 'developer', color: 0xfee75c, hoist: true, permissions: [] },
@@ -818,10 +818,18 @@ Client.prototype.on = function patchedOn(eventName, listener) {
   return originalClientOn.call(this, eventName, listener);
 };
 
+function roleIdsForKeys(roleMap, keys = []) {
+  return [...new Set(keys.map(key => roleMap[key]?.id).filter(Boolean))];
+}
+
 function staffRoleIds(roleMap) {
-  return ['owner', 'management', 'support', 'designer', 'sound', 'developer']
-    .map(key => roleMap[key]?.id)
-    .filter(Boolean);
+  return roleIdsForKeys(roleMap, ['owner', 'management', 'support', 'designer', 'sound', 'developer']);
+}
+
+function infoCategoryOverwrites(guild) {
+  return [
+    { id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] },
+  ];
 }
 
 function staffOverwrites(guild, roleMap, extra = []) {
@@ -829,7 +837,7 @@ function staffOverwrites(guild, roleMap, extra = []) {
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     ...staffRoleIds(roleMap).map(id => ({
       id,
-      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles, PermissionFlagsBits.EmbedLinks],
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
     })),
     ...extra,
   ];
@@ -838,23 +846,152 @@ function staffOverwrites(guild, roleMap, extra = []) {
 function verifiedCategoryOverwrites(guild, roleMap) {
   return [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-    ...(roleMap.verified ? [{ id: roleMap.verified.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] }] : []),
-    ...staffRoleIds(roleMap).map(id => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] })),
+    ...(roleMap.verified ? [{
+      id: roleMap.verified.id,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+    }] : []),
+    ...staffRoleIds(roleMap).map(id => ({
+      id,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+    })),
   ];
 }
 
-function readOnlyOverwrites(guild, roleMap, verifiedOnly = false) {
+function verifiedWritableOverwrites(guild, roleMap) {
+  return [
+    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
+    ...(roleMap.verified ? [{
+      id: roleMap.verified.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.AttachFiles,
+        PermissionFlagsBits.EmbedLinks,
+      ],
+    }] : []),
+    ...staffRoleIds(roleMap).map(id => ({
+      id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.AttachFiles,
+        PermissionFlagsBits.EmbedLinks,
+      ],
+    })),
+  ];
+}
+
+function verifiedVoiceOverwrites(guild, roleMap) {
+  return [
+    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect] },
+    ...(roleMap.verified ? [{
+      id: roleMap.verified.id,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.Speak],
+    }] : []),
+    ...staffRoleIds(roleMap).map(id => ({
+      id,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.Speak],
+    })),
+  ];
+}
+
+function readOnlyOverwrites(guild, roleMap, verifiedOnly = false, writerKeys = null) {
+  const writers = roleIdsForKeys(
+    roleMap,
+    writerKeys || ['owner', 'management', 'support', 'designer', 'sound', 'developer'],
+  );
   if (verifiedOnly) {
     return [
       { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
-      ...(roleMap.verified ? [{ id: roleMap.verified.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory], deny: [PermissionFlagsBits.SendMessages] }] : []),
-      ...staffRoleIds(roleMap).map(id => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageMessages] })),
+      ...(roleMap.verified ? [{
+        id: roleMap.verified.id,
+        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+        deny: [PermissionFlagsBits.SendMessages],
+      }] : []),
+      ...writers.map(id => ({
+        id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.AttachFiles,
+          PermissionFlagsBits.EmbedLinks,
+        ],
+      })),
     ];
   }
   return [
-    { id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel], deny: [PermissionFlagsBits.SendMessages] },
-    ...staffRoleIds(roleMap).map(id => ({ id, allow: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageMessages] })),
+    {
+      id: guild.roles.everyone.id,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+      deny: [PermissionFlagsBits.SendMessages],
+    },
+    ...writers.map(id => ({
+      id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.AttachFiles,
+        PermissionFlagsBits.EmbedLinks,
+      ],
+    })),
   ];
+}
+
+function teamChannelOverwrites(guild, roleMap, { writeKeys = [], readKeys = [] } = {}) {
+  const writeIds = new Set(roleIdsForKeys(roleMap, writeKeys));
+  const readIds = new Set(roleIdsForKeys(roleMap, readKeys).filter(id => !writeIds.has(id)));
+  return [
+    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
+    ...[...writeIds].map(id => ({
+      id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.AttachFiles,
+        PermissionFlagsBits.EmbedLinks,
+      ],
+    })),
+    ...[...readIds].map(id => ({
+      id,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+      deny: [PermissionFlagsBits.SendMessages],
+    })),
+  ];
+}
+
+function teamVoiceOverwrites(guild, roleMap, keys = []) {
+  return [
+    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect] },
+    ...roleIdsForKeys(roleMap, keys).map(id => ({
+      id,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.Speak],
+    })),
+  ];
+}
+
+function overwriteBits(values = []) {
+  return values.reduce((bits, value) => bits | BigInt(value), 0n);
+}
+
+function normalizedOverwriteSpec(specs = []) {
+  return specs
+    .map(spec => [String(spec.id), overwriteBits(spec.allow || []).toString(), overwriteBits(spec.deny || []).toString()])
+    .sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+function normalizedCurrentOverwrites(channel) {
+  return channel.permissionOverwrites.cache
+    .map(overwrite => [String(overwrite.id), overwrite.allow.bitfield.toString(), overwrite.deny.bitfield.toString()])
+    .sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+function overwritesMatch(channel, specs) {
+  return JSON.stringify(normalizedCurrentOverwrites(channel)) === JSON.stringify(normalizedOverwriteSpec(specs));
 }
 
 async function ensureRole(guild, definition) {
@@ -869,6 +1006,21 @@ async function ensureRole(guild, definition) {
       permissions: definition.permissions,
       reason: 'Unfugstifter Selling Server Setup',
     });
+  } else {
+    const expectedPermissions = overwriteBits(definition.permissions || []);
+    const needsEdit = role.name !== definition.name
+      || role.color !== definition.color
+      || role.hoist !== Boolean(definition.hoist)
+      || role.permissions.bitfield !== expectedPermissions;
+    if (needsEdit && role.editable) {
+      role = await role.edit({
+        name: definition.name,
+        color: definition.color,
+        hoist: definition.hoist,
+        permissions: definition.permissions,
+        reason: 'Unfugstifter Selling Permission Sync',
+      }).catch(() => role);
+    }
   }
   return role;
 }
@@ -882,20 +1034,43 @@ async function ensureCategory(guild, name, permissionOverwrites = undefined) {
       permissionOverwrites,
       reason: 'Unfugstifter Selling Server Setup',
     });
+  } else if (permissionOverwrites && !overwritesMatch(category, permissionOverwrites)) {
+    await category.permissionOverwrites.set(permissionOverwrites, 'Unfugstifter Selling Permission Sync').catch(() => {});
   }
   return category;
 }
 
-async function ensureChannel(guild, parent, name, { type = ChannelType.GuildText, topic = null, readOnly = false, privateForStaff = false, verifiedOnly = false, roleMap = {} } = {}) {
+async function ensureChannel(guild, parent, name, {
+  type = ChannelType.GuildText,
+  topic = null,
+  readOnly = false,
+  privateForStaff = false,
+  verifiedOnly = false,
+  roleMap = {},
+  writerKeys = null,
+  teamWriteKeys = null,
+  teamReadKeys = null,
+} = {}) {
   let channel = guild.channels.cache.find(item => item.type === type && item.name === name && item.parentId === parent.id) || null;
+
+  let permissionOverwrites;
+  if (Array.isArray(teamWriteKeys) || Array.isArray(teamReadKeys)) {
+    permissionOverwrites = type === ChannelType.GuildVoice
+      ? teamVoiceOverwrites(guild, roleMap, [...new Set([...(teamWriteKeys || []), ...(teamReadKeys || [])])])
+      : teamChannelOverwrites(guild, roleMap, { writeKeys: teamWriteKeys || [], readKeys: teamReadKeys || [] });
+  } else if (privateForStaff) {
+    permissionOverwrites = type === ChannelType.GuildVoice
+      ? teamVoiceOverwrites(guild, roleMap, ['owner', 'management', 'support', 'designer', 'sound', 'developer'])
+      : staffOverwrites(guild, roleMap);
+  } else if (readOnly) {
+    permissionOverwrites = readOnlyOverwrites(guild, roleMap, verifiedOnly, writerKeys);
+  } else if (verifiedOnly) {
+    permissionOverwrites = type === ChannelType.GuildVoice
+      ? verifiedVoiceOverwrites(guild, roleMap)
+      : verifiedWritableOverwrites(guild, roleMap);
+  }
+
   if (!channel) {
-    const permissionOverwrites = privateForStaff
-      ? staffOverwrites(guild, roleMap)
-      : readOnly
-        ? readOnlyOverwrites(guild, roleMap, verifiedOnly)
-        : verifiedOnly
-          ? verifiedCategoryOverwrites(guild, roleMap)
-          : undefined;
     channel = await guild.channels.create({
       name,
       type,
@@ -904,6 +1079,13 @@ async function ensureChannel(guild, parent, name, { type = ChannelType.GuildText
       permissionOverwrites,
       reason: 'Unfugstifter Selling Server Setup',
     });
+  } else {
+    if (permissionOverwrites && !overwritesMatch(channel, permissionOverwrites)) {
+      await channel.permissionOverwrites.set(permissionOverwrites, 'Unfugstifter Selling Permission Sync').catch(() => {});
+    }
+    if (type === ChannelType.GuildText && topic !== null && channel.topic !== topic) {
+      await channel.setTopic(topic, 'Unfugstifter Selling Topic Sync').catch(() => {});
+    }
   }
   return channel;
 }
@@ -1012,7 +1194,7 @@ async function createSellingStructure(guild) {
   }
 
   const categories = {};
-  categories.info = await ensureCategory(guild, SELLING.categories.info);
+  categories.info = await ensureCategory(guild, SELLING.categories.info, infoCategoryOverwrites(guild));
   categories.shop = await ensureCategory(guild, SELLING.categories.shop, verifiedCategoryOverwrites(guild, roleMap));
   categories.buy = await ensureCategory(guild, SELLING.categories.buy, verifiedCategoryOverwrites(guild, roleMap));
   categories.community = await ensureCategory(guild, SELLING.categories.community, verifiedCategoryOverwrites(guild, roleMap));
@@ -1022,51 +1204,51 @@ async function createSellingStructure(guild) {
   categories.team = await ensureCategory(guild, SELLING.categories.team, staffOverwrites(guild, roleMap));
 
   const channels = {};
-  channels.welcome = await ensureChannel(guild, categories.info, '👋・willkommen', { readOnly: true, roleMap, topic: 'Willkommen im Unfugstifter Shop.' });
-  channels.rules = await ensureChannel(guild, categories.info, '📜・regelwerk', { readOnly: true, roleMap, topic: 'Regeln und Lizenzhinweise für den Shop.' });
-  channels.verify = await ensureChannel(guild, categories.info, '✅・verifizierung', { readOnly: true, roleMap, topic: 'Verifiziere dich hier, um Zugriff auf Shop, Community und Support zu erhalten.' });
-  channels.news = await ensureChannel(guild, categories.info, '📢・ankündigungen', { readOnly: true, roleMap, topic: 'Shop-News, Releases und Updates.' });
-  channels.faq = await ensureChannel(guild, categories.info, '❓・faq', { readOnly: true, roleMap, topic: 'Häufig gestellte Fragen.' });
+  channels.welcome = await ensureChannel(guild, categories.info, '👋・willkommen', { readOnly: true, roleMap, writerKeys: ['owner','management'], topic: 'Willkommen im Unfugstifter Shop.' });
+  channels.rules = await ensureChannel(guild, categories.info, '📜・regelwerk', { readOnly: true, roleMap, writerKeys: ['owner','management'], topic: 'Regeln und Lizenzhinweise für den Shop.' });
+  channels.verify = await ensureChannel(guild, categories.info, '✅・verifizierung', { readOnly: true, roleMap, writerKeys: ['owner','management'], topic: 'Verifiziere dich hier, um Zugriff auf Shop, Community und Support zu erhalten.' });
+  channels.news = await ensureChannel(guild, categories.info, '📢・ankündigungen', { readOnly: true, roleMap, writerKeys: ['owner','management'], topic: 'Shop-News, Releases und Updates.' });
+  channels.faq = await ensureChannel(guild, categories.info, '❓・faq', { readOnly: true, roleMap, writerKeys: ['owner','management','support'], topic: 'Häufig gestellte Fragen.' });
 
-  channels.thumbnails = await ensureChannel(guild, categories.shop, '🖼️・thumbnails', { readOnly: true, roleMap, topic: 'Thumbnail-Angebote, Beispiele und Pakete.', verifiedOnly: true});
-  channels.nve = await ensureChannel(guild, categories.shop, '🌆・nve-presets', { readOnly: true, roleMap, topic: 'Eigene oder lizenzierte NVE-Presets, Grafik-Setups und Anpassungen.', verifiedOnly: true});
-  channels.soundpacks = await ensureChannel(guild, categories.shop, '🔊・soundpacks', { readOnly: true, roleMap, topic: 'Eigene Soundpacks und Audio-Pakete.', verifiedOnly: true});
-  channels.graphics = await ensureChannel(guild, categories.shop, '🎨・grafik-designs', { readOnly: true, roleMap, topic: 'Logos, Banner, Thumbnails und weitere Designs.', verifiedOnly: true});
-  channels.fivem = await ensureChannel(guild, categories.shop, '🚗・fivem-assets', { readOnly: true, roleMap, topic: 'Eigene oder lizenzierte FiveM-Assets und Setups.', verifiedOnly: true});
-  channels.bundles = await ensureChannel(guild, categories.shop, '📦・bundles', { readOnly: true, roleMap, topic: 'Produkt-Bundles und Pakete.', verifiedOnly: true});
-  channels.newProducts = await ensureChannel(guild, categories.shop, '🆕・neuheiten', { readOnly: true, roleMap, topic: 'Neue Produkte und Updates.', verifiedOnly: true});
-  channels.productUpdates = await ensureChannel(guild, categories.shop, '🔄・produkt-updates', { readOnly: true, roleMap, topic: 'Updates für bereits gekaufte Produkte.', verifiedOnly: true});
-  channels.portfolio = await ensureChannel(guild, categories.shop, '🖼️・portfolio', { readOnly: true, roleMap, topic: 'Portfolio, Referenzen und ausgewählte Arbeiten.', verifiedOnly: true});
+  channels.thumbnails = await ensureChannel(guild, categories.shop, '🖼️・thumbnails', { readOnly: true, roleMap, writerKeys: ['owner','management','designer'], topic: 'Thumbnail-Angebote, Beispiele und Pakete.', verifiedOnly: true});
+  channels.nve = await ensureChannel(guild, categories.shop, '🌆・nve-presets', { readOnly: true, roleMap, writerKeys: ['owner','management','designer','developer'], topic: 'Eigene oder lizenzierte NVE-Presets, Grafik-Setups und Anpassungen.', verifiedOnly: true});
+  channels.soundpacks = await ensureChannel(guild, categories.shop, '🔊・soundpacks', { readOnly: true, roleMap, writerKeys: ['owner','management','sound'], topic: 'Eigene Soundpacks und Audio-Pakete.', verifiedOnly: true});
+  channels.graphics = await ensureChannel(guild, categories.shop, '🎨・grafik-designs', { readOnly: true, roleMap, writerKeys: ['owner','management','designer'], topic: 'Logos, Banner, Thumbnails und weitere Designs.', verifiedOnly: true});
+  channels.fivem = await ensureChannel(guild, categories.shop, '🚗・fivem-assets', { readOnly: true, roleMap, writerKeys: ['owner','management','developer'], topic: 'Eigene oder lizenzierte FiveM-Assets und Setups.', verifiedOnly: true});
+  channels.bundles = await ensureChannel(guild, categories.shop, '📦・bundles', { readOnly: true, roleMap, writerKeys: ['owner','management','designer','sound','developer'], topic: 'Produkt-Bundles und Pakete.', verifiedOnly: true});
+  channels.newProducts = await ensureChannel(guild, categories.shop, '🆕・neuheiten', { readOnly: true, roleMap, writerKeys: ['owner','management'], topic: 'Neue Produkte und Updates.', verifiedOnly: true});
+  channels.productUpdates = await ensureChannel(guild, categories.shop, '🔄・produkt-updates', { readOnly: true, roleMap, writerKeys: ['owner','management','designer','sound','developer'], topic: 'Updates für bereits gekaufte Produkte.', verifiedOnly: true});
+  channels.portfolio = await ensureChannel(guild, categories.shop, '🖼️・portfolio', { readOnly: true, roleMap, writerKeys: ['owner','management','designer'], topic: 'Portfolio, Referenzen und ausgewählte Arbeiten.', verifiedOnly: true});
 
-  channels.order = await ensureChannel(guild, categories.buy, '🛒・bestellen', { readOnly: true, roleMap, topic: 'Hier kannst du ein privates Kauf-Ticket öffnen.', verifiedOnly: true});
-  channels.orderStatus = await ensureChannel(guild, categories.buy, '📊・bestellstatus', { readOnly: true, roleMap, topic: 'Aktueller Bestellstatus und Auslastung des Shops.', verifiedOnly: true});
-  channels.payment = await ensureChannel(guild, categories.buy, '💳・zahlung', { readOnly: true, roleMap, topic: 'Zahlungsinformationen werden vom Shop-Team gepflegt.', verifiedOnly: true});
-  channels.reviews = await ensureChannel(guild, categories.buy, '⭐・bewertungen', { readOnly: true, roleMap, topic: 'Verifizierte Bewertungen aus abgeschlossenen Bestellungen.', verifiedOnly: true});
-  channels.customerStatus = await ensureChannel(guild, categories.buy, '💠・kundenstatus', { readOnly: true, roleMap, topic: 'Stammkunden-, VIP- und Rabattvorteile.', verifiedOnly: true});
+  channels.order = await ensureChannel(guild, categories.buy, '🛒・bestellen', { readOnly: true, roleMap, writerKeys: ['owner','management','support'], topic: 'Hier kannst du ein privates Kauf-Ticket öffnen.', verifiedOnly: true});
+  channels.orderStatus = await ensureChannel(guild, categories.buy, '📊・bestellstatus', { readOnly: true, roleMap, writerKeys: ['owner','management','support'], topic: 'Aktueller Bestellstatus und Auslastung des Shops.', verifiedOnly: true});
+  channels.payment = await ensureChannel(guild, categories.buy, '💳・zahlung', { readOnly: true, roleMap, writerKeys: ['owner','management','support'], topic: 'Zahlungsinformationen werden vom Shop-Team gepflegt.', verifiedOnly: true});
+  channels.reviews = await ensureChannel(guild, categories.buy, '⭐・bewertungen', { readOnly: true, roleMap, writerKeys: ['owner','management','support'], topic: 'Verifizierte Bewertungen aus abgeschlossenen Bestellungen.', verifiedOnly: true});
+  channels.customerStatus = await ensureChannel(guild, categories.buy, '💠・kundenstatus', { readOnly: true, roleMap, writerKeys: ['owner','management','support'], topic: 'Stammkunden-, VIP- und Rabattvorteile.', verifiedOnly: true});
   channels.results = await ensureChannel(guild, categories.buy, '📸・kunden-ergebnisse', { roleMap, topic: 'Ergebnisse und Showcase von Kunden.', verifiedOnly: true});
   channels.requests = await ensureChannel(guild, categories.buy, '💡・produkt-wünsche', { roleMap, topic: 'Wünsche für neue Produkte oder individuelle Aufträge.', verifiedOnly: true});
 
   channels.chat = await ensureChannel(guild, categories.community, '💬・shop-chat', { roleMap, topic: 'Allgemeiner Community-Chat.', verifiedOnly: true});
-  channels.giveaways = await ensureChannel(guild, categories.community, '🎁・giveaways', { roleMap, topic: 'Giveaways und Aktionen.', verifiedOnly: true});
-  channels.partners = await ensureChannel(guild, categories.community, '🤝・partner', { readOnly: true, roleMap, topic: 'Partner und Empfehlungen.', verifiedOnly: true});
+  channels.giveaways = await ensureChannel(guild, categories.community, '🎁・giveaways', { readOnly: true, roleMap, writerKeys: ['owner','management','support'], topic: 'Giveaways und Aktionen.', verifiedOnly: true});
+  channels.partners = await ensureChannel(guild, categories.community, '🤝・partner', { readOnly: true, roleMap, writerKeys: ['owner','management'], topic: 'Partner und Empfehlungen.', verifiedOnly: true});
 
   channels.support = await ensureChannel(guild, categories.support, '❓・support-chat', { roleMap, topic: 'Kurze Fragen vor oder nach dem Kauf.', verifiedOnly: true});
-  channels.supportTicket = await ensureChannel(guild, categories.support, '🎫・support-ticket', { readOnly: true, roleMap, topic: 'Öffne hier ein privates Support-Ticket.', verifiedOnly: true});
-  channels.ticketInfo = await ensureChannel(guild, categories.support, '📋・ticket-info', { readOnly: true, roleMap, topic: 'Informationen zu Kauf- und Support-Tickets.', verifiedOnly: true});
+  channels.supportTicket = await ensureChannel(guild, categories.support, '🎫・support-ticket', { readOnly: true, roleMap, writerKeys: ['owner','management','support'], topic: 'Öffne hier ein privates Support-Ticket.', verifiedOnly: true});
+  channels.ticketInfo = await ensureChannel(guild, categories.support, '📋・ticket-info', { readOnly: true, roleMap, writerKeys: ['owner','management','support'], topic: 'Informationen zu Kauf- und Support-Tickets.', verifiedOnly: true});
   channels.supportVoice = await ensureChannel(guild, categories.support, '📞・Support Warteraum', { type: ChannelType.GuildVoice, roleMap, verifiedOnly: true});
 
-  channels.teamChat = await ensureChannel(guild, categories.team, '🛠️・team-chat', { privateForStaff: true, roleMap, topic: 'Interner Team-Chat.' });
-  channels.ordersInternal = await ensureChannel(guild, categories.team, '📦・bestellungen', { privateForStaff: true, roleMap, topic: 'Interne Übersicht zu Bestellungen.' });
-  channels.sales = await ensureChannel(guild, categories.team, '💰・verkäufe', { privateForStaff: true, roleMap, topic: 'Interne Verkaufsübersicht.' });
-  channels.productUpload = await ensureChannel(guild, categories.team, '🗂️・produkt-upload', { privateForStaff: true, roleMap, topic: 'Produktdateien, Entwürfe und interne Uploads.' });
-  channels.logs = await ensureChannel(guild, categories.team, '📋・logs', { privateForStaff: true, roleMap, topic: 'Selling-System Logs.' });
-  channels.securityLogs = await ensureChannel(guild, categories.team, '🛡️・security-logs', { privateForStaff: true, roleMap, topic: 'Anti-Nuke, Verifizierung und Sicherheitsereignisse.' });
-  channels.transcripts = await ensureChannel(guild, categories.team, '📄・transkripte', { privateForStaff: true, roleMap, topic: 'Automatisch gespeicherte Ticket-Transkripte.' });
-  channels.blacklist = await ensureChannel(guild, categories.team, '🚫・blacklist', { privateForStaff: true, roleMap, topic: 'Interne Shop-Blacklist und Sperrprotokoll.' });
-  channels.dashboard = await ensureChannel(guild, categories.team, '📊・shop-dashboard', { privateForStaff: true, roleMap, topic: 'Zentrales Staff-Control-Panel: Bestellungen, Zahlung, Lieferung, Kunden und Automatisierung.' });
-  channels.queue = await ensureChannel(guild, categories.team, '⏱️・auftrags-warteschlange', { privateForStaff: true, roleMap, topic: 'Automatische Auftragsreihenfolge, Positionen und ETA.' });
-  channels.automation = await ensureChannel(guild, categories.team, '🤖・automation-log', { privateForStaff: true, roleMap, topic: 'Reminder, Auto-Close, Health-Checks, Backups und automatische Shop-Aktionen.' });
-  channels.teamVoice = await ensureChannel(guild, categories.team, '🔊・Team Talk', { type: ChannelType.GuildVoice, privateForStaff: true, roleMap });
+  channels.teamChat = await ensureChannel(guild, categories.team, '🛠️・team-chat', { roleMap, teamWriteKeys: ['owner','management','support','designer','sound','developer'], topic: 'Interner Team-Chat.' });
+  channels.ordersInternal = await ensureChannel(guild, categories.team, '📦・bestellungen', { roleMap, teamWriteKeys: ['owner','management','support','designer','sound','developer'], topic: 'Interne Übersicht zu Bestellungen.' });
+  channels.sales = await ensureChannel(guild, categories.team, '💰・verkäufe', { roleMap, teamWriteKeys: ['owner','management'], topic: 'Interne Verkaufsübersicht.' });
+  channels.productUpload = await ensureChannel(guild, categories.team, '🗂️・produkt-upload', { roleMap, teamWriteKeys: ['owner','management','designer','sound','developer'], topic: 'Produktdateien, Entwürfe und interne Uploads.' });
+  channels.logs = await ensureChannel(guild, categories.team, '📋・logs', { roleMap, teamWriteKeys: ['owner','management'], teamReadKeys: ['support'], topic: 'Selling-System Logs.' });
+  channels.securityLogs = await ensureChannel(guild, categories.team, '🛡️・security-logs', { roleMap, teamWriteKeys: ['owner','management'], topic: 'Anti-Nuke, Verifizierung und Sicherheitsereignisse.' });
+  channels.transcripts = await ensureChannel(guild, categories.team, '📄・transkripte', { roleMap, teamWriteKeys: ['owner','management'], teamReadKeys: ['support'], topic: 'Automatisch gespeicherte Ticket-Transkripte.' });
+  channels.blacklist = await ensureChannel(guild, categories.team, '🚫・blacklist', { roleMap, teamWriteKeys: ['owner','management'], teamReadKeys: ['support'], topic: 'Interne Shop-Blacklist und Sperrprotokoll.' });
+  channels.dashboard = await ensureChannel(guild, categories.team, '📊・shop-dashboard', { roleMap, teamWriteKeys: ['owner','management'], topic: 'Zentrales Management-Control-Panel: Umsatz, Bestellungen, Kunden, Lizenzen, Security und Automatisierung.' });
+  channels.queue = await ensureChannel(guild, categories.team, '⏱️・auftrags-warteschlange', { roleMap, teamWriteKeys: ['owner','management','support'], teamReadKeys: ['designer','sound','developer'], topic: 'Automatische Auftragsreihenfolge, Positionen und ETA.' });
+  channels.automation = await ensureChannel(guild, categories.team, '🤖・automation-log', { roleMap, teamWriteKeys: ['owner','management'], teamReadKeys: ['support'], topic: 'Reminder, Auto-Close, Health-Checks, Backups und automatische Shop-Aktionen.' });
+  channels.teamVoice = await ensureChannel(guild, categories.team, '🔊・Team Talk', { type: ChannelType.GuildVoice, roleMap, teamWriteKeys: ['owner','management','support','designer','sound','developer'] });
 
   return { roleMap, categories, channels };
 }
@@ -1287,18 +1469,71 @@ async function logSelling(guild, title, text) {
 }
 
 
-function sellingStaffRoles(guild) {
-  const { data } = getGuildShopData(guild.id);
-  const configuredIds = new Set(
-    ['owner', 'management', 'support', 'designer', 'sound', 'developer']
-      .map(key => data.config?.roleIds?.[key])
-      .filter(Boolean),
-  );
-  const legacyNames = new Set(['👑・INHABER', '⚜️・MANAGEMENT', '🎫・SUPPORT', '🎨・DESIGNER', '🎧・SOUND DESIGNER', '🛠️・DEVELOPER']);
-  return guild.roles.cache.filter(role => configuredIds.has(role.id) || legacyNames.has(role.name));
+function configuredRoleForKey(guild, key) {
+  const role = findSellingRole(guild, key);
+  return role && !role.managed ? role : null;
 }
 
-function sellingTicketOverwrites(guild, userId) {
+function producerRoleKeysForProducts(productKeys = []) {
+  const keys = new Set();
+  for (const productKey of productKeys) {
+    if (productKey === 'thumbnail' || productKey === 'grafik') keys.add('designer');
+    if (productKey === 'nve') {
+      keys.add('designer');
+      keys.add('developer');
+    }
+    if (productKey === 'soundpack') keys.add('sound');
+    if (productKey === 'fivem') keys.add('developer');
+    if (productKey === 'bundle') {
+      keys.add('designer');
+      keys.add('sound');
+      keys.add('developer');
+    }
+  }
+  return [...keys];
+}
+
+function memberHasSellingRole(member, key) {
+  const role = configuredRoleForKey(member.guild, key);
+  if (role && member.roles.cache.has(role.id)) return true;
+  const legacy = {
+    owner: '👑・INHABER',
+    management: '⚜️・MANAGEMENT',
+    support: '🎫・SUPPORT',
+    designer: '🎨・DESIGNER',
+    sound: '🎧・SOUND DESIGNER',
+    developer: '🛠️・DEVELOPER',
+  }[key];
+  return Boolean(legacy && member.roles.cache.some(item => item.name === legacy));
+}
+
+function isOwnerOrManagement(member) {
+  if (!member?.guild) return false;
+  if (member.guild.ownerId === member.id) return true;
+  if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
+  return memberHasSellingRole(member, 'owner') || memberHasSellingRole(member, 'management');
+}
+
+function canHandleSupportTicket(member) {
+  if (!member?.guild) return false;
+  return isOwnerOrManagement(member) || memberHasSellingRole(member, 'support');
+}
+
+function canHandleOrder(member, order) {
+  if (!member?.guild || !order) return false;
+  if (canHandleSupportTicket(member)) return true;
+  const allowedProducerKeys = producerRoleKeysForProducts(orderProductKeys(order));
+  return allowedProducerKeys.some(key => memberHasSellingRole(member, key));
+}
+
+function canPublishProductUpdate(member, productKey) {
+  if (!member?.guild) return false;
+  if (isOwnerOrManagement(member)) return true;
+  return producerRoleKeysForProducts([productKey]).some(key => memberHasSellingRole(member, key));
+}
+
+function privateTicketOverwrites(guild, userId, staffKeys = []) {
+  const uniqueKeys = [...new Set(staffKeys)];
   return [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     {
@@ -1311,7 +1546,7 @@ function sellingTicketOverwrites(guild, userId) {
         PermissionFlagsBits.EmbedLinks,
       ],
     },
-    ...sellingStaffRoles(guild).map(role => ({
+    ...uniqueKeys.map(key => configuredRoleForKey(guild, key)).filter(Boolean).map(role => ({
       id: role.id,
       allow: [
         PermissionFlagsBits.ViewChannel,
@@ -1319,10 +1554,82 @@ function sellingTicketOverwrites(guild, userId) {
         PermissionFlagsBits.ReadMessageHistory,
         PermissionFlagsBits.AttachFiles,
         PermissionFlagsBits.EmbedLinks,
-        PermissionFlagsBits.ManageMessages,
+        ...(keyForRole(role, guild) === 'support' ? [PermissionFlagsBits.ManageMessages] : []),
       ],
     })),
   ];
+}
+
+function keyForRole(role, guild) {
+  for (const key of ['owner', 'management', 'support', 'designer', 'sound', 'developer']) {
+    const configured = configuredRoleForKey(guild, key);
+    if (configured?.id === role.id) return key;
+  }
+  return null;
+}
+
+function sellingOrderTicketOverwrites(guild, userId, productKeys = []) {
+  return privateTicketOverwrites(
+    guild,
+    userId,
+    ['owner', 'management', 'support', ...producerRoleKeysForProducts(productKeys)],
+  );
+}
+
+function sellingSupportTicketOverwrites(guild, userId) {
+  return privateTicketOverwrites(guild, userId, ['owner', 'management', 'support']);
+}
+
+function sellingDeliveryOverwrites(guild, userId, productKeys = []) {
+  return privateTicketOverwrites(
+    guild,
+    userId,
+    ['owner', 'management', 'support', ...producerRoleKeysForProducts(productKeys)],
+  );
+}
+
+async function syncDynamicSellingPermissions(guild, data) {
+  let updated = 0;
+
+  for (const order of Object.values(data.orders || {})) {
+    if (order.channelId) {
+      const channel = await guild.channels.fetch(order.channelId).catch(() => null);
+      if (channel?.type === ChannelType.GuildText) {
+        const expected = sellingOrderTicketOverwrites(guild, order.userId, orderProductKeys(order));
+        if (!overwritesMatch(channel, expected)) {
+          await channel.permissionOverwrites.set(expected, 'Unfugstifter Selling Ticket Permission Sync').catch(() => {});
+          updated += 1;
+        }
+      }
+    }
+
+    if (order.deliveryChannelId) {
+      const channel = await guild.channels.fetch(order.deliveryChannelId).catch(() => null);
+      if (channel?.type === ChannelType.GuildText) {
+        const expected = sellingDeliveryOverwrites(guild, order.userId, orderProductKeys(order));
+        if (!overwritesMatch(channel, expected)) {
+          await channel.permissionOverwrites.set(expected, 'Unfugstifter Selling Delivery Permission Sync').catch(() => {});
+          updated += 1;
+        }
+      }
+    }
+  }
+
+  const supportChannels = guild.channels.cache.filter(channel =>
+    channel.type === ChannelType.GuildText
+    && String(channel.topic || '').includes('selling-kind:support')
+  );
+  for (const channel of supportChannels.values()) {
+    const ownerId = String(channel.topic || '').match(/selling-owner:(\d+)/)?.[1] || null;
+    if (!ownerId) continue;
+    const expected = sellingSupportTicketOverwrites(guild, ownerId);
+    if (!overwritesMatch(channel, expected)) {
+      await channel.permissionOverwrites.set(expected, 'Unfugstifter Selling Support Permission Sync').catch(() => {});
+      updated += 1;
+    }
+  }
+
+  return updated;
 }
 
 function orderActionRows(order) {
@@ -1552,7 +1859,7 @@ async function createCartOrderFromModal(interaction) {
       name: `${orderId.toLowerCase()}-cart-${sanitizeName(interaction.user.username)}`.slice(0, 95),
       type: ChannelType.GuildText, parent: category.id,
       topic: `selling-owner:${interaction.user.id}|selling-kind:order|selling-order:${orderId}|selling-product:cart|selling-status:open`,
-      permissionOverwrites: sellingTicketOverwrites(interaction.guild, interaction.user.id),
+      permissionOverwrites: sellingOrderTicketOverwrites(interaction.guild, interaction.user.id, keys),
       reason: `Selling Warenkorb ${orderId} von ${interaction.user.tag}`,
     });
   } catch (error) {
@@ -1747,7 +2054,7 @@ async function createOrderFromModal(interaction, productKey) {
       type: ChannelType.GuildText,
       parent: category.id,
       topic: `selling-owner:${interaction.user.id}|selling-kind:order|selling-order:${orderId}|selling-product:${productKey}|selling-status:open`,
-      permissionOverwrites: sellingTicketOverwrites(interaction.guild, interaction.user.id),
+      permissionOverwrites: sellingOrderTicketOverwrites(interaction.guild, interaction.user.id, [productKey]),
       reason: `Selling Bestellung ${orderId} von ${interaction.user.tag}`,
     });
   } catch (error) {
@@ -1825,7 +2132,7 @@ async function openSupportTicket(interaction, supportKey = 'general') {
     type: ChannelType.GuildText,
     parent: category.id,
     topic: `selling-owner:${interaction.user.id}|selling-kind:support|selling-support:${supportKey}|selling-status:open`,
-    permissionOverwrites: sellingTicketOverwrites(interaction.guild, interaction.user.id),
+    permissionOverwrites: sellingSupportTicketOverwrites(interaction.guild, interaction.user.id),
     reason: `Selling Support von ${interaction.user.tag}`,
   });
 
@@ -1962,7 +2269,7 @@ async function deliverOrder(guild, orderId, actorId = null) {
       type: ChannelType.GuildText,
       parent: category.id,
       topic: `selling-delivery:${order.id}|selling-owner:${order.userId}|selling-license:${order.licenseId}`,
-      permissionOverwrites: sellingTicketOverwrites(guild, order.userId),
+      permissionOverwrites: sellingDeliveryOverwrites(guild, order.userId, orderProductKeys(order)),
       reason: `Selling Delivery ${order.id}`,
     });
     order.deliveryChannelId = deliveryChannel.id;
@@ -2097,7 +2404,7 @@ async function requestRevision(interaction, orderId) {
     await interaction.reply({ content: '⏳ Für diese Bestellung läuft gerade eine Lieferung oder Statusänderung. Bitte versuche es gleich erneut.', ephemeral: true });
     return;
   }
-  const staff = canHandleSellingTicket(interaction.member);
+  const staff = canHandleOrder(interaction.member, order);
   const customer = isOrderCustomer(interaction, order);
   if (!customer && !staff) {
     await interaction.reply({ content: '❌ Du darfst für diese Bestellung keine Revision anfragen.', ephemeral: true });
@@ -2282,7 +2589,7 @@ async function archiveAndCloseSupport(interaction) {
   try {
   const ownerMatch = String(interaction.channel.topic || '').match(/selling-owner:(\d+)/);
   const ownerId = ownerMatch?.[1] || null;
-  if (interaction.user.id !== ownerId && !canHandleSellingTicket(interaction.member)) {
+  if (interaction.user.id !== ownerId && !canHandleSupportTicket(interaction.member)) {
     await interaction.reply({ content: '❌ Du darfst dieses Support-Ticket nicht schließen.', ephemeral: true });
     return;
   }
@@ -2309,7 +2616,7 @@ async function handleOrderTicketButton(interaction) {
 
   if (interaction.customId.startsWith('selling_claim:')) {
     if (!isOrderTicketContext(interaction, order) || order.closedAt) { await interaction.reply({ content: '❌ Dieser Button gehört nicht mehr zu einem aktiven Bestell-Ticket.', ephemeral: true }); return; }
-    if (!canHandleSellingTicket(interaction.member)) {
+    if (!canHandleOrder(interaction.member, order)) {
       await interaction.reply({ content: '❌ Nur das Shop-Team kann Bestellungen übernehmen.', ephemeral: true });
       return;
     }
@@ -2323,7 +2630,7 @@ async function handleOrderTicketButton(interaction) {
 
   if (interaction.customId.startsWith('selling_status:')) {
     if (!isOrderTicketContext(interaction, order) || order.closedAt) { await interaction.reply({ content: '❌ Dieser Button gehört nicht mehr zu einem aktiven Bestell-Ticket.', ephemeral: true }); return; }
-    if (!canHandleSellingTicket(interaction.member)) {
+    if (!canHandleOrder(interaction.member, order)) {
       await interaction.reply({ content: '❌ Nur das Shop-Team kann Bestellstatus ändern.', ephemeral: true });
       return;
     }
@@ -2346,7 +2653,7 @@ async function handleOrderTicketButton(interaction) {
   if (interaction.customId.startsWith('selling_dispute:')) {
     if (isSellingActionLocked(`delivery:${interaction.guildId}:${id}`) || isSellingActionLocked(`order-status:${interaction.guildId}:${id}`)) { await interaction.reply({ content: '⏳ Die Bestellung wird gerade verarbeitet. Warte bitte kurz.', ephemeral: true }); return; }
     if (!isOrderTicketContext(interaction, order) || order.closedAt) { await interaction.reply({ content: '❌ Dieser Button gehört nicht mehr zu einem aktiven Bestell-Ticket.', ephemeral: true }); return; }
-    if (interaction.user.id !== order.userId && !canHandleSellingTicket(interaction.member)) {
+    if (interaction.user.id !== order.userId && !canHandleOrder(interaction.member, order)) {
       await interaction.reply({ content: '❌ Keine Berechtigung für diese Bestellung.', ephemeral: true });
       return;
     }
@@ -2364,7 +2671,7 @@ async function handleOrderTicketButton(interaction) {
 
   if (interaction.customId.startsWith('selling_close:')) {
     if (!isOrderTicketContext(interaction, order) || order.closedAt) { await interaction.reply({ content: '❌ Dieses Bestell-Ticket ist nicht mehr aktiv.', ephemeral: true }); return; }
-    if (!canHandleSellingTicket(interaction.member)) {
+    if (!canHandleOrder(interaction.member, order)) {
       await interaction.reply({ content: '❌ Bestell-Tickets können nur vom Shop-Team geschlossen werden. So bleibt die Bestellhistorie konsistent.', ephemeral: true });
       return;
     }
@@ -2389,8 +2696,8 @@ async function handleOrderTicketButton(interaction) {
 async function handleSupportButton(interaction) {
   if (!interaction.inGuild() || !interaction.channel) return;
   if (interaction.customId === 'selling_support_claim') {
-    if (!canHandleSellingTicket(interaction.member)) {
-      await interaction.reply({ content: '❌ Nur das Shop-Team kann Support-Tickets übernehmen.', ephemeral: true });
+    if (!canHandleSupportTicket(interaction.member)) {
+      await interaction.reply({ content: '❌ Nur Support, Management oder Inhaber können Support-Tickets übernehmen.', ephemeral: true });
       return;
     }
     await interaction.reply({ content: `🙋 <@${interaction.user.id}> hat dieses Support-Ticket übernommen.` });
@@ -2826,7 +3133,7 @@ function customerProfileEmbed(data, user) {
 async function openPriceModal(interaction, orderId) {
   const { data } = getGuildShopData(interaction.guildId);
   const order = data.orders[orderId];
-  if (!order || !canHandleSellingTicket(interaction.member)) { await interaction.reply({ content: '❌ Keine Berechtigung oder Bestellung nicht gefunden.', ephemeral: true }); return; }
+  if (!order || !canHandleOrder(interaction.member, order)) { await interaction.reply({ content: '❌ Keine Berechtigung oder Bestellung nicht gefunden.', ephemeral: true }); return; }
   if (order.closedAt || order.acceptedAt || order.paidAt) { await interaction.reply({ content: '❌ Der Preis kann nach Zahlung, Annahme oder Ticket-Abschluss nicht mehr über dieses Panel geändert werden.', ephemeral: true }); return; }
   const modal = new ModalBuilder().setCustomId(`selling_price_modal:${orderId}`).setTitle(`Preis festlegen • ${orderId}`);
   modal.addComponents(
@@ -2837,13 +3144,13 @@ async function openPriceModal(interaction, orderId) {
 }
 
 async function submitPriceModal(interaction, orderId) {
-  if (!canHandleSellingTicket(interaction.member)) return interaction.reply({ content: '❌ Nur das Shop-Team.', ephemeral: true });
   const amount = Number(String(interaction.fields.getTextInputValue('price')).replace(',', '.'));
   const revisionsRaw = interaction.fields.getTextInputValue('revisions').trim();
   if (!Number.isFinite(amount) || amount < 0) return interaction.reply({ content: '❌ Ungültiger Preis.', ephemeral: true });
   const { store, data } = getGuildShopData(interaction.guildId);
   const order = data.orders[orderId];
   if (!order) return interaction.reply({ content: '❌ Bestellung nicht gefunden.', ephemeral: true });
+  if (!canHandleOrder(interaction.member, order)) return interaction.reply({ content: '❌ Du bist für diese Produktart nicht zuständig.', ephemeral: true });
   if (order.closedAt || order.acceptedAt || order.paidAt) return interaction.reply({ content: '❌ Der Preis kann nach Zahlung, Annahme oder Ticket-Abschluss nicht mehr geändert werden.', ephemeral: true });
   order.basePrice = Math.round(amount*100)/100;
   order.finalPrice = Math.round(order.basePrice*(1-effectiveDiscountForOrder(order)/100)*100)/100;
@@ -2855,9 +3162,9 @@ async function submitPriceModal(interaction, orderId) {
 }
 
 async function beginDirectDelivery(interaction, orderId) {
-  if (!canHandleSellingTicket(interaction.member)) return interaction.reply({ content: '❌ Nur das Shop-Team kann liefern.', ephemeral: true });
   const { data } = getGuildShopData(interaction.guildId); const order = data.orders[orderId];
   if (!order) return interaction.reply({ content: '❌ Bestellung nicht gefunden.', ephemeral: true });
+  if (!canHandleOrder(interaction.member, order)) return interaction.reply({ content: '❌ Du bist für diese Produktart nicht zuständig.', ephemeral: true });
   if (order.closedAt || !isOrderTicketContext(interaction, order)) return interaction.reply({ content: '❌ Die Lieferung muss im aktiven zugehörigen Bestell-Ticket gestartet werden.', ephemeral: true });
   if (order.acceptedAt) return interaction.reply({ content: '❌ Diese Bestellung wurde vom Kunden bereits akzeptiert.', ephemeral: true });
   if (isSellingActionLocked(`delivery:${interaction.guildId}:${orderId}`) || isSellingActionLocked(`order-status:${interaction.guildId}:${orderId}`)) return interaction.reply({ content: '⏳ Für diese Bestellung läuft gerade bereits eine Lieferung oder Statusänderung.', ephemeral: true });
@@ -2953,9 +3260,9 @@ async function handlePendingDeliveryMessage(message) {
 }
 
 async function directDeliverSlash(interaction, orderId, attachment) {
-  if (!canHandleSellingTicket(interaction.member)) return interaction.reply({content:'❌ Nur das Shop-Team.',ephemeral:true});
   const { data } = getGuildShopData(interaction.guildId); const order=data.orders[orderId];
   if (!order) return interaction.reply({content:'❌ Bestellung nicht gefunden.',ephemeral:true});
+  if (!canHandleOrder(interaction.member, order)) return interaction.reply({content:'❌ Du bist für diese Produktart nicht zuständig.',ephemeral:true});
   if (order.closedAt || order.acceptedAt) return interaction.reply({content:'❌ Diese Bestellung ist bereits geschlossen oder vom Kunden angenommen.',ephemeral:true});
   if (!order.paidAt) return interaction.reply({content:'❌ Bestellung zuerst als Bezahlt markieren.',ephemeral:true});
   if (!attachment?.id || !attachment?.url) return interaction.reply({content:'❌ Keine gültige Produktdatei gefunden.',ephemeral:true});
@@ -3015,7 +3322,7 @@ async function portfolioConsent(interaction, orderId) {
 }
 
 async function handleStaffPanelButton(interaction, action) {
-  if(!canHandleSellingTicket(interaction.member)) return interaction.reply({content:'❌ Nur das Shop-Team.',ephemeral:true});
+  if(!isOwnerOrManagement(interaction.member)) return interaction.reply({content:'❌ Das Control-Panel ist nur für Management und Inhaber.',ephemeral:true});
   const {store,data}=getGuildShopData(interaction.guildId);
   if(action==='refresh'){await refreshStaffDashboard(interaction.guild,data);saveSellingStore(store);return interaction.reply({content:'✅ Dashboard aktualisiert.',ephemeral:true});}
   if(action==='health'){const report=await sellingHealthCheck(interaction.guild,data,true);saveSellingStore(store);return interaction.reply({embeds:[shopEmbed('❤️ Shop Health Check',report)],ephemeral:true});}
@@ -3037,12 +3344,32 @@ async function sellingHealthCheck(guild,data,selfHeal=false){
   const missingChannels=requiredChannels.filter(name=>!findSellingTextChannel(guild,name));
   const missingRoles=['owner','management','support','verified'].filter(key=>!findSellingRole(guild,key));
   let healed=false;
-  if(selfHeal&&(missingChannels.length||missingRoles.length)){
+  let permissionSync=false;
+  let dynamicPermissionsUpdated=0;
+  if(selfHeal){
     sellingResetGuilds.add(guild.id);
-    try{const structure=await createSellingStructure(guild);data.config.channelIds=Object.fromEntries(Object.entries(structure.channels||{}).map(([key,ch])=>[key,ch.id]));data.config.roleIds=Object.fromEntries(Object.entries(structure.roleMap||{}).map(([key,role])=>[key,role.id]));await seedSellingServer(structure);await initializeVerificationMembers(guild,structure).catch(()=>{});healed=true;}finally{setTimeout(()=>sellingResetGuilds.delete(guild.id),1500);}
+    try{
+      const structure=await createSellingStructure(guild);
+      data.config.channelIds=Object.fromEntries(Object.entries(structure.channels||{}).map(([key,ch])=>[key,ch.id]));
+      data.config.roleIds=Object.fromEntries(Object.entries(structure.roleMap||{}).map(([key,role])=>[key,role.id]));
+      dynamicPermissionsUpdated = await syncDynamicSellingPermissions(guild, data).catch(() => 0);
+      await seedSellingServer(structure);
+      if(missingChannels.length||missingRoles.length) await initializeVerificationMembers(guild,structure).catch(()=>{});
+      healed=Boolean(missingChannels.length||missingRoles.length);
+      permissionSync=true;
+    }finally{
+      setTimeout(()=>sellingResetGuilds.delete(guild.id),1500);
+    }
   }
   data.automation.lastHealthAt=Date.now();
-  return [`Fehlende kritische Channels: **${missingChannels.length}**${missingChannels.length?` (${missingChannels.join(', ')})`:''}`,`Fehlende kritische Rollen: **${missingRoles.length}**${missingRoles.length?` (${missingRoles.join(', ')})`:''}`,`Self-Heal: **${healed?'ausgeführt':'nicht nötig'}**`,`Bot-Rolle: **${guild.members.me?.roles.highest?.name||'unbekannt'}**`].join('\n');
+  return [
+    `Fehlende kritische Channels: **${missingChannels.length}**${missingChannels.length?` (${missingChannels.join(', ')})`:''}`,
+    `Fehlende kritische Rollen: **${missingRoles.length}**${missingRoles.length?` (${missingRoles.join(', ')})`:''}`,
+    `Struktur-Heal: **${healed?'ausgeführt':'nicht nötig'}**`,
+    `Rollen-/Channel-Rechte synchronisiert: **${permissionSync?'ja':'nein'}**`,
+    `Offene Ticket-/Delivery-Rechte aktualisiert: **${dynamicPermissionsUpdated}**`,
+    `Bot-Rolle: **${guild.members.me?.roles.highest?.name||'unbekannt'}**`,
+  ].join('\n');
 }
 
 function closeTicketAutomatically(guild,data,order,reason){
@@ -3096,6 +3423,23 @@ async function handleSellCommand(interaction) {
   const managementOnly = new Set(['product', 'automation', 'wizard', 'blacklist', 'coupon', 'availability', 'paypal']);
   if (managementOnly.has(sub) && !canManageSellingShop(interaction.member)) {
     await interaction.reply({ content: '❌ Diese Shop-Verwaltung ist nur für **Management / Server-Inhaber** verfügbar.', ephemeral: true });
+    return;
+  }
+
+  const managementSensitive = new Set(['dashboard', 'panel']);
+  if (managementSensitive.has(sub) && !isOwnerOrManagement(interaction.member)) {
+    await interaction.reply({ content: '❌ Dashboard und Control-Panel sind nur für **Management oder Inhaber** verfügbar.', ephemeral: true });
+    return;
+  }
+
+  const supportSensitive = new Set(['profile', 'search', 'license', 'verify']);
+  if (supportSensitive.has(sub) && !canHandleSupportTicket(interaction.member)) {
+    await interaction.reply({ content: '❌ Dieser Bereich ist nur für **Support, Management oder Inhaber** verfügbar.', ephemeral: true });
+    return;
+  }
+
+  if (sub === 'portfolio' && !(isOwnerOrManagement(interaction.member) || memberHasSellingRole(interaction.member, 'designer'))) {
+    await interaction.reply({ content: '❌ Portfolio-Verwaltung ist nur für **Designer, Management oder Inhaber** verfügbar.', ephemeral: true });
     return;
   }
 
@@ -3166,6 +3510,10 @@ async function handleSellCommand(interaction) {
     const order = data.orders[id];
     if (!order) {
       await interaction.reply({ content: `❌ Bestellung \`${id}\` wurde nicht gefunden.`, ephemeral: true });
+      return;
+    }
+    if (!canHandleOrder(interaction.member, order)) {
+      await interaction.reply({ content: '❌ Du bist für diese Bestellung bzw. Produktart nicht zuständig.', ephemeral: true });
       return;
     }
 
@@ -3335,6 +3683,10 @@ async function handleSellCommand(interaction) {
       return;
     }
     if (action === 'remove') {
+      if (!isOwnerOrManagement(interaction.member)) {
+        await interaction.reply({ content: '❌ Portfolio-Einträge löschen können nur Management oder Inhaber.', ephemeral: true });
+        return;
+      }
       const id = String(interaction.options.getString('id') || '').trim().toUpperCase();
       if (!id || !data.portfolio[id]) {
         await interaction.reply({ content: '❌ Portfolio-ID nicht gefunden.', ephemeral: true });
@@ -3381,6 +3733,10 @@ async function handleSellCommand(interaction) {
     const productKey = interaction.options.getString('produkt');
     const text = interaction.options.getString('text');
     const product = PRODUCT_TYPES[productKey];
+    if (!product || !canPublishProductUpdate(interaction.member, productKey)) {
+      await interaction.reply({ content: '❌ Du darfst für diese Produktart keine Updates veröffentlichen.', ephemeral: true });
+      return;
+    }
     const role = findSellingRole(interaction.guild, product?.roleKey);
     const channel = findSellingTextChannel(interaction.guild, '🔄・produkt-updates');
     if (!channel || !product) {
@@ -3408,6 +3764,7 @@ async function handleSellCommand(interaction) {
   }
 
   if (sub === 'receipt') {
+    if (!canHandleSupportTicket(interaction.member)) { await interaction.reply({ content: '❌ Bestellbelege sind nur für Support, Management oder Inhaber.', ephemeral: true }); return; }
     const id = String(interaction.options.getString('order') || '').trim().toUpperCase();
     const order = data.orders[id];
     if (!order) { await interaction.reply({ content: '❌ Bestellung nicht gefunden.', ephemeral: true }); return; }
@@ -3424,6 +3781,7 @@ async function handleSellCommand(interaction) {
     const attachment = interaction.options.getAttachment('datei');
     const order = data.orders[id];
     if (!order) { await interaction.reply({ content: '❌ Bestellung nicht gefunden.', ephemeral: true }); return; }
+    if (!canHandleOrder(interaction.member, order)) { await interaction.reply({ content: '❌ Du bist für diese Bestellung bzw. Produktart nicht zuständig.', ephemeral: true }); return; }
     if (!order.paidAt) { await interaction.reply({ content: '❌ Watermarking für Lieferdateien ist erst nach bestätigter Zahlung verfügbar.', ephemeral: true }); return; }
     if (!attachment?.url) { await interaction.reply({ content: '❌ Bitte lade bei `datei` eine Bilddatei hoch.', ephemeral: true }); return; }
     await interaction.deferReply({ ephemeral: true });
@@ -3435,6 +3793,7 @@ async function handleSellCommand(interaction) {
   }
 
   if (sub === 'loyalty') {
+    if (!canHandleSupportTicket(interaction.member)) { await interaction.reply({ content: '❌ Kundenstatus ist nur für Support, Management oder Inhaber.', ephemeral: true }); return; }
     const user = interaction.options.getUser('user');
     const status = loyaltyForUser(data, user.id);
     const next = [...LOYALTY_LEVELS].reverse().find(entry => status.count < entry.minOrders);
@@ -3672,7 +4031,7 @@ async function handleSellingInteraction(interaction) {
     await showOrderModal(interaction, String(interaction.customId).split(':')[1]); return true;
   }
   if (interaction.isModalSubmit?.() && interaction.customId === 'selling_wizard_modal') {
-    if (!canHandleSellingTicket(interaction.member)) { await interaction.reply({content:'❌ Nur das Shop-Team.',ephemeral:true}); return true; }
+    if (!canManageSellingShop(interaction.member)) { await interaction.reply({content:'❌ Nur Management oder Inhaber können den Automation-Wizard ändern.',ephemeral:true}); return true; }
     const {store,data}=getGuildShopData(interaction.guildId); const paypal=interaction.fields.getTextInputValue('paypal').trim();
     data.config.paypalEmail=paypal||null; data.automation.busyAt=Math.max(1,Number.parseInt(interaction.fields.getTextInputValue('busy'),10)||5); data.automation.closeAt=Math.max(data.automation.busyAt+1,Number.parseInt(interaction.fields.getTextInputValue('close'),10)||12); data.automation.reminderHours=Math.max(1,Number.parseInt(interaction.fields.getTextInputValue('reminder'),10)||24); data.automation.autoCloseHours=Math.max(1,Number.parseInt(interaction.fields.getTextInputValue('autoclose'),10)||72); data.automation.enabled=true; saveSellingStore(store); await refreshPaymentPanel(interaction.guild,data).catch(()=>{}); await refreshStaffDashboard(interaction.guild,data).catch(()=>{}); saveSellingStore(store); await interaction.reply({content:'✅ Automation-Wizard gespeichert. Shop-Automatisierung ist aktiv.',ephemeral:true}); return true;
   }
@@ -3747,6 +4106,15 @@ Client.prototype.login = function patchedLogin(...args) {
     });
 
     this.once(Events.ClientReady, async () => {
+      for (const guild of this.guilds.cache.values()) {
+        try {
+          const { store, data } = getGuildShopData(guild.id);
+          await sellingHealthCheck(guild, data, true);
+          saveSellingStore(store);
+        } catch (error) {
+          console.error(`❌ Permission Sync auf ${guild.name}:`, error);
+        }
+      }
       await runSellingAutomation(this).catch(() => {});
       setInterval(() => runSellingAutomation(this).catch(error => console.error('❌ Selling Automation:', error)), SELLING_AUTOMATION_TICK_MS).unref?.();
     });

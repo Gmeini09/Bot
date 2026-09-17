@@ -1,4 +1,4 @@
-UNFUGSTIFTER SELLING BOT v5.8.3 FULL STABILITY + SECURITY AUDIT
+UNFUGSTIFTER SELLING BOT v5.8.4 PERMISSIONS + STABILITY UPDATE
 =========================================
 
 UPLOAD / UPDATE
@@ -139,3 +139,7 @@ Zusätzlich zu v5.8.2 behoben:
 WICHTIG FÜR RAILWAY:
 - Verwende genau EINE laufende Bot-Replica/Instanz, wenn selling-data.json auf einem Volume genutzt wird. Mehrere gleichzeitig schreibende Bot-Prozesse benötigen eine echte externe Datenbank/Locking-Schicht.
 - Fuer das Update von v5.8.2/v5.8.1 KEIN /setup server selling ausfuehren. Nur selling-entry.js und package.json ersetzen und neu deployen.
+
+
+=== v5.8.4 PERMISSIONS ===
+Beim Deploy werden die Rollen- und Channel-Berechtigungen automatisch synchronisiert. Für dieses Update NICHT /setup server selling ausführen. Details: PERMISSIONS-AUDIT-v5.8.4.txt

@@ -1,0 +1,84 @@
+UNFUGSTIFTER SELLING BOT v5.8.4 • ROLLEN- & CHANNEL-RECHTE
+================================================================
+
+GRUNDSATZ
+- @everyone / NICHT VERIFIZIERT: nur INFORMATION sichtbar.
+- VERIFIZIERT: alle öffentlichen Shop-, Bestell-, Community- und Support-Bereiche sichtbar.
+- VERIFIZIERT sieht niemals TICKETS, KUNDENBEREICH oder TEAM INTERN anderer Nutzer.
+- Käufer-/VIP-/Partnerrollen geben keine zusätzlichen Teamrechte. Öffentlicher Zugriff bleibt an VERIFIZIERT gebunden.
+
+ÖFFENTLICH
+INFORMATION
+- 👋 willkommen: alle sehen, nur Inhaber/Management schreiben
+- 📜 regelwerk: alle sehen, nur Inhaber/Management schreiben
+- ✅ verifizierung: alle sehen, nur Bot/Inhaber/Management posten
+- 📢 ankündigungen: alle sehen, nur Inhaber/Management schreiben
+- ❓ faq: alle sehen, Inhaber/Management/Support schreiben
+
+SHOP (nur VERIFIZIERT + Team)
+- 🖼️ thumbnails: read-only für User; Inhaber/Management/Designer schreiben
+- 🌆 nve-presets: read-only; Inhaber/Management/Designer/Developer schreiben
+- 🔊 soundpacks: read-only; Inhaber/Management/Sound Designer schreiben
+- 🎨 grafik-designs: read-only; Inhaber/Management/Designer schreiben
+- 🚗 fivem-assets: read-only; Inhaber/Management/Developer schreiben
+- 📦 bundles: read-only; Inhaber/Management/Designer/Sound/Developer schreiben
+- 🆕 neuheiten: read-only; Inhaber/Management schreiben
+- 🔄 produkt-updates: read-only; Inhaber/Management + zuständige Produktionsrollen schreiben
+- 🖼️ portfolio: read-only; Inhaber/Management/Designer schreiben
+
+BESTELLEN (nur VERIFIZIERT + Team)
+- 🛒 bestellen: read-only; Inhaber/Management/Support/Bot schreiben
+- 📊 bestellstatus: read-only; Inhaber/Management/Support/Bot schreiben
+- 💳 zahlung: read-only; Inhaber/Management/Support/Bot schreiben
+- ⭐ bewertungen: read-only; Bot/Shop-Team veröffentlicht
+- 💠 kundenstatus: read-only; Bot/Shop-Team veröffentlicht
+- 📸 kunden-ergebnisse: VERIFIZIERT darf schreiben/Dateien senden
+- 💡 produkt-wünsche: VERIFIZIERT darf schreiben/Dateien senden
+
+COMMUNITY (nur VERIFIZIERT + Team)
+- 💬 shop-chat: VERIFIZIERT darf schreiben
+- 🎁 giveaways: read-only für User; Inhaber/Management/Support/Bot schreiben
+- 🤝 partner: read-only; Inhaber/Management schreiben
+
+SUPPORT (nur VERIFIZIERT + Team)
+- ❓ support-chat: VERIFIZIERT darf schreiben
+- 🎫 support-ticket: read-only; Bot/Support/Management/Inhaber posten
+- 📋 ticket-info: read-only; Support/Management/Inhaber posten
+- 📞 Support Warteraum: VERIFIZIERT darf verbinden/sprechen
+
+PRIVATE TICKETS
+- Support-Ticket: nur Kunde + Support + Management + Inhaber
+- Bestell-Ticket: nur Kunde + Support + Management + Inhaber + passende Produktionsrolle
+  Thumbnail/Grafik -> Designer
+  Soundpack -> Sound Designer
+  FiveM -> Developer
+  NVE -> Designer + Developer
+  Bundle -> Designer + Sound Designer + Developer
+- Kunden-/Delivery-Channel: gleiche Zuordnung wie Bestell-Ticket
+- Bestehende offene Tickets/Delivery-Channels werden beim Bot-Start automatisch neu synchronisiert.
+
+TEAM INTERN
+- 🛠️ team-chat: alle Teamrollen lesen/schreiben
+- 📦 bestellungen: alle Teamrollen lesen/schreiben
+- 💰 verkäufe: nur Inhaber + Management
+- 🗂️ produkt-upload: Inhaber + Management + Designer + Sound Designer + Developer
+- 📋 logs: Inhaber/Management schreiben; Support read-only
+- 🛡️ security-logs: nur Inhaber + Management
+- 📄 transkripte: Inhaber/Management schreiben; Support read-only
+- 🚫 blacklist: Inhaber/Management schreiben; Support read-only
+- 📊 shop-dashboard: nur Inhaber + Management
+- ⏱️ auftrags-warteschlange: Inhaber/Management/Support schreiben; Designer/Sound/Developer read-only
+- 🤖 automation-log: Inhaber/Management schreiben; Support read-only
+- 🔊 Team Talk: alle Teamrollen verbinden/sprechen
+
+ROLLENRECHTE AUF SERVER-EBENE
+- 👑 INHABER: Administrator
+- ⚜️ MANAGEMENT: ManageChannels, ManageMessages, ModerateMembers
+- 🎫 SUPPORT: keine globalen Moderationsrechte; Rechte nur über Channel-Overwrites
+- 🎨 DESIGNER / 🎧 SOUND DESIGNER / 🛠️ DEVELOPER: keine globalen Serverrechte
+- Partner/Kunde/Käufer/VIP/Verified/Unverified: keine globalen Serverrechte
+
+AUTOMATISCHE REPARATUR
+- Beim Bot-Start und beim Health-Check werden Rollen-, Kategorie- und Channel-Rechte mit dieser Matrix abgeglichen.
+- Auch offene Kauf-Tickets, Support-Tickets und Delivery-Channels werden auf die passende Rollenfreigabe korrigiert.
+- Dafür ist KEIN /setup server selling nötig.

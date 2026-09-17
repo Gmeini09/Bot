@@ -1,0 +1,17 @@
+UNFUGSTIFTER SELLING BOT v5.8.4 • PERMISSIONS UPDATE
+===================================================
+
+- VERIFIZIERT sieht jetzt konsistent alle öffentlichen Bereiche, aber keine privaten/team-internen Bereiche.
+- Öffentliche Schreibrechte pro Channel explizit festgelegt.
+- Giveaways auf read-only für normale User umgestellt.
+- Team-Intern nach Least-Privilege getrennt.
+- Verkäufe und Security-Logs nur für Inhaber/Management.
+- Support erhält sensible Logs/Transkripte/Blacklist nur read-only.
+- Support hat keine globalen ModerateMembers/ManageMessages-Rechte mehr.
+- Management verliert unnötige ManageGuild/ManageRoles/Kick/Ban-Rechte.
+- Support-Tickets nur noch für Kunde + Support + Management/Inhaber.
+- Bestell-/Delivery-Channels nur für Kunde + Support/Management/Inhaber + passende Produktionsrolle.
+- Slash-/Button-Berechtigungen an die Channel-Matrix angepasst.
+- Bestehende offene Tickets und Delivery-Channels werden automatisch synchronisiert.
+- Permission-Self-Heal läuft beim Bot-Start und regelmäßig im Health-Check.
+- Staff-Control-Dashboard mit Umsatz/Security nur noch für Inhaber/Management.
