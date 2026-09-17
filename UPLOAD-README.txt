@@ -1,4 +1,4 @@
-UNFUGSTIFTER SELLING SETUP v5.6 PROFESSIONAL+
+UNFUGSTIFTER SELLING SETUP v5.7 PROFESSIONAL+ SECURITY
 
 INSTALLATION
 1. Lade selling-entry.js in den Hauptordner deines GitHub-Repos Gmeini09/Bot.
@@ -17,7 +17,25 @@ WICHTIG: FULL RESET
 - Der Command-Channel wird nur für die Abschlussmeldung behalten und danach ebenfalls gelöscht.
 - Das Selling-Datensystem wird beim kompletten Neuaufbau frisch initialisiert.
 
-NEU IN v5.6
+NEU IN v5.7
+
+0) VERIFY + ANTI-NUKE
+- Neuer Channel ✅・verifizierung mit Rechenprüfung.
+- Neue Rolle ⏳・NICHT VERIFIZIERT und bestehende ✅・VERIFIZIERT Rolle.
+- Shop, Bestellungen, Community und Support sind erst nach erfolgreicher Verifizierung sichtbar.
+- Neue Mitglieder erhalten automatisch die Unverified-Rolle.
+- Bestehende Mitglieder werden beim Full-Setup ebenfalls als unverifiziert markiert, sofern sie noch nicht verifiziert sind.
+- /sell verify action:status bzw. panel.
+- Anti-Nuke ist standardmäßig aktiviert.
+- Überwacht kritische Channel-, Rollen-, Webhook-, Kick- und Ban-Aktionen über Discord Audit Logs.
+- Standard: 4 kritische Aktionen innerhalb von 10 Sekunden lösen die Quarantäne aus.
+- Menschen: entfernbare Rollen werden entzogen und, sofern möglich, 24 Stunden Timeout gesetzt.
+- Bots: können bei Überschreitung automatisch gekickt werden, sofern Discord dies erlaubt.
+- Server-Inhaber ist immer ausgenommen; zusätzliche Whitelist über /sell antinuke.
+- Neuer interner Channel 🛡️・security-logs.
+- Regelwerk erweitert auf 47 konkrete Punkte inklusive Verify-, Account-Sicherheits- und Anti-Nuke-Regeln.
+
+BEREITS AUS v5.6
 
 1) WARENKORB
 - Produktbuttons legen Thumbnails, NVE, Soundpacks, Designs, FiveM Assets und Bundles in einen persistenten Warenkorb.
@@ -63,7 +81,7 @@ Automatische Stufen nach gelieferten Bestellungen:
 - Andere Dateitypen werden nicht fälschlich als unsichtbar wassergezeichnet bezeichnet.
 
 REGELWERK
-Der Channel 📜・regelwerk enthält jetzt das vollständige Shop-Regelwerk in mehreren Abschnitten mit 41 konkreten Punkten:
+Der Channel 📜・regelwerk enthält jetzt das vollständige Shop-Regelwerk in mehreren Abschnitten mit 47 konkreten Punkten:
 - Geltungsbereich und Vertragsablauf
 - Warenkorb und verbindliche Bestellungen
 - PayPal und Zahlungsnachweise
@@ -89,6 +107,9 @@ Der Channel 📜・regelwerk enthält jetzt das vollständige Shop-Regelwerk in 
 - Verhalten und Rechte Dritter
 - Produkt-Updates
 - Regeländerungen und Zustimmung
+- Verifizierungspflicht und Schutz vor Verify-Umgehung
+- Account-Sicherheit
+- Anti-Nuke-Schutz, Quarantäne und Security-Logs
 
 BEREITS AUS v5.5 ENTHALTEN
 - UF-Bestellnummern
@@ -124,6 +145,8 @@ WICHTIGE TEAM-COMMANDS
 /sell availability
 /sell update
 /sell paypal
+/sell verify
+/sell antinuke
 
 ABHÄNGIGKEITEN
 - discord.js 14.27.0

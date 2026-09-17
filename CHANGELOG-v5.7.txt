@@ -1,0 +1,21 @@
+UNFUGSTIFTER SELLING SETUP v5.7 PROFESSIONAL+ SECURITY
+
+NEU
+- Vollständiges Verify-System mit Rechenprüfung
+- Rollen: NICHT VERIFIZIERT / VERIFIZIERT
+- Shop-/Bestell-/Community-/Support-Bereiche erst nach Verify sichtbar
+- Automatische Unverified-Rolle bei Join
+- /sell verify status/panel
+- Anti-Nuke standardmäßig aktiv
+- Audit-Log-basierte Überwachung von Channel-, Rollen-, Webhook-, Kick- und Ban-Aktionen
+- Automatische Quarantäne ab 4 kritischen Aktionen in 10 Sekunden
+- Entfernen editierbarer Rollen + Timeout bei Menschen
+- Kick auffälliger Bots, sofern technisch möglich
+- Owner-Whitelist und zusätzliche Whitelist-Verwaltung
+- /sell antinuke status/enable/disable/whitelist/unwhitelist
+- Neuer Channel 🛡️・security-logs
+- Regelwerk erweitert auf 47 Punkte
+
+WICHTIG
+/setup server selling führt weiterhin einen vollständigen Reset aller löschbaren alten Channels und Rollen durch.
+Der Bot benötigt Administrator und seine Rolle muss über allen normalen Rollen stehen.

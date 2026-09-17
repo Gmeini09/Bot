@@ -2,6 +2,7 @@
 
 const {
   ActionRowBuilder,
+  AuditLogEvent,
   AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
@@ -54,6 +55,7 @@ const SELLING = {
     { name: '💠・VIP KUNDE', key: 'loyalty_vip', color: 0x00d9ff, hoist: true, permissions: [] },
     { name: '🔔・SHOP UPDATES', key: 'updates', color: 0x95a5a6, hoist: false, permissions: [] },
     { name: '🎁・GIVEAWAYS', key: 'giveaways', color: 0xe67e22, hoist: false, permissions: [] },
+    { name: '⏳・NICHT VERIFIZIERT', key: 'unverified', color: 0x95a5a6, hoist: false, permissions: [] },
     { name: '✅・VERIFIZIERT', key: 'verified', color: 0x2ecc71, hoist: false, permissions: [] },
   ],
 };
@@ -91,6 +93,9 @@ function isSellingInteraction(interaction) {
 let cachedSellingCommandBody = null;
 let sellingLoginToken = null;
 const sellingResetGuilds = new Set();
+const sellingVerifyChallenges = new Map();
+const sellingAntiNukeActions = new Map();
+const SELLING_VERIFY_TTL_MS = 5 * 60 * 1000;
 
 const sellingStorageDir = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || __dirname;
 if (!fs.existsSync(sellingStorageDir)) fs.mkdirSync(sellingStorageDir, { recursive: true });
@@ -114,6 +119,15 @@ function blankGuildShopData() {
       availabilityNote: null,
       channelIds: {},
       roleIds: {},
+    },
+    security: {
+      antiNuke: {
+        enabled: true,
+        threshold: 4,
+        windowMs: 10000,
+        whitelist: [],
+        quarantineMinutes: 1440,
+      },
     },
   };
 }
@@ -156,6 +170,12 @@ function ensureGuildShopData(store, guildId) {
   data.config = { ...blankGuildShopData().config, ...(data.config || {}) };
   data.config.channelIds = data.config.channelIds && typeof data.config.channelIds === 'object' ? data.config.channelIds : {};
   data.config.roleIds = data.config.roleIds && typeof data.config.roleIds === 'object' ? data.config.roleIds : {};
+  data.security = data.security && typeof data.security === 'object' ? data.security : {};
+  data.security.antiNuke = {
+    ...blankGuildShopData().security.antiNuke,
+    ...(data.security.antiNuke && typeof data.security.antiNuke === 'object' ? data.security.antiNuke : {}),
+  };
+  data.security.antiNuke.whitelist = Array.isArray(data.security.antiNuke.whitelist) ? data.security.antiNuke.whitelist : [];
   return data;
 }
 
@@ -523,6 +543,22 @@ function buildSellCommandDefinition() {
         ],
       },
       {
+        type: 1, name: 'verify', description: 'Verwaltet das Verifizierungs-System.', options: [
+          { type: 3, name: 'action', description: 'Aktion', required: true, choices: [
+            { name: 'Status', value: 'status' }, { name: 'Panel neu posten', value: 'panel' },
+          ] },
+        ],
+      },
+      {
+        type: 1, name: 'antinuke', description: 'Verwaltet den Anti-Nuke-Schutz.', options: [
+          { type: 3, name: 'action', description: 'Aktion', required: true, choices: [
+            { name: 'Status', value: 'status' }, { name: 'Aktivieren', value: 'enable' }, { name: 'Deaktivieren', value: 'disable' },
+            { name: 'Whitelist hinzufügen', value: 'whitelist' }, { name: 'Whitelist entfernen', value: 'unwhitelist' },
+          ] },
+          { type: 6, name: 'user', description: 'Nutzer für Whitelist', required: false },
+        ],
+      },
+      {
         type: 1, name: 'paypal', description: 'Setzt oder zeigt die PayPal-Empfängeradresse.', options: [
           { type: 3, name: 'email', description: 'PayPal E-Mail; leer = aktuellen Wert anzeigen', required: false, max_length: 200 },
         ],
@@ -605,7 +641,22 @@ function staffOverwrites(guild, roleMap, extra = []) {
   ];
 }
 
-function readOnlyOverwrites(guild, roleMap) {
+function verifiedCategoryOverwrites(guild, roleMap) {
+  return [
+    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    ...(roleMap.verified ? [{ id: roleMap.verified.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] }] : []),
+    ...staffRoleIds(roleMap).map(id => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] })),
+  ];
+}
+
+function readOnlyOverwrites(guild, roleMap, verifiedOnly = false) {
+  if (verifiedOnly) {
+    return [
+      { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
+      ...(roleMap.verified ? [{ id: roleMap.verified.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory], deny: [PermissionFlagsBits.SendMessages] }] : []),
+      ...staffRoleIds(roleMap).map(id => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageMessages] })),
+    ];
+  }
   return [
     { id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel], deny: [PermissionFlagsBits.SendMessages] },
     ...staffRoleIds(roleMap).map(id => ({ id, allow: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageMessages] })),
@@ -639,14 +690,16 @@ async function ensureCategory(guild, name, permissionOverwrites = undefined) {
   return category;
 }
 
-async function ensureChannel(guild, parent, name, { type = ChannelType.GuildText, topic = null, readOnly = false, privateForStaff = false, roleMap = {} } = {}) {
+async function ensureChannel(guild, parent, name, { type = ChannelType.GuildText, topic = null, readOnly = false, privateForStaff = false, verifiedOnly = false, roleMap = {} } = {}) {
   let channel = guild.channels.cache.find(item => item.type === type && item.name === name && item.parentId === parent.id) || null;
   if (!channel) {
     const permissionOverwrites = privateForStaff
       ? staffOverwrites(guild, roleMap)
       : readOnly
-        ? readOnlyOverwrites(guild, roleMap)
-        : undefined;
+        ? readOnlyOverwrites(guild, roleMap, verifiedOnly)
+        : verifiedOnly
+          ? verifiedCategoryOverwrites(guild, roleMap)
+          : undefined;
     channel = await guild.channels.create({
       name,
       type,
@@ -764,10 +817,10 @@ async function createSellingStructure(guild) {
 
   const categories = {};
   categories.info = await ensureCategory(guild, SELLING.categories.info);
-  categories.shop = await ensureCategory(guild, SELLING.categories.shop);
-  categories.buy = await ensureCategory(guild, SELLING.categories.buy);
-  categories.community = await ensureCategory(guild, SELLING.categories.community);
-  categories.support = await ensureCategory(guild, SELLING.categories.support);
+  categories.shop = await ensureCategory(guild, SELLING.categories.shop, verifiedCategoryOverwrites(guild, roleMap));
+  categories.buy = await ensureCategory(guild, SELLING.categories.buy, verifiedCategoryOverwrites(guild, roleMap));
+  categories.community = await ensureCategory(guild, SELLING.categories.community, verifiedCategoryOverwrites(guild, roleMap));
+  categories.support = await ensureCategory(guild, SELLING.categories.support, verifiedCategoryOverwrites(guild, roleMap));
   categories.orders = await ensureCategory(guild, SELLING.categories.orders, staffOverwrites(guild, roleMap));
   categories.delivery = await ensureCategory(guild, SELLING.categories.delivery, staffOverwrites(guild, roleMap));
   categories.team = await ensureCategory(guild, SELLING.categories.team, staffOverwrites(guild, roleMap));
@@ -775,41 +828,43 @@ async function createSellingStructure(guild) {
   const channels = {};
   channels.welcome = await ensureChannel(guild, categories.info, '👋・willkommen', { readOnly: true, roleMap, topic: 'Willkommen im Unfugstifter Shop.' });
   channels.rules = await ensureChannel(guild, categories.info, '📜・regelwerk', { readOnly: true, roleMap, topic: 'Regeln und Lizenzhinweise für den Shop.' });
+  channels.verify = await ensureChannel(guild, categories.info, '✅・verifizierung', { readOnly: true, roleMap, topic: 'Verifiziere dich hier, um Zugriff auf Shop, Community und Support zu erhalten.' });
   channels.news = await ensureChannel(guild, categories.info, '📢・ankündigungen', { readOnly: true, roleMap, topic: 'Shop-News, Releases und Updates.' });
   channels.faq = await ensureChannel(guild, categories.info, '❓・faq', { readOnly: true, roleMap, topic: 'Häufig gestellte Fragen.' });
 
-  channels.thumbnails = await ensureChannel(guild, categories.shop, '🖼️・thumbnails', { readOnly: true, roleMap, topic: 'Thumbnail-Angebote, Beispiele und Pakete.' });
-  channels.nve = await ensureChannel(guild, categories.shop, '🌆・nve-presets', { readOnly: true, roleMap, topic: 'Eigene oder lizenzierte NVE-Presets, Grafik-Setups und Anpassungen.' });
-  channels.soundpacks = await ensureChannel(guild, categories.shop, '🔊・soundpacks', { readOnly: true, roleMap, topic: 'Eigene Soundpacks und Audio-Pakete.' });
-  channels.graphics = await ensureChannel(guild, categories.shop, '🎨・grafik-designs', { readOnly: true, roleMap, topic: 'Logos, Banner, Thumbnails und weitere Designs.' });
-  channels.fivem = await ensureChannel(guild, categories.shop, '🚗・fivem-assets', { readOnly: true, roleMap, topic: 'Eigene oder lizenzierte FiveM-Assets und Setups.' });
-  channels.bundles = await ensureChannel(guild, categories.shop, '📦・bundles', { readOnly: true, roleMap, topic: 'Produkt-Bundles und Pakete.' });
-  channels.newProducts = await ensureChannel(guild, categories.shop, '🆕・neuheiten', { readOnly: true, roleMap, topic: 'Neue Produkte und Updates.' });
-  channels.productUpdates = await ensureChannel(guild, categories.shop, '🔄・produkt-updates', { readOnly: true, roleMap, topic: 'Updates für bereits gekaufte Produkte.' });
-  channels.portfolio = await ensureChannel(guild, categories.shop, '🖼️・portfolio', { readOnly: true, roleMap, topic: 'Portfolio, Referenzen und ausgewählte Arbeiten.' });
+  channels.thumbnails = await ensureChannel(guild, categories.shop, '🖼️・thumbnails', { readOnly: true, roleMap, topic: 'Thumbnail-Angebote, Beispiele und Pakete.', verifiedOnly: true});
+  channels.nve = await ensureChannel(guild, categories.shop, '🌆・nve-presets', { readOnly: true, roleMap, topic: 'Eigene oder lizenzierte NVE-Presets, Grafik-Setups und Anpassungen.', verifiedOnly: true});
+  channels.soundpacks = await ensureChannel(guild, categories.shop, '🔊・soundpacks', { readOnly: true, roleMap, topic: 'Eigene Soundpacks und Audio-Pakete.', verifiedOnly: true});
+  channels.graphics = await ensureChannel(guild, categories.shop, '🎨・grafik-designs', { readOnly: true, roleMap, topic: 'Logos, Banner, Thumbnails und weitere Designs.', verifiedOnly: true});
+  channels.fivem = await ensureChannel(guild, categories.shop, '🚗・fivem-assets', { readOnly: true, roleMap, topic: 'Eigene oder lizenzierte FiveM-Assets und Setups.', verifiedOnly: true});
+  channels.bundles = await ensureChannel(guild, categories.shop, '📦・bundles', { readOnly: true, roleMap, topic: 'Produkt-Bundles und Pakete.', verifiedOnly: true});
+  channels.newProducts = await ensureChannel(guild, categories.shop, '🆕・neuheiten', { readOnly: true, roleMap, topic: 'Neue Produkte und Updates.', verifiedOnly: true});
+  channels.productUpdates = await ensureChannel(guild, categories.shop, '🔄・produkt-updates', { readOnly: true, roleMap, topic: 'Updates für bereits gekaufte Produkte.', verifiedOnly: true});
+  channels.portfolio = await ensureChannel(guild, categories.shop, '🖼️・portfolio', { readOnly: true, roleMap, topic: 'Portfolio, Referenzen und ausgewählte Arbeiten.', verifiedOnly: true});
 
-  channels.order = await ensureChannel(guild, categories.buy, '🛒・bestellen', { readOnly: true, roleMap, topic: 'Hier kannst du ein privates Kauf-Ticket öffnen.' });
-  channels.orderStatus = await ensureChannel(guild, categories.buy, '📊・bestellstatus', { readOnly: true, roleMap, topic: 'Aktueller Bestellstatus und Auslastung des Shops.' });
-  channels.payment = await ensureChannel(guild, categories.buy, '💳・zahlung', { readOnly: true, roleMap, topic: 'Zahlungsinformationen werden vom Shop-Team gepflegt.' });
-  channels.reviews = await ensureChannel(guild, categories.buy, '⭐・bewertungen', { readOnly: true, roleMap, topic: 'Verifizierte Bewertungen aus abgeschlossenen Bestellungen.' });
-  channels.customerStatus = await ensureChannel(guild, categories.buy, '💠・kundenstatus', { readOnly: true, roleMap, topic: 'Stammkunden-, VIP- und Rabattvorteile.' });
-  channels.results = await ensureChannel(guild, categories.buy, '📸・kunden-ergebnisse', { roleMap, topic: 'Ergebnisse und Showcase von Kunden.' });
-  channels.requests = await ensureChannel(guild, categories.buy, '💡・produkt-wünsche', { roleMap, topic: 'Wünsche für neue Produkte oder individuelle Aufträge.' });
+  channels.order = await ensureChannel(guild, categories.buy, '🛒・bestellen', { readOnly: true, roleMap, topic: 'Hier kannst du ein privates Kauf-Ticket öffnen.', verifiedOnly: true});
+  channels.orderStatus = await ensureChannel(guild, categories.buy, '📊・bestellstatus', { readOnly: true, roleMap, topic: 'Aktueller Bestellstatus und Auslastung des Shops.', verifiedOnly: true});
+  channels.payment = await ensureChannel(guild, categories.buy, '💳・zahlung', { readOnly: true, roleMap, topic: 'Zahlungsinformationen werden vom Shop-Team gepflegt.', verifiedOnly: true});
+  channels.reviews = await ensureChannel(guild, categories.buy, '⭐・bewertungen', { readOnly: true, roleMap, topic: 'Verifizierte Bewertungen aus abgeschlossenen Bestellungen.', verifiedOnly: true});
+  channels.customerStatus = await ensureChannel(guild, categories.buy, '💠・kundenstatus', { readOnly: true, roleMap, topic: 'Stammkunden-, VIP- und Rabattvorteile.', verifiedOnly: true});
+  channels.results = await ensureChannel(guild, categories.buy, '📸・kunden-ergebnisse', { roleMap, topic: 'Ergebnisse und Showcase von Kunden.', verifiedOnly: true});
+  channels.requests = await ensureChannel(guild, categories.buy, '💡・produkt-wünsche', { roleMap, topic: 'Wünsche für neue Produkte oder individuelle Aufträge.', verifiedOnly: true});
 
-  channels.chat = await ensureChannel(guild, categories.community, '💬・shop-chat', { roleMap, topic: 'Allgemeiner Community-Chat.' });
-  channels.giveaways = await ensureChannel(guild, categories.community, '🎁・giveaways', { roleMap, topic: 'Giveaways und Aktionen.' });
-  channels.partners = await ensureChannel(guild, categories.community, '🤝・partner', { readOnly: true, roleMap, topic: 'Partner und Empfehlungen.' });
+  channels.chat = await ensureChannel(guild, categories.community, '💬・shop-chat', { roleMap, topic: 'Allgemeiner Community-Chat.', verifiedOnly: true});
+  channels.giveaways = await ensureChannel(guild, categories.community, '🎁・giveaways', { roleMap, topic: 'Giveaways und Aktionen.', verifiedOnly: true});
+  channels.partners = await ensureChannel(guild, categories.community, '🤝・partner', { readOnly: true, roleMap, topic: 'Partner und Empfehlungen.', verifiedOnly: true});
 
-  channels.support = await ensureChannel(guild, categories.support, '❓・support-chat', { roleMap, topic: 'Kurze Fragen vor oder nach dem Kauf.' });
-  channels.supportTicket = await ensureChannel(guild, categories.support, '🎫・support-ticket', { readOnly: true, roleMap, topic: 'Öffne hier ein privates Support-Ticket.' });
-  channels.ticketInfo = await ensureChannel(guild, categories.support, '📋・ticket-info', { readOnly: true, roleMap, topic: 'Informationen zu Kauf- und Support-Tickets.' });
-  channels.supportVoice = await ensureChannel(guild, categories.support, '📞・Support Warteraum', { type: ChannelType.GuildVoice, roleMap });
+  channels.support = await ensureChannel(guild, categories.support, '❓・support-chat', { roleMap, topic: 'Kurze Fragen vor oder nach dem Kauf.', verifiedOnly: true});
+  channels.supportTicket = await ensureChannel(guild, categories.support, '🎫・support-ticket', { readOnly: true, roleMap, topic: 'Öffne hier ein privates Support-Ticket.', verifiedOnly: true});
+  channels.ticketInfo = await ensureChannel(guild, categories.support, '📋・ticket-info', { readOnly: true, roleMap, topic: 'Informationen zu Kauf- und Support-Tickets.', verifiedOnly: true});
+  channels.supportVoice = await ensureChannel(guild, categories.support, '📞・Support Warteraum', { type: ChannelType.GuildVoice, roleMap, verifiedOnly: true});
 
   channels.teamChat = await ensureChannel(guild, categories.team, '🛠️・team-chat', { privateForStaff: true, roleMap, topic: 'Interner Team-Chat.' });
   channels.ordersInternal = await ensureChannel(guild, categories.team, '📦・bestellungen', { privateForStaff: true, roleMap, topic: 'Interne Übersicht zu Bestellungen.' });
   channels.sales = await ensureChannel(guild, categories.team, '💰・verkäufe', { privateForStaff: true, roleMap, topic: 'Interne Verkaufsübersicht.' });
   channels.productUpload = await ensureChannel(guild, categories.team, '🗂️・produkt-upload', { privateForStaff: true, roleMap, topic: 'Produktdateien, Entwürfe und interne Uploads.' });
   channels.logs = await ensureChannel(guild, categories.team, '📋・logs', { privateForStaff: true, roleMap, topic: 'Selling-System Logs.' });
+  channels.securityLogs = await ensureChannel(guild, categories.team, '🛡️・security-logs', { privateForStaff: true, roleMap, topic: 'Anti-Nuke, Verifizierung und Sicherheitsereignisse.' });
   channels.transcripts = await ensureChannel(guild, categories.team, '📄・transkripte', { privateForStaff: true, roleMap, topic: 'Automatisch gespeicherte Ticket-Transkripte.' });
   channels.blacklist = await ensureChannel(guild, categories.team, '🚫・blacklist', { privateForStaff: true, roleMap, topic: 'Interne Shop-Blacklist und Sperrprotokoll.' });
   channels.dashboard = await ensureChannel(guild, categories.team, '📊・shop-dashboard', { privateForStaff: true, roleMap, topic: 'Interne Kennzahlen und Shop-Übersicht.' });
@@ -880,6 +935,14 @@ async function seedCompleteRulebook(channel) {
       '**40. Änderungen des Regelwerks**\nDas Regelwerk kann für zukünftige Bestellungen angepasst werden. Für bereits abgeschlossene Bestellungen bleiben zwingende gesetzliche Rechte sowie individuell bestätigte Vereinbarungen maßgeblich.',
       '**41. Zustimmung**\nMit Abschluss einer Bestellung bestätigst du, dass du dieses Regelwerk und die im Kauf-Ticket bestätigten Produkt-, Preis- und Lizenzbedingungen zur Kenntnis genommen hast.',
     ]],
+    ['🛡️ 08 • Verifizierung, Account-Sicherheit & Anti-Nuke', [
+      '**42. Verifizierungspflicht**\nFür den Zugriff auf Shop, Bestellungen, Community und Support ist die Verifizierung über den offiziellen Verify-Channel erforderlich. Die Verifizierung dient dem Schutz vor Bots, Spam und automatisiertem Missbrauch.',
+      '**43. Keine Umgehung der Verifizierung**\nDas Umgehen der Verifizierung durch Zweitaccounts, Automatisierung, fremde Accounts oder technische Tricks ist untersagt und kann zur Sperre führen.',
+      '**44. Account-Verantwortung**\nJeder Nutzer ist für die Sicherheit seines Discord-Accounts verantwortlich. Bei Verdacht auf einen kompromittierten Account kann der Zugriff vorsorglich eingeschränkt werden.',
+      '**45. Anti-Nuke-Schutz**\nDer Server verwendet einen Anti-Nuke-Schutz. Kritische Aktionen wie massenhaftes Löschen oder Erstellen von Channels/Rollen, auffällige Berechtigungsänderungen, Webhook-Missbrauch, Kicks oder Bans können protokolliert und automatisch bewertet werden.',
+      '**46. Automatische Sicherheitsmaßnahmen**\nWird innerhalb kurzer Zeit ein festgelegter Schwellenwert kritischer Aktionen überschritten, kann der ausführende Account automatisch quarantänisiert werden. Dabei können entfernbare Rollen entzogen und eine zeitlich begrenzte Kommunikationssperre gesetzt werden. Der Server-Inhaber und ausdrücklich freigegebene Accounts sind ausgenommen.',
+      '**47. Security-Logs und Whitelist**\nSicherheitsereignisse werden intern mit Discord-ID, Aktion und Zeitstempel dokumentiert. Die Anti-Nuke-Whitelist darf ausschließlich für vertrauenswürdige Accounts verwendet werden; sie hebt normale Shop- und Lizenzregeln nicht auf.',
+    ]],
   ];
   for (const [title, rules] of sections) {
     await channel.send({ embeds: [shopEmbed(title, rules.join('\n\n'))] }).catch(() => {});
@@ -890,10 +953,12 @@ async function seedSellingServer(structure) {
   const { channels } = structure;
 
   await seedIfEmpty(channels.welcome, {
-    embeds: [shopEmbed('🛒 Willkommen im Unfugstifter Shop', 'Willkommen im offiziellen **Unfugstifter Shop** für digitale Produkte und individuelle Aufträge.\n\nInformiere dich zuerst in **📜・regelwerk**, sieh dir anschließend die Produktbereiche an und stelle deine Produkte über den **Warenkorb in 🛒・bestellen** zusammen. Preise, Lieferumfang und Zahlung werden immer im privaten Ticket bestätigt.')],
+    embeds: [shopEmbed('🛒 Willkommen im Unfugstifter Shop', 'Willkommen im offiziellen **Unfugstifter Shop** für digitale Produkte und individuelle Aufträge.\n\nLies zuerst **📜・regelwerk** und verifiziere dich anschließend in **✅・verifizierung**. Erst danach erhältst du Zugriff auf Shop, Bestellung, Community und Support. Preise, Lieferumfang und Zahlung werden immer im privaten Ticket bestätigt.')],
   });
 
   await seedCompleteRulebook(channels.rules);
+
+  await seedVerificationPanel(channels.verify);
 
   await seedIfEmpty(channels.faq, {
     embeds: [shopEmbed('❓ FAQ', '**Wie bestelle ich?**\nWähle in **🛒・bestellen** dein Produkt. Der Bot erstellt ein privates Kauf-Ticket.\n\n**Wann ist ein Preis verbindlich?**\nErst wenn Preis und Lieferumfang im privaten Ticket bestätigt wurden.\n\n**Wie bezahle ich?**\nAusschließlich über **PayPal** an die im Ticket bestätigte Empfängeradresse.\n\n**Wo bekomme ich Support?**\nNutze **🎫・support-ticket** und wähle den passenden Bereich.\n\n**Darf ich gekaufte Dateien weitergeben?**\nNein. Weiterverkauf, Leaks, Reuploads und Weitergabe an Dritte sind ohne ausdrückliche Erlaubnis untersagt.')],
@@ -967,6 +1032,7 @@ async function seedSellingServer(structure) {
   await seedIfEmpty(channels.orderStatus, { embeds: [shopEmbed('📊 Bestellstatus', '🟢 **Bestellungen offen**\nNeue Aufträge können aktuell angenommen werden.')] });
   await seedIfEmpty(channels.dashboard, { embeds: [shopEmbed('📊 Shop-Dashboard', 'Interne Shop-Kennzahlen können mit `/sell dashboard` abgerufen werden.')] });
   await seedIfEmpty(channels.queue, { embeds: [shopEmbed('⏱️ Auftrags-Warteschlange', 'Die aktuelle interne Queue inklusive geschätzter ETA kann mit `/sell queue` angezeigt werden. Der öffentliche Überblick wird automatisch in 📊・bestellstatus aktualisiert.')] });
+  await seedIfEmpty(channels.securityLogs, { embeds: [shopEmbed('🛡️ Security Center', 'Der **Anti-Nuke-Schutz ist standardmäßig aktiviert**. Kritische Audit-Log-Aktionen werden bewertet und bei Überschreitung des Schwellenwerts automatisch quarantänisiert.\n\nVerwaltung ausschließlich durch den Server-Inhaber über `/sell antinuke`. Verify-Ereignisse und Anti-Nuke-Maßnahmen werden in diesem Channel dokumentiert.')] });
 }
 
 function sanitizeName(value) {
@@ -1937,6 +2003,231 @@ async function refreshPaymentPanel(guild, data) {
   return channel.send({ embeds: [embed] }).catch(() => null);
 }
 
+
+async function seedVerificationPanel(channel, force = false) {
+  if (!channel?.isTextBased?.()) return null;
+  if (!force) {
+    const messages = await channel.messages.fetch({ limit: 25 }).catch(() => null);
+    const existing = messages?.find(message =>
+      message.author.id === channel.guild.members.me?.id
+      && message.components?.some(row => row.components?.some(component => component.customId === 'selling_verify_start'))
+    );
+    if (existing) return existing;
+  }
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('selling_verify_start')
+      .setLabel('Jetzt verifizieren')
+      .setEmoji('✅')
+      .setStyle(ButtonStyle.Success),
+  );
+  return channel.send({
+    embeds: [shopEmbed(
+      '✅ Verifizierung',
+      'Um **Shop, Bestellungen, Community und Support** sehen zu können, musst du dich einmal verifizieren.\n\nKlicke auf **Jetzt verifizieren** und löse die kleine Rechenaufgabe. Dadurch werden einfache Bot-/Spam-Accounts abgefangen.\n\n**Wichtig:** Der Bot fragt dabei niemals nach Passwort, Token, E-Mail-Code oder 2FA-Code.',
+    )],
+    components: [row],
+  });
+}
+
+async function initializeVerificationMembers(guild, structure) {
+  const unverified = structure?.roleMap?.unverified;
+  const verified = structure?.roleMap?.verified;
+  if (!unverified || !verified) return;
+  const members = await guild.members.fetch().catch(() => guild.members.cache);
+  const targets = [...members.values()].filter(member =>
+    !member.user.bot
+    && member.id !== guild.ownerId
+    && !member.roles.cache.has(verified.id)
+    && !member.roles.cache.has(unverified.id)
+  );
+  for (const member of targets) {
+    await member.roles.add(unverified, 'Selling Verify: noch nicht verifiziert').catch(() => {});
+  }
+}
+
+async function handleVerifyStart(interaction) {
+  if (!interaction.inGuild()) return;
+  const { data } = getGuildShopData(interaction.guildId);
+  const verifiedId = data.config.roleIds.verified || findSellingRole(interaction.guild, 'verified')?.id;
+  if (verifiedId && interaction.member.roles.cache.has(verifiedId)) {
+    await interaction.reply({ content: '✅ Du bist bereits verifiziert.', ephemeral: true });
+    return;
+  }
+
+  const a = Math.floor(Math.random() * 18) + 3;
+  const b = Math.floor(Math.random() * 18) + 3;
+  sellingVerifyChallenges.set(`${interaction.guildId}:${interaction.user.id}`, {
+    answer: a + b,
+    expiresAt: Date.now() + SELLING_VERIFY_TTL_MS,
+  });
+
+  const modal = new ModalBuilder().setCustomId('selling_verify_modal').setTitle('Unfugstifter Verifizierung');
+  const input = new TextInputBuilder()
+    .setCustomId('answer')
+    .setLabel(`Wie viel ist ${a} + ${b}?`)
+    .setPlaceholder('Nur die Zahl eingeben')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(5);
+  modal.addComponents(new ActionRowBuilder().addComponents(input));
+  await interaction.showModal(modal);
+}
+
+async function handleVerifyModal(interaction) {
+  if (!interaction.inGuild()) return;
+  const key = `${interaction.guildId}:${interaction.user.id}`;
+  const challenge = sellingVerifyChallenges.get(key);
+  sellingVerifyChallenges.delete(key);
+  if (!challenge || challenge.expiresAt < Date.now()) {
+    await interaction.reply({ content: '❌ Die Verifizierung ist abgelaufen. Klicke erneut auf **Jetzt verifizieren**.', ephemeral: true });
+    return;
+  }
+  const answer = Number(String(interaction.fields.getTextInputValue('answer') || '').trim());
+  if (!Number.isFinite(answer) || answer !== challenge.answer) {
+    await interaction.reply({ content: '❌ Falsche Antwort. Klicke erneut auf **Jetzt verifizieren** und versuche es noch einmal.', ephemeral: true });
+    return;
+  }
+
+  const { data } = getGuildShopData(interaction.guildId);
+  const verified = data.config.roleIds.verified
+    ? await interaction.guild.roles.fetch(data.config.roleIds.verified).catch(() => null)
+    : findSellingRole(interaction.guild, 'verified');
+  const unverified = data.config.roleIds.unverified
+    ? await interaction.guild.roles.fetch(data.config.roleIds.unverified).catch(() => null)
+    : findSellingRole(interaction.guild, 'unverified');
+  if (!verified) {
+    await interaction.reply({ content: '❌ Die Verified-Rolle fehlt. Bitte melde dich beim Support.', ephemeral: true });
+    return;
+  }
+
+  await interaction.member.roles.add(verified, 'Selling Verify erfolgreich').catch(() => null);
+  if (!interaction.member.roles.cache.has(verified.id)) await interaction.member.fetch().catch(() => {});
+  if (!interaction.member.roles.cache.has(verified.id)) {
+    await interaction.reply({ content: '❌ Die Rolle konnte nicht vergeben werden. Prüfe bitte die Bot-Rollenhierarchie.', ephemeral: true });
+    return;
+  }
+  if (unverified && interaction.member.roles.cache.has(unverified.id)) {
+    await interaction.member.roles.remove(unverified, 'Selling Verify erfolgreich').catch(() => {});
+  }
+  await logSecurity(interaction.guild, '✅ Verifizierung erfolgreich', `<@${interaction.user.id}> wurde erfolgreich verifiziert.`);
+  await interaction.reply({ content: '✅ **Verifizierung erfolgreich.** Du hast jetzt Zugriff auf Shop, Bestellungen, Community und Support.', ephemeral: true });
+}
+
+async function logSecurity(guild, title, text) {
+  const { data } = getGuildShopData(guild.id);
+  const channelId = data.config.channelIds.securityLogs;
+  const channel = channelId
+    ? await guild.channels.fetch(channelId).catch(() => null)
+    : findSellingTextChannel(guild, '🛡️・security-logs');
+  if (!channel?.isTextBased()) return;
+  await channel.send({ embeds: [shopEmbed(title, text)], allowedMentions: { parse: [] } }).catch(() => {});
+}
+
+function antiNukeIsExempt(guild, data, executorId) {
+  if (!executorId) return true;
+  if (executorId === guild.ownerId) return true;
+  if (executorId === guild.members.me?.id) return true;
+  return (data.security?.antiNuke?.whitelist || []).includes(executorId);
+}
+
+async function recentAuditEntry(guild, types, { targetId = null, channelId = null, maxAgeMs = 7000 } = {}) {
+  for (const type of types) {
+    const logs = await guild.fetchAuditLogs({ type, limit: 8 }).catch(() => null);
+    if (!logs) continue;
+    const entry = logs.entries.find(item => {
+      if (Date.now() - item.createdTimestamp > maxAgeMs) return false;
+      if (targetId && item.targetId !== targetId) return false;
+      if (channelId) {
+        const extraChannelId = item.extra?.channel?.id || item.extra?.channelId || null;
+        if (extraChannelId && extraChannelId !== channelId) return false;
+      }
+      return true;
+    });
+    if (entry) return entry;
+  }
+  return null;
+}
+
+async function quarantineAntiNukeExecutor(guild, data, executorId, triggerText) {
+  const member = await guild.members.fetch(executorId).catch(() => null);
+  if (!member) {
+    await logSecurity(guild, '🚨 Anti-Nuke ausgelöst', `Ausführer: <@${executorId}>\nAuslöser: **${triggerText}**\nDer Account ist nicht mehr auf dem Server und konnte nicht quarantänisiert werden.`);
+    return;
+  }
+
+  if (member.user.bot) {
+    let kicked = false;
+    if (member.kickable) {
+      await member.kick(`Anti-Nuke: ${triggerText}`).then(() => { kicked = true; }).catch(() => {});
+    }
+    await logSecurity(guild, '🚨 Anti-Nuke • Bot erkannt', `Bot: <@${executorId}>\nAuslöser: **${triggerText}**\nMaßnahme: **${kicked ? 'Bot automatisch gekickt' : 'Konnte nicht automatisch gekickt werden'}**`);
+    return;
+  }
+
+  const removable = member.roles.cache.filter(role => role.id !== guild.id && !role.managed && role.editable);
+  let removedCount = 0;
+  if (removable.size) {
+    const ids = [...removable.keys()];
+    await member.roles.remove(ids, `Anti-Nuke Quarantäne: ${triggerText}`).then(() => { removedCount = ids.length; }).catch(() => {});
+  }
+  const minutes = Math.max(1, Number(data.security.antiNuke.quarantineMinutes || 1440));
+  let timedOut = false;
+  if (member.moderatable) {
+    await member.timeout(minutes * 60 * 1000, `Anti-Nuke Quarantäne: ${triggerText}`).then(() => { timedOut = true; }).catch(() => {});
+  }
+
+  await logSecurity(guild, '🚨 Anti-Nuke • Quarantäne', [
+    `Account: <@${executorId}>`,
+    `Auslöser: **${triggerText}**`,
+    `Entfernte Rollen: **${removedCount}**`,
+    `Timeout: **${timedOut ? `${minutes} Minuten` : 'technisch nicht möglich'}**`,
+    '',
+    'Bitte prüfe anschließend die Discord-Audit-Logs und stelle berechtigte Rollen nur manuell wieder her.',
+  ].join('\n'));
+}
+
+async function recordAntiNukeAction(guild, executorId, label, targetText = '—') {
+  if (sellingResetGuilds.has(guild.id)) return;
+  const { store, data } = getGuildShopData(guild.id);
+  const cfg = data.security.antiNuke;
+  if (!cfg.enabled || antiNukeIsExempt(guild, data, executorId)) return;
+
+  const now = Date.now();
+  const key = `${guild.id}:${executorId}`;
+  const recent = (sellingAntiNukeActions.get(key) || []).filter(ts => now - ts <= Number(cfg.windowMs || 10000));
+  recent.push(now);
+  sellingAntiNukeActions.set(key, recent);
+
+  await logSecurity(guild, '🛡️ Sicherheitsaktion erkannt', `Ausführer: <@${executorId}>\nAktion: **${label}**\nZiel: ${targetText}\nZähler: **${recent.length}/${cfg.threshold}** innerhalb von ${Math.round(cfg.windowMs / 1000)} Sekunden.`);
+
+  if (recent.length >= Number(cfg.threshold || 3)) {
+    sellingAntiNukeActions.set(key, []);
+    await quarantineAntiNukeExecutor(guild, data, executorId, `${label} • ${targetText}`);
+    saveSellingStore(store);
+  }
+}
+
+async function handleAntiNukeAuditEvent(guild, label, types, options = {}) {
+  if (!guild || sellingResetGuilds.has(guild.id)) return;
+  const { data } = getGuildShopData(guild.id);
+  if (!data.security.antiNuke.enabled) return;
+  const entry = await recentAuditEntry(guild, types, options);
+  if (!entry?.executorId) return;
+  const target = options.targetText || (entry.targetId ? `<@${entry.targetId}> / \`${entry.targetId}\`` : '—');
+  await recordAntiNukeAction(guild, entry.executorId, label, target);
+}
+
+async function handleSellingMemberJoin(member) {
+  if (!member || member.user.bot) return;
+  const { data } = getGuildShopData(member.guild.id);
+  const unverifiedId = data.config.roleIds.unverified;
+  const verifiedId = data.config.roleIds.verified;
+  if (!unverifiedId || (verifiedId && member.roles.cache.has(verifiedId))) return;
+  const role = await member.guild.roles.fetch(unverifiedId).catch(() => null);
+  if (role) await member.roles.add(role, 'Selling Verify: neues Mitglied').catch(() => {});
+}
+
 async function handleSellCommand(interaction) {
   if (!interaction.inGuild()) return;
   if (!canHandleSellingTicket(interaction.member)) {
@@ -2219,6 +2510,39 @@ async function handleSellCommand(interaction) {
     return;
   }
 
+  if (sub === 'verify') {
+    const action = interaction.options.getString('action');
+    if (action === 'status') {
+      const verified = findSellingRole(interaction.guild, 'verified');
+      const unverified = findSellingRole(interaction.guild, 'unverified');
+      await interaction.reply({ content: `✅ Verify-System: **aktiv**\nVerified: ${verified ? `<@&${verified.id}>` : 'fehlt'}\nUnverified: ${unverified ? `<@&${unverified.id}>` : 'fehlt'}`, ephemeral: true, allowedMentions: { parse: [] } });
+      return;
+    }
+    const channel = data.config.channelIds.verify ? await interaction.guild.channels.fetch(data.config.channelIds.verify).catch(() => null) : findSellingTextChannel(interaction.guild, '✅・verifizierung');
+    if (!channel?.isTextBased()) { await interaction.reply({ content: '❌ Verify-Channel fehlt. Führe `/setup server selling` erneut aus.', ephemeral: true }); return; }
+    await seedVerificationPanel(channel, true);
+    await interaction.reply({ content: `✅ Verify-Panel wurde in <#${channel.id}> neu gepostet.`, ephemeral: true });
+    return;
+  }
+
+  if (sub === 'antinuke') {
+    if (interaction.guild.ownerId !== interaction.user.id) { await interaction.reply({ content: '❌ Anti-Nuke kann nur der **Server-Inhaber** verwalten.', ephemeral: true }); return; }
+    const action = interaction.options.getString('action');
+    const cfg = data.security.antiNuke;
+    if (action === 'enable') cfg.enabled = true;
+    if (action === 'disable') cfg.enabled = false;
+    if (action === 'whitelist' || action === 'unwhitelist') {
+      const user = interaction.options.getUser('user');
+      if (!user) { await interaction.reply({ content: '❌ Gib für diese Aktion einen `user` an.', ephemeral: true }); return; }
+      const list = new Set(cfg.whitelist || []);
+      if (action === 'whitelist') list.add(user.id); else list.delete(user.id);
+      cfg.whitelist = [...list];
+    }
+    saveSellingStore(store);
+    await interaction.reply({ embeds: [shopEmbed('🛡️ Anti-Nuke', `Status: **${cfg.enabled ? 'Aktiv' : 'Inaktiv'}**\nSchwelle: **${cfg.threshold} kritische Aktionen / ${Math.round(cfg.windowMs / 1000)} Sekunden**\nQuarantäne: **${cfg.quarantineMinutes} Minuten**\nWhitelist: **${(cfg.whitelist || []).length} Nutzer**\n\nBei Überschreitung werden entfernbare Rollen des ausführenden Accounts entzogen und – sofern technisch möglich – eine zeitlich begrenzte Sperre gesetzt.`)], ephemeral: true });
+    return;
+  }
+
   if (sub === 'paypal') {
     const email = interaction.options.getString('email');
     if (email) {
@@ -2292,6 +2616,7 @@ async function runSellingSetup(interaction) {
 
     const structure = await createSellingStructure(interaction.guild);
     const freshShopData = persistSellingStructure(guildId, structure, true);
+    await initializeVerificationMembers(interaction.guild, structure);
     await seedSellingServer(structure);
     await refreshOrderStatusPanel(interaction.guild, freshShopData).catch(() => {});
     await refreshPaymentPanel(interaction.guild, freshShopData).catch(() => {});
@@ -2303,7 +2628,7 @@ async function runSellingSetup(interaction) {
       `🗑️ Gelöschte alte normale Rollen: **${deleted.deletedRoles}**`,
       deleted.skippedManagedRoles.length ? `🔒 Nicht löschbare Discord-/Bot-Systemrollen: **${deleted.skippedManagedRoles.length}**` : null,
       '',
-      'Neu erstellt wurden professionelle Bereiche für **Thumbnails, NVE/Grafik-Setups, Soundpacks, Designs, FiveM-Assets, Bundles, Warenkorb, PayPal, PDF-Belege, Käufer-Watermarking, Lizenzen, Stammkunden/VIP, Queue/ETA, Support, Kauf-Tickets und Team-Verwaltung**.',
+      'Neu erstellt wurden professionelle Bereiche für **Thumbnails, NVE/Grafik-Setups, Soundpacks, Designs, FiveM-Assets, Bundles, Warenkorb, PayPal, PDF-Belege, Käufer-Watermarking, Lizenzen, Stammkunden/VIP, Queue/ETA, Verify-System, Anti-Nuke, Support, Kauf-Tickets und Team-Verwaltung**.',
       'Der bisherige Command-Channel wird als letzter alter Channel nach dieser Meldung ebenfalls entfernt.',
     ].filter(Boolean).join('\n'));
 
@@ -2341,6 +2666,16 @@ async function handleSellingInteraction(interaction) {
 
   if (interaction.isChatInputCommand?.() && interaction.commandName === 'sell') {
     await handleSellCommand(interaction);
+    return true;
+  }
+
+  if (interaction.isButton?.() && interaction.customId === 'selling_verify_start') {
+    await handleVerifyStart(interaction);
+    return true;
+  }
+
+  if (interaction.isModalSubmit?.() && interaction.customId === 'selling_verify_modal') {
+    await handleVerifyModal(interaction);
     return true;
   }
 
@@ -2437,6 +2772,48 @@ Client.prototype.login = function patchedLogin(...args) {
       } catch (error) {
         console.error(`❌ Commands konnten auf neuem Server ${guild.name} nicht registriert werden:`, error);
       }
+    });
+
+
+    this.on(Events.GuildMemberAdd, async member => {
+      await handleSellingMemberJoin(member).catch(error => console.error('❌ Verify Join Fehler:', error));
+    });
+
+    this.on(Events.ChannelCreate, async channel => {
+      await handleAntiNukeAuditEvent(channel.guild, 'Channel erstellt', [AuditLogEvent.ChannelCreate], { targetId: channel.id, targetText: `#${channel.name}` }).catch(() => {});
+    });
+    this.on(Events.ChannelDelete, async channel => {
+      await handleAntiNukeAuditEvent(channel.guild, 'Channel gelöscht', [AuditLogEvent.ChannelDelete], { targetId: channel.id, targetText: `#${channel.name}` }).catch(() => {});
+    });
+    this.on(Events.ChannelUpdate, async (oldChannel, newChannel) => {
+      if (sellingResetGuilds.has(newChannel.guild.id)) return;
+      const permissionsChanged = oldChannel.permissionOverwrites?.cache && newChannel.permissionOverwrites?.cache
+        ? JSON.stringify(oldChannel.permissionOverwrites.cache.map(x => [x.id, x.allow.bitfield.toString(), x.deny.bitfield.toString()]).sort())
+          !== JSON.stringify(newChannel.permissionOverwrites.cache.map(x => [x.id, x.allow.bitfield.toString(), x.deny.bitfield.toString()]).sort())
+        : false;
+      if (!permissionsChanged && oldChannel.name === newChannel.name) return;
+      await handleAntiNukeAuditEvent(newChannel.guild, permissionsChanged ? 'Channel-Berechtigungen geändert' : 'Channel geändert', [AuditLogEvent.ChannelUpdate], { targetId: newChannel.id, targetText: `#${newChannel.name}` }).catch(() => {});
+    });
+    this.on(Events.GuildRoleCreate, async role => {
+      await handleAntiNukeAuditEvent(role.guild, 'Rolle erstellt', [AuditLogEvent.RoleCreate], { targetId: role.id, targetText: `@${role.name}` }).catch(() => {});
+    });
+    this.on(Events.GuildRoleDelete, async role => {
+      await handleAntiNukeAuditEvent(role.guild, 'Rolle gelöscht', [AuditLogEvent.RoleDelete], { targetId: role.id, targetText: `@${role.name}` }).catch(() => {});
+    });
+    this.on(Events.GuildRoleUpdate, async (oldRole, newRole) => {
+      if (sellingResetGuilds.has(newRole.guild.id)) return;
+      const permsChanged = oldRole.permissions.bitfield !== newRole.permissions.bitfield;
+      if (!permsChanged && oldRole.name === newRole.name) return;
+      await handleAntiNukeAuditEvent(newRole.guild, permsChanged ? 'Rollen-Berechtigungen geändert' : 'Rolle geändert', [AuditLogEvent.RoleUpdate], { targetId: newRole.id, targetText: `@${newRole.name}` }).catch(() => {});
+    });
+    this.on(Events.GuildBanAdd, async ban => {
+      await handleAntiNukeAuditEvent(ban.guild, 'Mitglied gebannt', [AuditLogEvent.MemberBanAdd], { targetId: ban.user.id, targetText: `<@${ban.user.id}>` }).catch(() => {});
+    });
+    this.on(Events.GuildMemberRemove, async member => {
+      await handleAntiNukeAuditEvent(member.guild, 'Mitglied gekickt', [AuditLogEvent.MemberKick], { targetId: member.id, targetText: `<@${member.id}>`, maxAgeMs: 4000 }).catch(() => {});
+    });
+    this.on(Events.WebhooksUpdate, async channel => {
+      await handleAntiNukeAuditEvent(channel.guild, 'Webhook geändert', [AuditLogEvent.WebhookCreate, AuditLogEvent.WebhookUpdate, AuditLogEvent.WebhookDelete], { channelId: channel.id, targetText: `#${channel.name}` }).catch(() => {});
     });
   }
   return originalLogin.apply(this, args);

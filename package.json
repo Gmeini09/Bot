@@ -1,7 +1,7 @@
 {
   "name": "community-allround-bot",
-  "version": "5.6.0",
-  "description": "Discord community allround bot with Unfugstifter professional selling automation, full reset, cart, PayPal, PDF receipts, image watermarking, loyalty/VIP, queue/ETA, licenses and support",
+  "version": "5.7.0",
+  "description": "Discord community allround bot with Unfugstifter professional selling automation, full reset, verification, anti-nuke, cart, PayPal, PDF receipts, watermarking, loyalty/VIP, queue/ETA, licenses and support",
   "main": "index.js",
   "scripts": {
     "start": "node selling-entry.js",
