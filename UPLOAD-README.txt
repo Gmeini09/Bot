@@ -143,3 +143,7 @@ WICHTIG FÜR RAILWAY:
 
 === v5.8.4 PERMISSIONS ===
 Beim Deploy werden die Rollen- und Channel-Berechtigungen automatisch synchronisiert. Für dieses Update NICHT /setup server selling ausführen. Details: PERMISSIONS-AUDIT-v5.8.4.txt
+
+
+=== v5.8.5 TURBO DESIGN BANNER ===
+Der Banner ist direkt in selling-entry.js eingebettet. Es muss KEINE zusätzliche Bilddatei ins GitHub-Repo geladen werden. Nach dem Railway-Deploy werden bestehende Hauptpanels automatisch aktualisiert. /setup server selling ist NICHT nötig.

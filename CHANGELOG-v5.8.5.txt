@@ -1,0 +1,15 @@
+Turbo Design Selling Bot v5.8.5 – Branding
+
+NEU
+- Turbo Design Banner direkt in selling-entry.js eingebettet.
+- Kein separater Bild-Upload auf Railway nötig.
+- Banner automatisch in Willkommen, Regelwerk, Verifizierung, Shop/Bestellen und Portfolio.
+- Bestehende v5.8.4-Installationen werden beim Bot-Start automatisch gebrandet.
+- Kein /setup server selling erforderlich.
+- Willkommen/Shop/Portfolio auf Turbo Design Branding umbenannt.
+
+UPDATE
+1. selling-entry.js ersetzen.
+2. package.json ersetzen.
+3. Railway neu deployen.
+4. KEINEN Server-Reset ausführen.

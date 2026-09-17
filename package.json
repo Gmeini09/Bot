@@ -1,7 +1,7 @@
 {
   "name": "community-allround-bot",
-  "version": "5.8.4",
-  "description": "Unfugstifter automated Discord selling system v5.8.4 with verified/public permission matrix, least-privilege staff access, product-scoped tickets and permission self-heal",
+  "version": "5.8.5",
+  "description": "Discord selling automation with Turbo Design branding banner, hardened permissions, full shop automation, verify, anti-nuke, delivery, portfolio and security fixes",
   "main": "index.js",
   "scripts": {
     "start": "node selling-entry.js",
