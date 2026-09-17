@@ -68,6 +68,7 @@ function isSellingInteraction(interaction) {
 
 let cachedSellingCommandBody = null;
 let sellingLoginToken = null;
+const sellingResetGuilds = new Set();
 
 function addSellingSetupCommand(body) {
   if (!Array.isArray(body)) return body;
@@ -114,11 +115,24 @@ REST.prototype.put = function patchedPut(route, options = {}) {
 // genau diese Interaktionen ausschließlich von diesem Modul verarbeiten.
 const originalClientOn = Client.prototype.on;
 Client.prototype.on = function patchedOn(eventName, listener) {
-  if (eventName !== Events.InteractionCreate) return originalClientOn.call(this, eventName, listener);
-  return originalClientOn.call(this, eventName, async function wrappedInteraction(interaction, ...args) {
-    if (isSellingInteraction(interaction)) return;
-    return listener.call(this, interaction, ...args);
-  });
+  if (eventName === Events.InteractionCreate) {
+    return originalClientOn.call(this, eventName, async function wrappedInteraction(interaction, ...args) {
+      if (isSellingInteraction(interaction)) return;
+      return listener.call(this, interaction, ...args);
+    });
+  }
+
+  // Während des Full-Resets sollen die normalen Self-Heal-/Security-Handler des
+  // Hauptbots die absichtlich gelöschten Rollen/Channels nicht wiederherstellen.
+  if (eventName === Events.ChannelDelete || eventName === Events.GuildRoleDelete) {
+    return originalClientOn.call(this, eventName, async function wrappedSellingResetDelete(entity, ...args) {
+      const guildId = entity?.guild?.id || entity?.guildId || null;
+      if (guildId && sellingResetGuilds.has(guildId)) return;
+      return listener.call(this, entity, ...args);
+    });
+  }
+
+  return originalClientOn.call(this, eventName, listener);
 };
 
 function staffRoleIds(roleMap) {
@@ -208,6 +222,77 @@ function shopEmbed(title, description, fields = []) {
     .setTimestamp();
   if (fields.length) embed.addFields(fields);
   return embed;
+}
+
+async function sellingResetPreflight(guild) {
+  await guild.roles.fetch();
+  await guild.channels.fetch();
+
+  const me = guild.members.me || await guild.members.fetchMe().catch(() => null);
+  if (!me) return { ok: false, reason: 'Bot-Mitglied konnte nicht geladen werden.', blockers: [] };
+
+  const blockers = guild.roles.cache
+    .filter(role => role.id !== guild.id && !role.managed && !role.editable)
+    .sort((a, b) => b.position - a.position)
+    .map(role => role.name);
+
+  if (blockers.length) {
+    return {
+      ok: false,
+      reason: 'Mindestens eine normale Rolle liegt auf oder über der höchsten Bot-Rolle und kann deshalb nicht gelöscht werden.',
+      blockers,
+    };
+  }
+
+  return { ok: true, reason: null, blockers: [] };
+}
+
+async function deleteExistingSellingServer(guild, keepChannelId) {
+  await guild.channels.fetch();
+  await guild.roles.fetch();
+
+  const result = {
+    deletedChannels: 0,
+    deletedRoles: 0,
+    failedChannels: [],
+    failedRoles: [],
+    skippedManagedRoles: [],
+  };
+
+  const channels = [...guild.channels.cache.values()]
+    .filter(channel => channel.id !== keepChannelId)
+    // Erst normale Channels/Threads, Kategorien zuletzt.
+    .sort((a, b) => Number(a.type === ChannelType.GuildCategory) - Number(b.type === ChannelType.GuildCategory));
+
+  for (const channel of channels) {
+    try {
+      await channel.delete('Unfugstifter Selling Setup: Full Reset');
+      result.deletedChannels += 1;
+    } catch (error) {
+      result.failedChannels.push(channel.name || channel.id);
+      console.error(`❌ Selling Full Reset: Channel ${channel.id} konnte nicht gelöscht werden:`, error);
+    }
+  }
+
+  const roles = [...guild.roles.cache.values()]
+    .filter(role => role.id !== guild.id)
+    .sort((a, b) => b.position - a.position);
+
+  for (const role of roles) {
+    if (role.managed) {
+      result.skippedManagedRoles.push(role.name);
+      continue;
+    }
+    try {
+      await role.delete('Unfugstifter Selling Setup: Full Reset');
+      result.deletedRoles += 1;
+    } catch (error) {
+      result.failedRoles.push(role.name || role.id);
+      console.error(`❌ Selling Full Reset: Rolle ${role.id} konnte nicht gelöscht werden:`, error);
+    }
+  }
+
+  return result;
 }
 
 async function createSellingStructure(guild) {
@@ -538,24 +623,86 @@ async function runSellingSetup(interaction) {
 
   const botMember = interaction.guild.members.me || await interaction.guild.members.fetchMe().catch(() => null);
   if (!botMember?.permissions.has(PermissionFlagsBits.Administrator)) {
-    await interaction.reply({ content: '❌ Der Bot braucht **Administrator**, damit Rollen, Kategorien, Channels und Ticket-Rechte korrekt erstellt werden können.', ephemeral: true });
+    await interaction.reply({ content: '❌ Der Bot braucht **Administrator**, damit der komplette Server sicher zurückgesetzt und neu aufgebaut werden kann.', ephemeral: true });
+    return;
+  }
+
+  const preflight = await sellingResetPreflight(interaction.guild).catch(error => {
+    console.error('❌ Selling Full Reset Preflight Fehler:', error);
+    return { ok: false, reason: 'Die Rollen-/Channel-Prüfung ist fehlgeschlagen.', blockers: [] };
+  });
+
+  if (!preflight.ok) {
+    const blockerText = preflight.blockers.length
+      ? `\n\n**Blockierende Rollen:**\n${preflight.blockers.slice(0, 15).map(name => `• ${name}`).join('\n')}`
+      : '';
+    await interaction.reply({
+      content: `❌ **Full Reset nicht gestartet.**\n${preflight.reason}\n\nVerschiebe die Bot-Rolle im Discord-Rollenmenü ganz nach oben über alle normalen Rollen und führe den Command erneut aus.${blockerText}`,
+      ephemeral: true,
+    });
     return;
   }
 
   await interaction.deferReply({ ephemeral: true });
-  await interaction.editReply('🛒 **Selling Server Setup läuft …** Rollen, Shop-Bereiche und Bestell-System werden eingerichtet.');
-
-  const structure = await createSellingStructure(interaction.guild);
-  await seedSellingServer(structure);
-
   await interaction.editReply([
-    '✅ **Selling Server ist eingerichtet.**',
-    '',
-    'Erstellt wurden professionelle Bereiche für **Thumbnails, NVE-Presets/Grafik-Setups, Soundpacks, Designs, FiveM-Assets, Bundles, PayPal-Zahlungen, Lizenzregeln, Support und Team-Verwaltung**.',
-    'In **🛒・bestellen** gibt es private Kauf-Tickets. **🎫・support-ticket** bietet getrennte Bereiche für allgemeinen Support, Installation, Bestellung/Lieferung und PayPal-Fragen.',
-    '',
-    'ℹ️ Bereits vorhandene fremde Channels/Rollen werden absichtlich **nicht gelöscht**. Der Command kann dadurch gefahrlos erneut ausgeführt werden und ergänzt fehlende Teile.',
+    '⚠️ **FULL RESET gestartet.**',
+    'Alle normalen alten Rollen und alle alten Channels werden jetzt entfernt.',
+    'Discord-Systemrollen, Bot-/Integrationsrollen und `@everyone` können technisch nicht gelöscht werden und bleiben bestehen.',
   ].join('\n'));
+
+  const keepChannelId = interaction.channelId;
+  const guildId = interaction.guild.id;
+  sellingResetGuilds.add(guildId);
+
+  let cleanupScheduled = false;
+  try {
+    const deleted = await deleteExistingSellingServer(interaction.guild, keepChannelId);
+
+    if (deleted.failedChannels.length || deleted.failedRoles.length) {
+      const failures = [
+        deleted.failedChannels.length ? `Channels: ${deleted.failedChannels.slice(0, 10).join(', ')}` : null,
+        deleted.failedRoles.length ? `Rollen: ${deleted.failedRoles.slice(0, 10).join(', ')}` : null,
+      ].filter(Boolean).join('\n');
+      throw new Error(`Der Full Reset konnte nicht vollständig ausgeführt werden. ${failures}`);
+    }
+
+    await interaction.editReply('🧱 **Alter Server entfernt.** Der professionelle Selling-Server wird jetzt komplett neu erstellt …');
+
+    const structure = await createSellingStructure(interaction.guild);
+    await seedSellingServer(structure);
+
+    await interaction.editReply([
+      '✅ **FULL RESET abgeschlossen – Selling Server wurde komplett neu erstellt.**',
+      '',
+      `🗑️ Gelöschte alte Channels: **${deleted.deletedChannels + 1}**`,
+      `🗑️ Gelöschte alte normale Rollen: **${deleted.deletedRoles}**`,
+      deleted.skippedManagedRoles.length ? `🔒 Nicht löschbare Discord-/Bot-Systemrollen: **${deleted.skippedManagedRoles.length}**` : null,
+      '',
+      'Neu erstellt wurden professionelle Bereiche für **Thumbnails, NVE/Grafik-Setups, Soundpacks, Designs, FiveM-Assets, Bundles, PayPal-Zahlungen, Lizenzregeln, Support, Kauf-Tickets und Team-Verwaltung**.',
+      'Der bisherige Command-Channel wird als letzter alter Channel nach dieser Meldung ebenfalls entfernt.',
+    ].filter(Boolean).join('\n'));
+
+    // Den Channel, in dem der Command ausgeführt wurde, lassen wir nur bis zur
+    // Abschlussmeldung bestehen. Danach ist wirklich die komplette alte
+    // Channel-Struktur entfernt.
+    const oldCommandChannel = await interaction.guild.channels.fetch(keepChannelId).catch(() => null);
+    cleanupScheduled = true;
+    setTimeout(async () => {
+      if (oldCommandChannel && !Object.values(structure.channels).some(channel => channel.id === oldCommandChannel.id)) {
+        await oldCommandChannel.delete('Unfugstifter Selling Setup: letzter alter Channel').catch(error => {
+          console.error('❌ Letzter alter Selling-Setup-Channel konnte nicht gelöscht werden:', error);
+        });
+      }
+      setTimeout(() => sellingResetGuilds.delete(guildId), 1500);
+    }, 5000);
+  } catch (error) {
+    console.error('❌ Selling Full Reset Fehler:', error);
+    await interaction.editReply({
+      content: `❌ **Selling Full Reset ist fehlgeschlagen.**\n${String(error?.message || error).slice(0, 1500)}\n\nPrüfe die Rollen-Hierarchie des Bots und die Railway-Logs.`,
+    }).catch(() => {});
+  } finally {
+    if (!cleanupScheduled) sellingResetGuilds.delete(guildId);
+  }
 }
 
 async function handleSellingInteraction(interaction) {
