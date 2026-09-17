@@ -47,6 +47,13 @@ const PRODUCT_TYPES = {
   fivem: { label: 'FiveM Asset', emoji: '🚗' },
 };
 
+const SUPPORT_TYPES = {
+  general: { label: 'Allgemeiner Support', emoji: '🎫' },
+  installation: { label: 'Installation / Einrichtung', emoji: '🛠️' },
+  order: { label: 'Bestellung / Lieferung', emoji: '📦' },
+  payment: { label: 'Zahlung / PayPal', emoji: '💳' },
+};
+
 function isSellingInteraction(interaction) {
   try {
     if (interaction.isChatInputCommand?.()) {
@@ -269,30 +276,44 @@ async function seedSellingServer(structure) {
   const { channels } = structure;
 
   await seedIfEmpty(channels.welcome, {
-    embeds: [shopEmbed('🛒 Willkommen im Unfugstifter Shop', 'Hier findest du digitale Produkte rund um **FiveM, GTA, Content und Designs**.\n\nSchau dir die Produkt-Channels an und öffne anschließend in **🛒・bestellen** ein privates Kauf-Ticket.')],
+    embeds: [shopEmbed('🛒 Willkommen im Unfugstifter Shop', 'Willkommen im offiziellen **Unfugstifter Shop** für digitale Produkte und individuelle Aufträge.\n\nInformiere dich zuerst in **📜・regelwerk**, sieh dir anschließend die Produktbereiche an und starte deine Bestellung ausschließlich über **🛒・bestellen**. Preise, Lieferumfang und Zahlung werden immer im privaten Ticket bestätigt.')],
   });
 
   await seedIfEmpty(channels.rules, {
-    embeds: [shopEmbed('📜 Shop-Regelwerk & Nutzungsbedingungen', [
-      '**1. Respekt & Verhalten**\nBehandle Kunden, Teammitglieder und andere Nutzer respektvoll. Beleidigungen, Spam, Provokationen oder absichtliche Störungen können zum Ausschluss führen.',
-      '**2. Bestellungen nur über offizielle Tickets**\nBestellungen, Preisabsprachen und Zahlungsbestätigungen werden ausschließlich über die vorgesehenen Kauf-Tickets abgewickelt.',
-      '**3. Zahlung ausschließlich per PayPal**\nDie aktuell gültige PayPal-Adresse und der endgültige Preis werden dir vom Team im privaten Ticket bestätigt. Sende kein Geld an Adressen aus fremden Nachrichten oder Screenshots.',
-      '**4. Weiterverkauf verboten**\nGekaufte Produkte dürfen ohne ausdrückliche schriftliche Erlaubnis nicht weiterverkauft, vermietet, getauscht oder gegen andere Leistungen weitergegeben werden.',
-      '**5. Leaken / Teilen verboten**\nDas Hochladen, Veröffentlichen, Leaken, Versenden oder Teilen der Dateien mit Freunden, anderen Communities, Servern oder Download-Seiten ist untersagt.',
-      '**6. Keine Reuploads oder Kopien**\nProdukte dürfen nicht unter anderem Namen erneut hochgeladen, gespiegelt, als eigenes Werk ausgegeben oder in öffentliche Packs eingebaut werden.',
-      '**7. Lizenz gilt nur für den Käufer**\nSofern beim Produkt nichts anderes angegeben ist, erhält nur der Käufer das vereinbarte Nutzungsrecht. Ein Kauf überträgt nicht automatisch Eigentums- oder Weitervertriebsrechte.',
-      '**8. Schutz der Shop-Dateien**\nDas Entfernen von Credits, Schutzmechanismen oder Lizenzhinweisen mit dem Ziel einer unerlaubten Weitergabe ist untersagt.',
-      '**9. Nachweise & Protokollierung**\nZur Abwicklung und zum Schutz vor Missbrauch können Bestellungen und Ticket-Aktionen protokolliert werden – z. B. Discord-ID, Produkt, Ticket, Zeitstempel, zuständiges Teammitglied und Bestellstatus. PayPal-Passwörter oder andere Zugangsdaten werden niemals verlangt.',
-      '**10. Falsche Zahlungsnachweise**\nGefälschte PayPal-Screenshots, manipulierte Belege oder falsche Angaben führen zur Ablehnung der Bestellung und können zum Ausschluss aus dem Shop führen.',
-      '**11. Support & Änderungen**\nSupport bezieht sich auf den vereinbarten Lieferumfang. Größere nachträgliche Änderungen oder neue Wünsche können als neuer Auftrag behandelt werden.',
-      '**12. Verstöße gegen die Lizenz**\nBei nachgewiesenem Weiterverkauf, Leak oder unerlaubter Weitergabe kann die Nutzungslizenz entzogen und weiterer Support verweigert werden. Weitere Schritte richten sich nach dem anwendbaren Recht.',
-      '**13. Rückerstattung / Widerruf**\nRückerstattungen und gesetzliche Widerrufsrechte richten sich nach dem jeweiligen Auftrag und dem anwendbaren Recht. Individuelle Vereinbarungen werden im Ticket festgehalten.',
-      '**14. Mit dem Kauf akzeptiert**\nMit Abschluss einer Bestellung bestätigst du, dass du diese Regeln und die im Ticket genannten Produktbedingungen zur Kenntnis genommen hast.',
-    ].join('\n\n'))],
+    embeds: [
+      shopEmbed('📜 01 • Shop-Regeln & Vertragsablauf', [
+        '**1. Geltungsbereich**\nDiese Regeln gelten für den Discord-Shop, alle Bestellungen, individuellen Aufträge, digitalen Lieferungen sowie Support-Leistungen des Unfugstifter Shops.',
+        '**2. Verbindliche Bestellungen nur im Ticket**\nPreis, Produktumfang, Anpassungen, Lieferform und Zahlungsdetails gelten erst dann als bestätigt, wenn sie im offiziellen privaten Kauf-Ticket durch das Shop-Team festgehalten wurden. Absprachen außerhalb des Tickets sind nicht verbindlich.',
+        '**3. Richtige Angaben**\nDer Käufer muss die für den Auftrag notwendigen Angaben vollständig und wahrheitsgemäß machen. Falsche Angaben, Identitätstäuschung, manipulierte Nachweise oder absichtliche Irreführung können zur sofortigen Beendigung der Bestellung führen.',
+        '**4. Zahlung ausschließlich über PayPal**\nDie gültige PayPal-Empfängeradresse und der endgültige Betrag werden ausschließlich im jeweiligen Kauf-Ticket bestätigt. Zahlungen an Adressen aus privaten DMs, Screenshots oder Nachrichten Dritter erfolgen auf eigenes Risiko.',
+        '**5. Keine Zahlung vor Bestätigung**\nBezahle erst, nachdem Preis, Lieferumfang und PayPal-Empfänger im Ticket bestätigt wurden. Das Team verlangt niemals dein PayPal-Passwort, 2FA-Codes, Login-Codes oder Zugriff auf dein Konto.',
+        '**6. Zahlungsnachweis**\nNach der Zahlung kann zur Zuordnung ein geeigneter Zahlungsnachweis oder eine Transaktionsreferenz verlangt werden. Sensible Kontodaten, Passwörter oder vollständige Login-Daten sollen dabei nicht geteilt werden.',
+        '**7. Verhalten im Shop**\nBeleidigungen, Drohungen, Spam, absichtliche Störungen, Betrugsversuche, manipulierte Zahlungsbelege oder das Umgehen von Shop-Sperren werden nicht toleriert und können zum Ausschluss führen.',
+      ].join('\n\n')),
+      shopEmbed('🔐 02 • Lizenz, Weitergabe & Anti-Leak', [
+        '**8. Persönliche Nutzungslizenz**\nSofern im Angebot oder Ticket nichts anderes vereinbart wurde, erhält ausschließlich der Käufer eine persönliche, nicht übertragbare Nutzungslizenz für den vereinbarten Zweck. Der Kauf überträgt keine Weiterverkaufs-, Unterlizenzierungs- oder Eigentumsrechte am zugrunde liegenden Werk.',
+        '**9. Weiterverkauf strikt verboten**\nProdukte oder Bestandteile davon dürfen ohne ausdrückliche schriftliche Genehmigung weder direkt noch indirekt verkauft, vermietet, getauscht, verschenkt, gebündelt oder gegen andere Leistungen weitergegeben werden.',
+        '**10. Leaken und Teilen strikt verboten**\nDas Hochladen, Spiegeln, Veröffentlichen, Leaken, Versenden oder sonstige Zugänglichmachen an Freunde, andere Discords, FiveM-Server, Communities, Cloud-Ordner, Foren, Telegram-Gruppen, Download-Seiten oder sonstige Dritte ist untersagt.',
+        '**11. Keine Reuploads / Reskins / Kopien**\nProdukte dürfen nicht unter anderem Namen neu hochgeladen, geringfügig verändert und als eigenes Werk ausgegeben, in öffentliche Packs eingebaut oder als Grundlage für einen konkurrierenden Verkauf verwendet werden.',
+        '**12. Keine Umgehung von Schutzmaßnahmen**\nCredits, Lizenzhinweise, Käuferkennzeichnungen, Wasserzeichen oder sonstige legitime Schutzmechanismen dürfen nicht entfernt, manipuliert oder umgangen werden, wenn dies der unerlaubten Weitergabe, Verschleierung oder Weiterverwertung dient.',
+        '**13. Nutzung nur im vereinbarten Umfang**\nEine Server-, Team-, Agentur- oder Mehrnutzerlizenz besteht nur dann, wenn sie ausdrücklich im Ticket vereinbart wurde. Eine normale Einzelbestellung berechtigt nicht automatisch zur Nutzung durch weitere Personen oder Projekte.',
+        '**14. Fremdrechte bleiben geschützt**\nDer Shop verkauft nur eigene oder rechtmäßig nutzbare Inhalte. Käufer dürfen mit gelieferten Dateien ebenfalls keine Marken-, Urheber-, Persönlichkeits- oder sonstigen Rechte Dritter verletzen.',
+      ].join('\n\n')),
+      shopEmbed('⚖️ 03 • Verstöße, Support, Rückerstattung & Nachweise', [
+        '**15. Konsequenzen bei Leak / Weiterverkauf**\nBei nachvollziehbar belegtem Leak, unerlaubter Weitergabe, Weiterverkauf oder Lizenzmissbrauch kann die Nutzungslizenz beendet, weiterer Support verweigert und der Nutzer dauerhaft vom Shop ausgeschlossen werden. Mögliche weitere Ansprüche richten sich nach dem anwendbaren Recht.',
+        '**16. Dokumentation und Nachvollziehbarkeit**\nZur Bearbeitung, Betrugsprävention und Durchsetzung der Shop-Regeln können Bestell- und Ticketdaten dokumentiert werden, insbesondere Discord-ID, Ticket-ID, Produkt, Zeitstempel, Bearbeitungsstatus, zuständiges Teammitglied und relevante Kommunikationsverläufe. Es wird nicht behauptet, dass außerhalb dieser Systeme „alles gesehen“ werden kann.',
+        '**17. Supportumfang**\nSupport umfasst grundsätzlich Fehler oder Fragen innerhalb des vereinbarten Lieferumfangs. Neue Wünsche, größere Umbauten, zusätzliche Varianten, fremdverursachte Fehler oder Änderungen an Drittsoftware können als zusätzlicher Auftrag behandelt werden.',
+        '**18. Mitwirkungspflicht beim Support**\nFür eine schnelle Bearbeitung sollen Produktname, ungefähres Kaufdatum, Fehlerbeschreibung, relevante Screenshots/Logs und bereits getestete Schritte bereitgestellt werden. Zugangsdaten oder Passwörter werden nicht verlangt.',
+        '**19. Lieferung digitaler Inhalte**\nLieferzeit und Lieferform richten sich nach dem jeweiligen Produkt bzw. der individuellen Vereinbarung im Ticket. Bei Sonderanfertigungen können Zwischenabnahmen oder Rückfragen erforderlich sein.',
+        '**20. Rückerstattung und Widerruf**\nRückerstattungen, Widerruf und Gewährleistung werden nicht pauschal ausgeschlossen. Es gelten die im konkreten Auftrag getroffenen Vereinbarungen sowie zwingende gesetzliche Verbraucherrechte, soweit diese anwendbar sind.',
+        '**21. Regelverstöße und Sperren**\nBei schweren oder wiederholten Verstößen kann der Zugang zu Shop, Support, Downloads und zukünftigen Bestellungen eingeschränkt oder gesperrt werden. Bereits bestehende gesetzliche Rechte bleiben davon unberührt.',
+        '**22. Zustimmung**\nMit Abschluss einer Bestellung bestätigst du, dass du das zu diesem Zeitpunkt veröffentlichte Regelwerk sowie die konkreten Produkt- und Lizenzbedingungen im Ticket zur Kenntnis genommen hast.',
+      ].join('\n\n')),
+    ],
   });
 
   await seedIfEmpty(channels.faq, {
-    embeds: [shopEmbed('❓ FAQ', '**Wie bestelle ich?**\nÖffne in **🛒・bestellen** ein Ticket für dein gewünschtes Produkt.\n\n**Wo stehen Preise?**\nPreise können direkt in den Produkt-Channels oder im Ticket genannt werden.\n\n**Wo bekomme ich Support?**\nFür kurze Fragen in **❓・support-chat** oder über **🎫・support-ticket** als privates Support-Ticket.')],
+    embeds: [shopEmbed('❓ FAQ', '**Wie bestelle ich?**\nWähle in **🛒・bestellen** dein Produkt. Der Bot erstellt ein privates Kauf-Ticket.\n\n**Wann ist ein Preis verbindlich?**\nErst wenn Preis und Lieferumfang im privaten Ticket bestätigt wurden.\n\n**Wie bezahle ich?**\nAusschließlich über **PayPal** an die im Ticket bestätigte Empfängeradresse.\n\n**Wo bekomme ich Support?**\nNutze **🎫・support-ticket** und wähle den passenden Bereich.\n\n**Darf ich gekaufte Dateien weitergeben?**\nNein. Weiterverkauf, Leaks, Reuploads und Weitergabe an Dritte sind ohne ausdrückliche Erlaubnis untersagt.')],
   });
 
   const productSeeds = [
@@ -315,27 +336,32 @@ async function seedSellingServer(structure) {
   const orderRow2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('selling_order:grafik').setLabel('Design').setEmoji('🎨').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('selling_order:fivem').setLabel('FiveM Asset').setEmoji('🚗').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('selling_support_open').setLabel('Support').setEmoji('🎫').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('selling_support:general').setLabel('Support').setEmoji('🎫').setStyle(ButtonStyle.Success),
   );
   await seedIfEmpty(channels.order, {
-    embeds: [shopEmbed('🛒 Bestellung starten', 'Wähle unten aus was du kaufen möchtest. Der Bot erstellt automatisch ein **privates Kauf-Ticket** für dich und das Shop-Team.')],
+    embeds: [shopEmbed('🛒 Bestellung starten', 'Wähle das gewünschte Produkt. Der Bot erstellt ein **privates Kauf-Ticket**, in dem Preis, Lieferumfang, Bearbeitung und PayPal-Zahlung verbindlich geklärt werden.\n\nMit einer Bestellung akzeptierst du die jeweils geltenden **Shop- und Lizenzbedingungen** in 📜・regelwerk.')],
     components: [orderRow1, orderRow2],
   });
 
   await seedIfEmpty(channels.payment, {
-    embeds: [shopEmbed('💳 Zahlung • PayPal', '**Zahlungsart: PayPal**\n\nDie korrekte **PayPal-Adresse und der endgültige Betrag** werden dir ausschließlich im privaten Kauf-Ticket vom Shop-Team bestätigt.\n\n**Bitte nicht vorher bezahlen.** Nach der Zahlung sendest du die Bestätigung im Ticket. Teile niemals PayPal-Passwörter, Login-Codes oder andere Zugangsdaten.')],
+    embeds: [shopEmbed('💳 Zahlung • PayPal', '**Akzeptierte Zahlungsart: PayPal**\n\n1. Öffne zuerst ein Kauf-Ticket.\n2. Das Shop-Team bestätigt dort **Produkt, Gesamtpreis und Empfängeradresse**.\n3. Bezahle erst nach dieser Bestätigung.\n4. Sende anschließend nur den zur Zuordnung benötigten Zahlungsnachweis bzw. die Transaktionsreferenz im Ticket.\n\n⚠️ **Sicherheit:** Wir verlangen niemals PayPal-Passwörter, 2FA-Codes, Login-Codes oder Fernzugriff auf dein Konto. Zahlungen an nicht im Ticket bestätigte Empfänger werden dem Shop nicht automatisch zugerechnet.')],
   });
 
-  const supportRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('selling_support_open').setLabel('Support-Ticket öffnen').setEmoji('🎫').setStyle(ButtonStyle.Primary),
+  const supportRow1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('selling_support:general').setLabel('Allgemeiner Support').setEmoji('🎫').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('selling_support:installation').setLabel('Installation').setEmoji('🛠️').setStyle(ButtonStyle.Primary),
+  );
+  const supportRow2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('selling_support:order').setLabel('Bestellung / Lieferung').setEmoji('📦').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('selling_support:payment').setLabel('Zahlung / PayPal').setEmoji('💳').setStyle(ButtonStyle.Secondary),
   );
   await seedIfEmpty(channels.supportTicket, {
-    embeds: [shopEmbed('🎫 Privater Support', 'Du hast ein Problem mit einem Produkt, einer Bestellung, Installation oder Lieferung?\n\nDrücke unten auf **Support-Ticket öffnen**. Nur du und das Shop-Team können das Ticket sehen.')],
-    components: [supportRow],
+    embeds: [shopEmbed('🎫 Professioneller Support', 'Wähle den passenden Support-Bereich. Der Bot erstellt ein **privates Ticket**, das nur du und das Shop-Team sehen können.\n\nBitte halte Produktname, Kaufdatum, eine genaue Fehlerbeschreibung und – falls relevant – Screenshots oder Logs bereit. **Keine Passwörter oder Login-Codes senden.**')],
+    components: [supportRow1, supportRow2],
   });
 
   await seedIfEmpty(channels.ticketInfo, {
-    embeds: [shopEmbed('📋 Ticket-System', '**Kauf-Ticket:** über **🛒・bestellen** für neue Bestellungen.\n\n**Support-Ticket:** über **🎫・support-ticket** für Probleme, Installation, Lieferung oder Fragen nach dem Kauf.\n\nTicket-Aktionen werden für die Bearbeitung und Nachvollziehbarkeit protokolliert.')],
+    embeds: [shopEmbed('📋 Ticket-System & Ablauf', '**Kauf-Ticket**\nFür neue Bestellungen. Dort werden Produkt, Umfang, Preis, PayPal-Zahlung und Lieferung verbindlich abgestimmt.\n\n**Support-Ticket**\nFür allgemeine Hilfe, Installation, Lieferprobleme oder Zahlungsfragen.\n\n**Nachvollziehbarkeit**\nTicket-Erstellung, Zuständigkeit, Status und relevante Bearbeitungsschritte können für Support, Betrugsprävention und interne Dokumentation protokolliert werden.')],
   });
 }
 
@@ -406,7 +432,7 @@ async function openSellingTicket(interaction, productKey) {
   );
   await channel.send({
     content: `<@${interaction.user.id}>`,
-    embeds: [shopEmbed(`${product.emoji} Kauf-Ticket • ${product.label}`, `Hallo <@${interaction.user.id}>!\n\nBeschreibe bitte genau was du möchtest. Das Shop-Team klärt anschließend **Preis, Umfang, Lieferzeit und Anpassungen** mit dir.\n\n💳 **Zahlung: PayPal** – bitte erst bezahlen, nachdem dir Preis und PayPal-Adresse hier im Ticket bestätigt wurden.`, [
+    embeds: [shopEmbed(`${product.emoji} Kauf-Ticket • ${product.label}`, `Hallo <@${interaction.user.id}>!\n\nBitte sende uns für eine schnelle Bearbeitung:\n• gewünschtes Produkt / Paket\n• genaue Wünsche und Änderungen\n• Referenzen oder Beispiele (falls vorhanden)\n• gewünschtes Format / Einsatzzweck\n• gewünschten Termin, falls relevant\n\nDas Shop-Team bestätigt anschließend **Leistungsumfang, Gesamtpreis, Lieferzeit und PayPal-Empfänger** direkt in diesem Ticket.\n\n💳 **Bitte erst danach bezahlen.** Mit Abschluss der Bestellung gelten die veröffentlichten Shop- und Lizenzbedingungen.`, [
       { name: 'Produkt', value: product.label, inline: true },
       { name: 'Kunde', value: `<@${interaction.user.id}>`, inline: true },
       { name: 'Zahlung', value: 'PayPal', inline: true },
@@ -419,8 +445,9 @@ async function openSellingTicket(interaction, productKey) {
   await logSelling(interaction.guild, '🛒 Neue Bestellung', `<@${interaction.user.id}> hat ein **${product.label}**-Ticket erstellt: <#${channel.id}>`);
 }
 
-async function openSupportTicket(interaction) {
+async function openSupportTicket(interaction, supportKey = 'general') {
   if (!interaction.inGuild()) return;
+  const supportType = SUPPORT_TYPES[supportKey] || SUPPORT_TYPES.general;
 
   const duplicate = interaction.guild.channels.cache.find(channel =>
     channel.type === ChannelType.GuildText
@@ -447,10 +474,10 @@ async function openSupportTicket(interaction) {
   ];
 
   const channel = await interaction.guild.channels.create({
-    name: `support-${sanitizeName(interaction.user.username)}`.slice(0, 95),
+    name: `support-${supportKey}-${sanitizeName(interaction.user.username)}`.slice(0, 95),
     type: ChannelType.GuildText,
     parent: category.id,
-    topic: `selling-owner:${interaction.user.id}|selling-kind:support|selling-status:open`,
+    topic: `selling-owner:${interaction.user.id}|selling-kind:support|selling-support:${supportKey}|selling-status:open`,
     permissionOverwrites: overwrites,
     reason: `Selling Support von ${interaction.user.tag}`,
   });
@@ -461,16 +488,17 @@ async function openSupportTicket(interaction) {
   );
   await channel.send({
     content: `<@${interaction.user.id}>`,
-    embeds: [shopEmbed('🎫 Support-Ticket', `Hallo <@${interaction.user.id}>!\n\nBeschreibe bitte dein Problem so genau wie möglich. Wenn es um einen Kauf geht, nenne **Produkt, ungefähres Kaufdatum und was genau nicht funktioniert**.\n\nBitte sende keine Passwörter, PayPal-Login-Codes oder andere Zugangsdaten.`, [
+    embeds: [shopEmbed(`${supportType.emoji} Support • ${supportType.label}`, `Hallo <@${interaction.user.id}>!\n\nBitte beschreibe dein Anliegen strukturiert und vollständig. Hilfreich sind:\n• betroffenes Produkt / Bestellung\n• ungefähres Kaufdatum\n• genaue Fehlerbeschreibung oder Frage\n• Screenshots / Logs, falls vorhanden\n• bereits getestete Schritte\n\n**Keine Passwörter, PayPal-Login-Codes, 2FA-Codes oder sonstige Zugangsdaten senden.**`, [
       { name: 'Kunde', value: `<@${interaction.user.id}>`, inline: true },
-      { name: 'Typ', value: 'Support', inline: true },
+      { name: 'Bereich', value: supportType.label, inline: true },
+      { name: 'Status', value: 'Offen', inline: true },
     ])],
     components: [actions],
     allowedMentions: { users: [interaction.user.id] },
   });
 
-  await interaction.reply({ content: `✅ Dein Support-Ticket wurde erstellt: <#${channel.id}>`, ephemeral: true });
-  await logSelling(interaction.guild, '🎫 Neues Support-Ticket', `<@${interaction.user.id}> hat ein Support-Ticket erstellt: <#${channel.id}>`);
+  await interaction.reply({ content: `✅ Dein **${supportType.label}**-Ticket wurde erstellt: <#${channel.id}>`, ephemeral: true });
+  await logSelling(interaction.guild, '🎫 Neues Support-Ticket', `<@${interaction.user.id}> hat **${supportType.label}** erstellt: <#${channel.id}>`);
 }
 
 async function handleTicketButton(interaction) {
@@ -523,8 +551,8 @@ async function runSellingSetup(interaction) {
   await interaction.editReply([
     '✅ **Selling Server ist eingerichtet.**',
     '',
-    'Erstellt wurden Bereiche für **Thumbnails, NVE-Presets/Grafik-Setups, Soundpacks, Designs, FiveM-Assets, Bundles, Bewertungen, PayPal-Zahlungen, Support und Team**.',
-    'In **🛒・bestellen** gibt es private Kauf-Tickets und in **🎫・support-ticket** ein eigenes Support-Ticket-System.',
+    'Erstellt wurden professionelle Bereiche für **Thumbnails, NVE-Presets/Grafik-Setups, Soundpacks, Designs, FiveM-Assets, Bundles, PayPal-Zahlungen, Lizenzregeln, Support und Team-Verwaltung**.',
+    'In **🛒・bestellen** gibt es private Kauf-Tickets. **🎫・support-ticket** bietet getrennte Bereiche für allgemeinen Support, Installation, Bestellung/Lieferung und PayPal-Fragen.',
     '',
     'ℹ️ Bereits vorhandene fremde Channels/Rollen werden absichtlich **nicht gelöscht**. Der Command kann dadurch gefahrlos erneut ausgeführt werden und ergänzt fehlende Teile.',
   ].join('\n'));
@@ -544,8 +572,8 @@ async function handleSellingInteraction(interaction) {
     return true;
   }
 
-  if (interaction.isButton?.() && interaction.customId === 'selling_support_open') {
-    await openSupportTicket(interaction);
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_support:')) {
+    await openSupportTicket(interaction, interaction.customId.split(':')[1] || 'general');
     return true;
   }
 
