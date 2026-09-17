@@ -95,11 +95,47 @@ let sellingLoginToken = null;
 const sellingResetGuilds = new Set();
 const sellingVerifyChallenges = new Map();
 const sellingAntiNukeActions = new Map();
+const sellingAntiNukeProcessedEntries = new Map();
 const SELLING_VERIFY_TTL_MS = 5 * 60 * 1000;
 const sellingPendingDeliveries = new Map();
+const sellingUserRateLimits = new Map();
+const sellingActionLocks = new Set();
 const SELLING_DELIVERY_TTL_MS = 5 * 60 * 1000;
+
+function consumeSellingRateLimit(key, maxActions, windowMs) {
+  const now = Date.now();
+  if (sellingUserRateLimits.size > 5000) {
+    for (const [entryKey, timestamps] of sellingUserRateLimits) {
+      const newest = Array.isArray(timestamps) && timestamps.length ? Math.max(...timestamps) : 0;
+      if (!newest || now - newest > 60 * 60 * 1000) sellingUserRateLimits.delete(entryKey);
+    }
+  }
+  const recent = (sellingUserRateLimits.get(key) || []).filter(ts => now - ts < windowMs);
+  if (recent.length >= maxActions) {
+    sellingUserRateLimits.set(key, recent);
+    return false;
+  }
+  recent.push(now);
+  sellingUserRateLimits.set(key, recent);
+  return true;
+}
+
+function acquireSellingActionLock(key) {
+  if (sellingActionLocks.has(key)) return false;
+  sellingActionLocks.add(key);
+  return true;
+}
+function releaseSellingActionLock(key) { sellingActionLocks.delete(key); }
+function isSellingActionLocked(key) { return sellingActionLocks.has(key); }
+function firstAttachmentOf(collection) {
+  if (!collection) return null;
+  if (typeof collection.first === 'function') return collection.first() || null;
+  if (typeof collection.values === 'function') return collection.values().next().value || null;
+  return null;
+}
 const SELLING_AUTOMATION_TICK_MS = 5 * 60 * 1000;
 let sellingAutomationLastBackupAt = 0;
+let sellingStoreCache = null;
 
 const sellingStorageDir = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || __dirname;
 if (!fs.existsSync(sellingStorageDir)) fs.mkdirSync(sellingStorageDir, { recursive: true });
@@ -152,21 +188,103 @@ function blankGuildShopData() {
   };
 }
 
-function loadSellingStore() {
+function migrateSellingStore(store) {
+  let changed = false;
+  let version = Number(store.version || 1);
+
+  if (version < 2) {
+    for (const data of Object.values(store.guilds || {})) {
+      const orders = data?.orders && typeof data.orders === 'object' ? Object.values(data.orders) : [];
+      const coupons = data?.coupons && typeof data.coupons === 'object' ? data.coupons : {};
+      for (const coupon of Object.values(coupons)) coupon.uses = 0;
+      for (const order of orders) {
+        if (order.paidAt && order.couponCode && coupons[order.couponCode]) {
+          coupons[order.couponCode].uses = Number(coupons[order.couponCode].uses || 0) + 1;
+          order.couponRedeemedAt ||= order.paidAt;
+        }
+        if (!order.deliveryReadyAt && order.deliveredAt && (order.deliveryFileUrl || (Array.isArray(order.deliveryFiles) && order.deliveryFiles.length))) {
+          order.deliveryReadyAt = order.deliveredAt;
+        }
+      }
+    }
+    version = 2;
+    changed = true;
+  }
+
+  // v3 uses one in-process store object. This prevents stale async snapshots from
+  // overwriting newer order/review/delivery changes in a single Railway replica.
+  if (version < 3) {
+    version = 3;
+    changed = true;
+  }
+
+  store.version = version;
+  return changed;
+}
+
+function recoverSellingStoreFromBackup() {
   try {
-    if (!fs.existsSync(sellingDataPath)) return { version: 1, guilds: {} };
+    const dir = path.join(sellingStorageDir, 'selling-backups');
+    if (!fs.existsSync(dir)) return null;
+    const files = fs.readdirSync(dir).filter(name => name.endsWith('.json')).sort().reverse();
+    for (const name of files) {
+      try {
+        const candidate = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+        if (candidate && typeof candidate === 'object' && candidate.guilds && typeof candidate.guilds === 'object') return candidate;
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return null;
+}
+
+function preserveCorruptSellingStore() {
+  try {
+    if (!fs.existsSync(sellingDataPath)) return null;
+    const target = `${sellingDataPath}.corrupt-${Date.now()}`;
+    fs.copyFileSync(sellingDataPath, target);
+    return target;
+  } catch (_) {
+    return null;
+  }
+}
+
+function loadSellingStore() {
+  if (sellingStoreCache) return sellingStoreCache;
+  try {
+    if (!fs.existsSync(sellingDataPath)) {
+      sellingStoreCache = { version: 3, guilds: {} };
+      return sellingStoreCache;
+    }
     const parsed = JSON.parse(fs.readFileSync(sellingDataPath, 'utf8'));
-    if (!parsed || typeof parsed !== 'object') return { version: 1, guilds: {} };
-    parsed.version = 1;
+    if (!parsed || typeof parsed !== 'object') {
+      sellingStoreCache = { version: 3, guilds: {} };
+      return sellingStoreCache;
+    }
+    parsed.version = Number(parsed.version || 1);
     parsed.guilds = parsed.guilds && typeof parsed.guilds === 'object' ? parsed.guilds : {};
-    return parsed;
+    sellingStoreCache = parsed;
+    if (migrateSellingStore(parsed)) saveSellingStore(parsed);
+    return sellingStoreCache;
   } catch (error) {
     console.error('❌ selling-data.json konnte nicht gelesen werden:', error);
-    return { version: 1, guilds: {} };
+    const corruptCopy = preserveCorruptSellingStore();
+    const recovered = recoverSellingStoreFromBackup();
+    if (recovered) {
+      recovered.version = Number(recovered.version || 1);
+      recovered.guilds = recovered.guilds && typeof recovered.guilds === 'object' ? recovered.guilds : {};
+      migrateSellingStore(recovered);
+      sellingStoreCache = recovered;
+      saveSellingStore(recovered);
+      console.error(`⚠️ Selling-Daten wurden aus dem letzten gültigen Backup wiederhergestellt.${corruptCopy ? ` Defekte Datei gesichert: ${corruptCopy}` : ''}`);
+      return sellingStoreCache;
+    }
+    const suffix = corruptCopy ? ` Defekte Datei wurde gesichert unter ${corruptCopy}.` : '';
+    throw new Error(`Selling-Datenspeicher ist beschädigt und es wurde kein gültiges Backup gefunden.${suffix}`);
   }
 }
 
 function saveSellingStore(store) {
+  sellingStoreCache = store;
   const tmp = `${sellingDataPath}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(store, null, 2), 'utf8');
   fs.renameSync(tmp, sellingDataPath);
@@ -266,7 +384,7 @@ const LOYALTY_LEVELS = [
 ];
 
 function completedOrdersForUser(data, userId) {
-  return Object.values(data.orders || {}).filter(order => order.userId === userId && Number(order.deliveredAt) > 0);
+  return Object.values(data.orders || {}).filter(order => order.userId === userId && Number(order.deliveryReadyAt) > 0);
 }
 
 function loyaltyForUser(data, userId) {
@@ -300,7 +418,7 @@ function orderEtaDays(order) {
 
 function activeQueue(data) {
   return Object.values(data.orders || {})
-    .filter(order => !order.closedAt && !order.deliveredAt && order.status !== 'disputed')
+    .filter(order => !order.closedAt && Boolean(order.paidAt) && !order.deliveredAt && order.status !== 'disputed')
     .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
 }
 
@@ -463,6 +581,14 @@ function getCouponState(data, rawCode) {
   return { code, coupon, error: null };
 }
 
+function redeemCouponForPaidOrder(data, order) {
+  if (!order?.couponCode || order.couponRedeemedAt) return;
+  const state = getCouponState(data, order.couponCode);
+  if (state.error || !state.coupon) throw new Error(`Rabattcode ${order.couponCode} kann nicht mehr eingelöst werden: ${state.error || 'nicht verfügbar'}`);
+  state.coupon.uses = Number(state.coupon.uses || 0) + 1;
+  order.couponRedeemedAt = Date.now();
+}
+
 function findSellingTextChannel(guild, name) {
   return guild.channels.cache.find(channel => channel.type === ChannelType.GuildText && channel.name === name) || null;
 }
@@ -473,7 +599,13 @@ function findSellingCategory(guild, name) {
 
 function findSellingRole(guild, key) {
   const definition = SELLING.roles.find(role => role.key === key);
-  return definition ? guild.roles.cache.find(role => role.name === definition.name) || null : null;
+  if (!definition) return null;
+  const persistedId = loadSellingStore().guilds?.[guild.id]?.config?.roleIds?.[key] || null;
+  if (persistedId) {
+    const persisted = guild.roles.cache.get(persistedId);
+    if (persisted) return persisted;
+  }
+  return guild.roles.cache.find(role => role.name === definition.name) || null;
 }
 
 
@@ -726,7 +858,9 @@ function readOnlyOverwrites(guild, roleMap, verifiedOnly = false) {
 }
 
 async function ensureRole(guild, definition) {
-  let role = guild.roles.cache.find(item => item.name === definition.name && !item.managed) || null;
+  const persistedId = loadSellingStore().guilds?.[guild.id]?.config?.roleIds?.[definition.key] || null;
+  let role = persistedId ? guild.roles.cache.get(persistedId) || null : null;
+  if (!role || role.managed) role = guild.roles.cache.find(item => item.name === definition.name && !item.managed) || null;
   if (!role) {
     role = await guild.roles.create({
       name: definition.name,
@@ -1097,7 +1231,9 @@ async function seedSellingServer(structure) {
     new ButtonBuilder().setCustomId('selling_faq:license').setLabel('Lizenz').setEmoji('🔐').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('selling_faq:support').setLabel('Support').setEmoji('🎫').setStyle(ButtonStyle.Secondary),
   );
-  await channels.faq.send({ content: '**Schnellhilfe:**', components: [faqButtons] }).catch(() => {});
+  const faqRecent = await channels.faq.messages.fetch({ limit: 25 }).catch(() => null);
+  const faqQuickHelpExists = faqRecent?.some(message => message.author.id === channels.faq.guild.members.me?.id && message.components?.some(row => row.components?.some(component => String(component.customId || '').startsWith('selling_faq:'))));
+  if (!faqQuickHelpExists) await channels.faq.send({ content: '**Schnellhilfe:**', components: [faqButtons] }).catch(() => {});
 
   await seedIfEmpty(channels.productUpdates, { embeds: [shopEmbed('🔄 Produkt-Updates', 'Hier erscheinen neue Versionen und wichtige Hinweise für bereits gekaufte Produkte. Käufer können über ihre jeweilige Produktrolle gezielt informiert werden.')] });
   await seedIfEmpty(channels.portfolio, { embeds: [shopEmbed('🖼️ Portfolio', 'Ausgewählte Arbeiten und Referenzen erscheinen hier. Nach einer Lieferung kann das Team das Ergebnis mit einem Klick übernehmen; Bilder können auch direkt über `/sell portfolio` hochgeladen werden.')] });
@@ -1119,11 +1255,29 @@ function sanitizeName(value) {
 }
 
 function canHandleSellingTicket(member) {
-  if (!member) return false;
+  if (!member?.guild) return false;
   if (member.guild.ownerId === member.id) return true;
-  if (member.permissions.has(PermissionFlagsBits.Administrator) || member.permissions.has(PermissionFlagsBits.ManageChannels)) return true;
-  const staffNames = new Set(['👑・INHABER', '⚜️・MANAGEMENT', '🎫・SUPPORT', '🎨・DESIGNER', '🎧・SOUND DESIGNER', '🛠️・DEVELOPER']);
-  return member.roles.cache.some(role => staffNames.has(role.name));
+  if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
+  const { data } = getGuildShopData(member.guild.id);
+  const configuredIds = new Set(
+    ['owner', 'management', 'support', 'designer', 'sound', 'developer']
+      .map(key => data.config?.roleIds?.[key])
+      .filter(Boolean),
+  );
+  if (member.roles.cache.some(role => configuredIds.has(role.id))) return true;
+  // Migration fallback for servers that existed before role IDs were persisted.
+  const legacyNames = new Set(['👑・INHABER', '⚜️・MANAGEMENT', '🎫・SUPPORT', '🎨・DESIGNER', '🎧・SOUND DESIGNER', '🛠️・DEVELOPER']);
+  return member.roles.cache.some(role => legacyNames.has(role.name));
+}
+
+function canManageSellingShop(member) {
+  if (!member?.guild) return false;
+  if (member.guild.ownerId === member.id) return true;
+  if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
+  const { data } = getGuildShopData(member.guild.id);
+  const managementIds = new Set(['owner', 'management'].map(key => data.config?.roleIds?.[key]).filter(Boolean));
+  if (member.roles.cache.some(role => managementIds.has(role.id))) return true;
+  return member.roles.cache.some(role => role.name === '👑・INHABER' || role.name === '⚜️・MANAGEMENT');
 }
 
 async function logSelling(guild, title, text) {
@@ -1134,8 +1288,14 @@ async function logSelling(guild, title, text) {
 
 
 function sellingStaffRoles(guild) {
-  const names = new Set(['👑・INHABER', '⚜️・MANAGEMENT', '🎫・SUPPORT', '🎨・DESIGNER', '🎧・SOUND DESIGNER', '🛠️・DEVELOPER']);
-  return guild.roles.cache.filter(role => names.has(role.name));
+  const { data } = getGuildShopData(guild.id);
+  const configuredIds = new Set(
+    ['owner', 'management', 'support', 'designer', 'sound', 'developer']
+      .map(key => data.config?.roleIds?.[key])
+      .filter(Boolean),
+  );
+  const legacyNames = new Set(['👑・INHABER', '⚜️・MANAGEMENT', '🎫・SUPPORT', '🎨・DESIGNER', '🎧・SOUND DESIGNER', '🛠️・DEVELOPER']);
+  return guild.roles.cache.filter(role => configuredIds.has(role.id) || legacyNames.has(role.name));
 }
 
 function sellingTicketOverwrites(guild, userId) {
@@ -1325,6 +1485,12 @@ async function handleCartButton(interaction) {
 }
 
 async function createCartOrderFromModal(interaction) {
+  const creationLock = `order-create-lock:${interaction.guildId}:${interaction.user.id}`;
+  if (!acquireSellingActionLock(creationLock)) {
+    await interaction.reply({ content: '⏳ Eine Bestellung wird gerade bereits erstellt. Bitte warte kurz.', ephemeral: true }).catch(() => {});
+    return;
+  }
+  try {
   if (!interaction.inGuild()) return;
   const { store, data } = getGuildShopData(interaction.guildId);
   const cart = cartForUser(data, interaction.user.id);
@@ -1341,9 +1507,18 @@ async function createCartOrderFromModal(interaction) {
     await interaction.reply({ content: `❌ Du hast bereits eine offene Bestellung **${duplicate.id}**.`, ephemeral: true });
     return;
   }
+  const disabledCartItems = [...new Set(cart.items)].filter(key => !productConfig(data, key)?.enabled);
+  if (disabledCartItems.length) {
+    await interaction.reply({ content: `❌ Mindestens ein Produkt im Warenkorb ist inzwischen deaktiviert: **${disabledCartItems.map(key => PRODUCT_TYPES[key]?.label || key).join(', ')}**. Entferne es und versuche es erneut.`, ephemeral: true });
+    return;
+  }
   const couponState = getCouponState(data, interaction.fields.getTextInputValue('coupon'));
   if (couponState.error) {
     await interaction.reply({ content: `❌ Rabattcode ungültig: ${couponState.error}`, ephemeral: true });
+    return;
+  }
+  if (!consumeSellingRateLimit(`order-create:${interaction.guildId}:${interaction.user.id}`, 2, 5 * 60 * 1000)) {
+    await interaction.reply({ content: '⏳ Zu viele Bestellversuche in kurzer Zeit. Bitte warte einige Minuten.', ephemeral: true });
     return;
   }
   const loyalty = loyaltyForUser(data, interaction.user.id);
@@ -1358,10 +1533,9 @@ async function createCartOrderFromModal(interaction) {
     loyaltyDiscountPercent: loyalty.discount, loyaltyLabel: loyalty.level?.label || null,
     basePrice: null, finalPrice: null, status: 'pending', revisionsRemaining: revisions, assignedTo: null,
     createdAt: Date.now(), paidAt: null, deliveredAt: null, closedAt: null, channelId: null, deliveryChannelId: null,
-    licenseId: null, reviewSubmitted: false,
+    licenseId: null, reviewSubmitted: false, couponRedeemedAt: null,
   };
   data.orders[orderId] = order;
-  if (couponState.coupon) couponState.coupon.uses = Number(couponState.coupon.uses || 0) + 1;
   data.carts[interaction.user.id] = { items: [], updatedAt: Date.now() };
   saveSellingStore(store);
 
@@ -1384,7 +1558,6 @@ async function createCartOrderFromModal(interaction) {
   } catch (error) {
     order.closedAt = Date.now(); order.failedAt = Date.now();
     data.carts[interaction.user.id] = { items: keys, updatedAt: Date.now() };
-    if (couponState.coupon) couponState.coupon.uses = Math.max(0, Number(couponState.coupon.uses || 0) - 1);
     saveSellingStore(store); throw error;
   }
   order.channelId = channel.id;
@@ -1399,6 +1572,10 @@ async function createCartOrderFromModal(interaction) {
   const q = queueInfoForOrder(data, order);
   await interaction.reply({ content: `✅ Warenkorb-Bestellung **${orderId}** erstellt: <#${channel.id}>${q.position ? `\nQueue-Position: **#${q.position} von ${q.total}**` : ''}`, ephemeral: true });
   await logSelling(interaction.guild, '🛒 Neue Warenkorb-Bestellung', `<@${interaction.user.id}> hat **${orderId}** erstellt: <#${channel.id}>`);
+
+  } finally {
+    releaseSellingActionLock(creationLock);
+  }
 }
 
 async function showOrderModal(interaction, productKey) {
@@ -1485,6 +1662,12 @@ async function showOrderModal(interaction, productKey) {
 }
 
 async function createOrderFromModal(interaction, productKey) {
+  const creationLock = `order-create-lock:${interaction.guildId}:${interaction.user.id}`;
+  if (!acquireSellingActionLock(creationLock)) {
+    await interaction.reply({ content: '⏳ Eine Bestellung wird gerade bereits erstellt. Bitte warte kurz.', ephemeral: true }).catch(() => {});
+    return;
+  }
+  try {
   const product = PRODUCT_TYPES[productKey];
   if (!product || !interaction.inGuild()) return;
 
@@ -1502,10 +1685,18 @@ async function createOrderFromModal(interaction, productKey) {
     await interaction.reply({ content: `❌ Du hast bereits eine offene Bestellung **${duplicate.id}**.`, ephemeral: true });
     return;
   }
+  if (!productConfig(data, productKey)?.enabled) {
+    await interaction.reply({ content: '🔴 Dieses Produkt wurde inzwischen deaktiviert und kann nicht mehr bestellt werden.', ephemeral: true });
+    return;
+  }
 
   const couponState = getCouponState(data, interaction.fields.getTextInputValue('coupon'));
   if (couponState.error) {
     await interaction.reply({ content: `❌ Rabattcode ungültig: ${couponState.error}`, ephemeral: true });
+    return;
+  }
+  if (!consumeSellingRateLimit(`order-create:${interaction.guildId}:${interaction.user.id}`, 2, 5 * 60 * 1000)) {
+    await interaction.reply({ content: '⏳ Zu viele Bestellversuche in kurzer Zeit. Bitte warte einige Minuten.', ephemeral: true });
     return;
   }
 
@@ -1536,9 +1727,9 @@ async function createOrderFromModal(interaction, productKey) {
     deliveryChannelId: null,
     licenseId: null,
     reviewSubmitted: false,
+    couponRedeemedAt: null,
   };
   data.orders[orderId] = order;
-  if (couponState.coupon) couponState.coupon.uses = Number(couponState.coupon.uses || 0) + 1;
   saveSellingStore(store);
 
   const category = findSellingCategory(interaction.guild, SELLING.categories.orders);
@@ -1562,7 +1753,6 @@ async function createOrderFromModal(interaction, productKey) {
   } catch (error) {
     order.closedAt = Date.now();
     order.failedAt = Date.now();
-    if (couponState.coupon) couponState.coupon.uses = Math.max(0, Number(couponState.coupon.uses || 0) - 1);
     saveSellingStore(store);
     throw error;
   }
@@ -1595,11 +1785,20 @@ async function createOrderFromModal(interaction, productKey) {
     ephemeral: true,
   });
   await logSelling(interaction.guild, '🛒 Neue Bestellung', `<@${interaction.user.id}> hat **${orderId} • ${product.label}** erstellt: <#${channel.id}>`);
+  } finally {
+    releaseSellingActionLock(creationLock);
+  }
 }
 
 async function openSupportTicket(interaction, supportKey = 'general') {
   if (!interaction.inGuild()) return;
   const supportType = SUPPORT_TYPES[supportKey] || SUPPORT_TYPES.general;
+  const createLock = `support-create:${interaction.guildId}:${interaction.user.id}`;
+  if (!acquireSellingActionLock(createLock)) {
+    await interaction.reply({ content: '⏳ Ein Support-Ticket wird bereits erstellt.', ephemeral: true });
+    return;
+  }
+  try {
 
   const duplicate = interaction.guild.channels.cache.find(channel =>
     channel.type === ChannelType.GuildText
@@ -1608,6 +1807,10 @@ async function openSupportTicket(interaction, supportKey = 'general') {
       && String(channel.topic || '').includes('selling-status:open'));
   if (duplicate) {
     await interaction.reply({ content: `❌ Du hast bereits ein offenes Support-Ticket: <#${duplicate.id}>`, ephemeral: true });
+    return;
+  }
+  if (!consumeSellingRateLimit(createLock, 3, 10 * 60 * 1000)) {
+    await interaction.reply({ content: '⏳ Du hast in kurzer Zeit zu viele Support-Tickets erstellt. Bitte warte einige Minuten.', ephemeral: true });
     return;
   }
 
@@ -1639,6 +1842,9 @@ async function openSupportTicket(interaction, supportKey = 'general') {
 
   await interaction.reply({ content: `✅ Dein **${supportType.label}**-Ticket wurde erstellt: <#${channel.id}>`, ephemeral: true });
   await logSelling(interaction.guild, '🎫 Neues Support-Ticket', `<@${interaction.user.id}> hat **${supportType.label}** erstellt: <#${channel.id}>`);
+  } finally {
+    releaseSellingActionLock(createLock);
+  }
 }
 
 async function buildTicketTranscript(channel) {
@@ -1690,6 +1896,7 @@ async function archiveSellingTranscript(channel, title, extra = '') {
     embeds: [shopEmbed(`📄 ${title}`, `**Channel:** ${channel.name}\n**ID:** \`${channel.id}\`${extra ? `\n${extra}` : ''}`)],
     files: [attachment],
   }).catch(() => null);
+
 }
 
 async function grantBuyerRoles(guild, order) {
@@ -1731,20 +1938,25 @@ async function deliverOrder(guild, orderId, actorId = null) {
   const { store, data } = getGuildShopData(guild.id);
   const order = data.orders[orderId];
   if (!order) throw new Error('Bestellung nicht gefunden.');
+  if (order.closedAt) throw new Error('Diese Bestellung ist bereits geschlossen.');
+  if (order.acceptedAt) throw new Error('Diese Bestellung wurde vom Kunden bereits angenommen.');
+  if (!order.paidAt) throw new Error('Vor der Lieferung muss die Zahlung bestätigt sein.');
+  if (!Number.isFinite(Number(order.finalPrice ?? order.basePrice))) throw new Error('Vor der Lieferung muss ein gültiger Preis gesetzt sein.');
 
   const product = { label: orderProductLabel(order), emoji: orderProductEmoji(order) };
-  ensureOrderLicense(data, order);
-  order.status = 'delivered';
-  order.deliveredAt ||= Date.now();
-
-  await grantBuyerRoles(guild, order);
-
   let deliveryChannel = order.deliveryChannelId
     ? await guild.channels.fetch(order.deliveryChannelId).catch(() => null)
     : null;
+  const category = deliveryChannel ? null : findSellingCategory(guild, SELLING.categories.delivery);
+  if (!deliveryChannel && !category) throw new Error('Kundenbereich-Kategorie fehlt.');
+
+  ensureOrderLicense(data, order);
+  order.status = 'delivered';
+  order.deliveredAt ||= Date.now();
+  order.updatedAt = Date.now();
+  saveSellingStore(store);
+
   if (!deliveryChannel) {
-    const category = findSellingCategory(guild, SELLING.categories.delivery);
-    if (!category) throw new Error('Kundenbereich-Kategorie fehlt.');
     deliveryChannel = await guild.channels.create({
       name: `delivery-${order.id.toLowerCase()}-${sanitizeName((await guild.members.fetch(order.userId).catch(() => null))?.user?.username || 'kunde')}`.slice(0, 95),
       type: ChannelType.GuildText,
@@ -1754,26 +1966,26 @@ async function deliverOrder(guild, orderId, actorId = null) {
       reason: `Selling Delivery ${order.id}`,
     });
     order.deliveryChannelId = deliveryChannel.id;
+    order.updatedAt = Date.now();
+    saveSellingStore(store);
   }
 
   const license = data.licenses[order.licenseId];
   const attachment = new AttachmentBuilder(Buffer.from(licenseText(guild, order, license), 'utf8'), { name: `${license.id}.txt` });
   const receiptBuffer = await buildReceiptPdf(guild, order, license);
   const receiptAttachment = new AttachmentBuilder(receiptBuffer, { name: `${order.id}-Bestellbeleg.pdf` });
-  const reviewRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`selling_review_open:${order.id}`).setLabel('Bewertung abgeben').setEmoji('⭐').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`selling_revision:${order.id}`).setLabel(`Revision anfragen (${Math.max(0, Number(order.revisionsRemaining || 0))})`).setEmoji('🔄').setStyle(ButtonStyle.Secondary),
-  );
+  const customerRows = customerDeliveryRows(order, true);
 
   if (!order.deliveryPostedAt) {
     await deliveryChannel.send({
       content: `<@${order.userId}>`,
       embeds: [shopEmbed(`${product.emoji} Lieferung • ${order.id}`, `Deine Bestellung wurde als **geliefert** markiert.\n\n**Produkt:** ${product.label}\n**Lizenz:** \`${order.licenseId}\`\n**Käuferkennzeichnung:** \`${license.buyerMarker}\`\n\nDie eigentlichen Produktdateien werden hier vom Shop-Team bereitgestellt. Bewahre deine Lizenz-ID für Support und Updates auf.`)],
       files: [attachment, receiptAttachment],
-      components: [reviewRow],
+      components: customerRows,
       allowedMentions: { users: [order.userId] },
     });
     order.deliveryPostedAt = Date.now();
+    saveSellingStore(store);
   }
 
   const ticket = order.channelId ? await guild.channels.fetch(order.channelId).catch(() => null) : null;
@@ -1781,70 +1993,122 @@ async function deliverOrder(guild, orderId, actorId = null) {
     await ticket.send({
       content: `<@${order.userId}>`,
       embeds: [shopEmbed('✅ Bestellung geliefert', `Bestellung **${order.id}** wurde geliefert.\nPrivater Kundenbereich: <#${deliveryChannel.id}>\nLizenz-ID: \`${order.licenseId}\``)],
-      components: [reviewRow],
       allowedMentions: { users: [order.userId] },
     }).catch(() => {});
   }
 
-  const sales = findSellingTextChannel(guild, '💰・verkäufe');
-  if (sales && !order.saleLoggedAt) {
-    await sales.send({
-      embeds: [shopEmbed(`💰 Verkauf • ${order.id}`, `<@${order.userId}> • **${product.label}**\nPreis: **${formatEuro(order.finalPrice ?? order.basePrice)}**\nLizenz: \`${order.licenseId}\`${actorId ? `\nGeliefert von: <@${actorId}>` : ''}`)],
-      allowedMentions: { parse: [] },
-    }).catch(() => {});
-    order.saleLoggedAt = Date.now();
-  }
-
-  saveSellingStore(store);
-  const loyaltyStatus = await applyLoyaltyRole(guild, data, order.userId).catch(() => null);
-  saveSellingStore(store);
-  await refreshOrderStatusPanel(guild, data).catch(() => {});
-  if (loyaltyStatus?.level && deliveryChannel?.isTextBased()) {
-    await deliveryChannel.send({ embeds: [shopEmbed('💠 Kundenstatus aktualisiert', `Du hast jetzt **${loyaltyStatus.level.label}** mit **${loyaltyStatus.discount}% Stammkundenrabatt** für zukünftige Bestellungen.`)] }).catch(() => {});
-  }
-  return { order, deliveryChannel, license };
-}
-
-async function setOrderStatus(guild, orderId, status, actorId) {
-  const allowed = new Set(['pending', 'paid', 'processing', 'delivered', 'disputed']);
-  if (!allowed.has(status)) throw new Error('Ungültiger Bestellstatus.');
-
-  if (status === 'delivered') return deliverOrder(guild, orderId, actorId);
-
-  const { store, data } = getGuildShopData(guild.id);
-  const order = data.orders[orderId];
-  if (!order) throw new Error('Bestellung nicht gefunden.');
-  order.status = status;
-  if (status === 'paid') {
-    order.paidAt ||= Date.now();
-    await grantBuyerRoles(guild, order);
-  }
-  if (status === 'processing') order.processingAt ||= Date.now();
-  if (status === 'disputed') order.disputedAt ||= Date.now();
   order.updatedAt = Date.now();
   saveSellingStore(store);
   await refreshOrderStatusPanel(guild, data).catch(() => {});
+  return { order, deliveryChannel, license };
+}
 
-  const channel = order.channelId ? await guild.channels.fetch(order.channelId).catch(() => null) : null;
-  if (channel?.isTextBased()) {
-    await channel.send({
-      embeds: [shopEmbed(`📊 Status aktualisiert • ${order.id}`, `Neuer Status: **${orderStatusLabel(status)}**\nGeändert von <@${actorId}>.`)],
-      allowedMentions: { parse: [] },
-    }).catch(() => {});
+async function finalizeSuccessfulDelivery(guild, data, order, actorId = null, deliveryChannel = null) {
+  await grantBuyerRoles(guild, order);
+  if (!order.saleLoggedAt) {
+    const sales = findSellingTextChannel(guild, '💰・verkäufe');
+    if (sales) {
+      await sales.send({
+        embeds: [shopEmbed(`💰 Verkauf • ${order.id}`, `<@${order.userId}> • **${orderProductLabel(order)}**
+Preis: **${formatEuro(order.finalPrice ?? order.basePrice)}**
+Lizenz: \`${order.licenseId || '—'}\`${actorId ? `
+Geliefert von: <@${actorId}>` : ''}`)],
+        allowedMentions: { parse: [] },
+      }).catch(() => {});
+    }
+    order.saleLoggedAt = Date.now();
   }
-  await logSelling(guild, `📊 ${order.id} • ${orderStatusLabel(status)}`, `<@${actorId}> hat den Bestellstatus geändert.`);
-  return { order };
+  const loyaltyStatus = await applyLoyaltyRole(guild, data, order.userId).catch(() => null);
+  if (loyaltyStatus?.level && deliveryChannel?.isTextBased()) {
+    await deliveryChannel.send({ embeds: [shopEmbed('💠 Kundenstatus aktualisiert', `Du hast jetzt **${loyaltyStatus.level.label}** mit **${loyaltyStatus.discount}% Stammkundenrabatt** für zukünftige Bestellungen.`)] }).catch(() => {});
+  }
+  return loyaltyStatus;
+}
+
+async function setOrderStatus(guild, orderId, status, actorId) {
+  const lockKey = `order-status:${guild.id}:${orderId}`;
+  if (!acquireSellingActionLock(lockKey)) throw new Error('Für diese Bestellung wird gerade bereits ein Status verarbeitet.');
+  try {
+    const allowed = new Set(['pending', 'paid', 'processing', 'delivered', 'disputed']);
+    if (!allowed.has(status)) throw new Error('Ungültiger Bestellstatus.');
+    if (isSellingActionLocked(`delivery:${guild.id}:${orderId}`) && status !== 'delivered') throw new Error('Während einer laufenden Lieferung kann der Status nicht geändert werden.');
+
+    if (status === 'delivered') {
+      const snapshot = getGuildShopData(guild.id).data.orders[orderId];
+      if (!snapshot) throw new Error('Bestellung nicht gefunden.');
+      if (snapshot.closedAt) throw new Error('Diese Bestellung ist bereits geschlossen.');
+      if (!snapshot.paidAt) throw new Error('Vor der Lieferung muss die Zahlung bestätigt sein.');
+      if (!Number.isFinite(Number(snapshot.finalPrice ?? snapshot.basePrice))) throw new Error('Vor der Lieferung muss ein gültiger Preis gesetzt sein.');
+      const deliveryLock = `delivery:${guild.id}:${orderId}`;
+      if (!acquireSellingActionLock(deliveryLock)) throw new Error('Für diese Bestellung läuft bereits eine Lieferung.');
+      try {
+        return await deliverOrder(guild, orderId, actorId);
+      } finally {
+        releaseSellingActionLock(deliveryLock);
+      }
+    }
+
+    const { store, data } = getGuildShopData(guild.id);
+    const order = data.orders[orderId];
+    if (!order) throw new Error('Bestellung nicht gefunden.');
+    if (order.closedAt) throw new Error('Diese Bestellung ist bereits geschlossen.');
+    if (order.acceptedAt) throw new Error('Diese Bestellung wurde vom Kunden bereits angenommen.');
+    if (status === 'pending' && order.paidAt) throw new Error('Eine bereits bezahlte Bestellung kann nicht auf Zahlung offen zurückgesetzt werden.');
+    if (status === 'paid' && !Number.isFinite(Number(order.finalPrice ?? order.basePrice))) throw new Error('Vor der Zahlungsbestätigung muss ein gültiger Preis gesetzt sein.');
+    if (status === 'processing' && !order.paidAt) throw new Error('Die Bestellung muss zuerst als bezahlt markiert werden.');
+
+    if (status === 'paid' && !order.paidAt) redeemCouponForPaidOrder(data, order);
+    order.status = status;
+    if (status === 'paid') order.paidAt ||= Date.now();
+    if (status === 'processing') order.processingAt ||= Date.now();
+    if (status === 'disputed') order.disputedAt ||= Date.now();
+    order.updatedAt = Date.now();
+
+    // Persist payment/coupon state before any Discord API await. This prevents a
+    // second interaction from redeeming the last coupon use in the same process.
+    saveSellingStore(store);
+
+    await refreshOrderStatusPanel(guild, data).catch(() => {});
+    const channel = order.channelId ? await guild.channels.fetch(order.channelId).catch(() => null) : null;
+    if (channel?.isTextBased()) {
+      await channel.send({
+        embeds: [shopEmbed(`📊 Status aktualisiert • ${order.id}`, `Neuer Status: **${orderStatusLabel(status)}**\nGeändert von <@${actorId}>.`)],
+        allowedMentions: { parse: [] },
+      }).catch(() => {});
+    }
+    await logSelling(guild, `📊 ${order.id} • ${orderStatusLabel(status)}`, `<@${actorId}> hat den Bestellstatus geändert.`);
+    return { order };
+  } finally {
+    releaseSellingActionLock(lockKey);
+  }
 }
 
 async function requestRevision(interaction, orderId) {
+  const lockKey = `revision:${interaction.guildId}:${orderId}`;
+  if (!acquireSellingActionLock(lockKey)) { await interaction.reply({ content: '⏳ Eine Revision wird bereits verarbeitet.', ephemeral: true }).catch(() => {}); return; }
+  try {
   const { store, data } = getGuildShopData(interaction.guildId);
   const order = data.orders[orderId];
   if (!order) {
     await interaction.reply({ content: '❌ Bestellung nicht gefunden.', ephemeral: true });
     return;
   }
-  if (interaction.user.id !== order.userId && !canHandleSellingTicket(interaction.member)) {
+  if (isSellingActionLocked(`delivery:${interaction.guildId}:${orderId}`) || isSellingActionLocked(`order-status:${interaction.guildId}:${orderId}`)) {
+    await interaction.reply({ content: '⏳ Für diese Bestellung läuft gerade eine Lieferung oder Statusänderung. Bitte versuche es gleich erneut.', ephemeral: true });
+    return;
+  }
+  const staff = canHandleSellingTicket(interaction.member);
+  const customer = isOrderCustomer(interaction, order);
+  if (!customer && !staff) {
     await interaction.reply({ content: '❌ Du darfst für diese Bestellung keine Revision anfragen.', ephemeral: true });
+    return;
+  }
+  if (customer && (!isOrderDeliveryContext(interaction, order) || !order.deliveredAt || order.status !== 'delivered' || !orderHasDeliveredFile(order) || order.acceptedAt)) {
+    await interaction.reply({ content: '❌ Eine Revision kann nur im privaten Kundenbereich nach einer aktiven Lieferung und vor der Abnahme angefordert werden.', ephemeral: true });
+    return;
+  }
+  if (order.status === 'processing' && order.lastRevisionAt) {
+    await interaction.reply({ content: '⏳ Eine Revision ist bereits offen. Warte bitte auf die neue Lieferung.', ephemeral: true });
     return;
   }
   if (Number(order.revisionsRemaining || 0) <= 0) {
@@ -1854,18 +2118,69 @@ async function requestRevision(interaction, orderId) {
   order.revisionsRemaining = Number(order.revisionsRemaining || 0) - 1;
   order.status = 'processing';
   order.lastRevisionAt = Date.now();
+  order.deliveryReadyAt = null;
+  order.updatedAt = Date.now();
   saveSellingStore(store);
   await interaction.reply({
-    content: `🔄 Revision für **${order.id}** wurde registriert. Verbleibend: **${order.revisionsRemaining}**.\nBitte beschreibe die gewünschte Änderung jetzt möglichst genau im Ticket.`,
+    content: `🔄 Revision für **${order.id}** wurde registriert. Verbleibend: **${order.revisionsRemaining}**.\nBitte beschreibe die gewünschte Änderung jetzt möglichst genau.`,
   });
+  if (interaction.message?.editable) await interaction.message.edit({ components: customerDeliveryRows(order, true) }).catch(() => {});
   await logSelling(interaction.guild, `🔄 Revision • ${order.id}`, `<@${interaction.user.id}> hat eine Revision angefordert. Verbleibend: **${order.revisionsRemaining}**.`);
+  } finally {
+    releaseSellingActionLock(lockKey);
+  }
+}
+
+function isOrderTicketContext(interaction, order) {
+  return Boolean(order?.channelId && interaction?.channelId && String(order.channelId) === String(interaction.channelId));
+}
+
+function isOrderDeliveryContext(interaction, order) {
+  if (!interaction?.channelId || !order) return false;
+  if (order.deliveryChannelId && String(order.deliveryChannelId) === String(interaction.channelId)) return true;
+  const topic = String(interaction.channel?.topic || '');
+  return topic.includes(`selling-delivery:${order.id}`) && topic.includes(`selling-owner:${order.userId}`);
+}
+
+function orderHasDeliveredFile(order) {
+  return Boolean(order?.deliveryReadyAt && (order?.deliveryFileUrl || (Array.isArray(order?.deliveryFiles) && order.deliveryFiles.length)));
+}
+
+function isOrderCustomer(interaction, order) {
+  if (!interaction?.user?.id || !order) return false;
+  const userId = String(interaction.user.id);
+  if (String(order.userId || '') === userId) return true;
+
+  // Fallback for existing v5.8.1 delivery channels: the channel topic stores
+  // the customer ID explicitly. This keeps old orders usable after upgrading.
+  const topic = String(interaction.channel?.topic || '');
+  const ownerMatch = topic.match(/(?:^|\|)selling-owner:(\d{15,25})(?:\||$)/);
+  const deliveryMatch = topic.match(/(?:^|\|)selling-delivery:([^|]+)(?:\||$)/);
+  if (ownerMatch?.[1] === userId && deliveryMatch?.[1] === String(order.id)) return true;
+  return false;
+}
+
+function customerDeliveryRows(order, includeReview = true) {
+  const ready = Boolean(order.deliveredAt && order.status === 'delivered' && orderHasDeliveredFile(order));
+  const accepted = Boolean(order.acceptedAt);
+  const rows = [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`selling_accept:${order.id}`).setLabel(accepted ? 'Produkt akzeptiert' : 'Produkt akzeptieren').setEmoji('✅').setStyle(ButtonStyle.Success).setDisabled(!ready || accepted),
+    new ButtonBuilder().setCustomId(`selling_revision:${order.id}`).setLabel(`Änderung anfordern (${Math.max(0, Number(order.revisionsRemaining || 0))})`).setEmoji('🔄').setStyle(ButtonStyle.Secondary).setDisabled(!ready || accepted || Number(order.revisionsRemaining || 0) <= 0),
+    new ButtonBuilder().setCustomId(`selling_portfolio_consent:${order.id}`).setLabel(order.portfolioConsentAt ? 'Portfolio freigegeben' : 'Portfolio erlauben').setEmoji('🖼️').setStyle(ButtonStyle.Secondary).setDisabled(!accepted || Boolean(order.portfolioConsentAt)),
+  )];
+  if (includeReview) {
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`selling_review_open:${order.id}`).setLabel(order.reviewSubmitted ? 'Bereits bewertet' : 'Bewertung abgeben').setEmoji('⭐').setStyle(ButtonStyle.Success).setDisabled(!accepted || Boolean(order.reviewSubmitted)),
+    ));
+  }
+  return rows;
 }
 
 async function openReviewModal(interaction, orderId) {
   const { data } = getGuildShopData(interaction.guildId);
   const order = data.orders[orderId];
-  if (!order || order.userId !== interaction.user.id || !order.deliveredAt) {
-    await interaction.reply({ content: '❌ Du kannst diese Bestellung nicht bewerten.', ephemeral: true });
+  if (!order || !isOrderCustomer(interaction, order) || !isOrderDeliveryContext(interaction, order) || !order.deliveredAt || !order.acceptedAt) {
+    await interaction.reply({ content: '❌ Du kannst diese Bestellung nicht bewerten. Öffne die Bewertung bitte im zugehörigen privaten Kundenbereich.', ephemeral: true });
     return;
   }
   if (order.reviewSubmitted || data.reviews[orderId]) {
@@ -1899,6 +2214,9 @@ async function openReviewModal(interaction, orderId) {
 }
 
 async function submitReview(interaction, orderId) {
+  const lockKey = `review:${interaction.guildId}:${orderId}`;
+  if (!acquireSellingActionLock(lockKey)) { await interaction.reply({ content: '⏳ Diese Bewertung wird bereits verarbeitet.', ephemeral: true }).catch(() => {}); return; }
+  try {
   const stars = Number(interaction.fields.getTextInputValue('stars'));
   const text = interaction.fields.getTextInputValue('text').trim();
   if (!Number.isInteger(stars) || stars < 1 || stars > 5) {
@@ -1908,8 +2226,8 @@ async function submitReview(interaction, orderId) {
 
   const { store, data } = getGuildShopData(interaction.guildId);
   const order = data.orders[orderId];
-  if (!order || order.userId !== interaction.user.id || !order.deliveredAt) {
-    await interaction.reply({ content: '❌ Bestellung nicht gefunden oder nicht bewertbar.', ephemeral: true });
+  if (!order || !isOrderCustomer(interaction, order) || !isOrderDeliveryContext(interaction, order) || !order.deliveredAt || !order.acceptedAt) {
+    await interaction.reply({ content: '❌ Bestellung nicht gefunden oder nicht bewertbar. Nutze bitte den Button in deinem privaten Kundenbereich.', ephemeral: true });
     return;
   }
   if (order.reviewSubmitted || data.reviews[orderId]) {
@@ -1942,6 +2260,9 @@ async function submitReview(interaction, orderId) {
     }).catch(() => {});
   }
   await interaction.reply({ content: '⭐ Danke! Deine Bewertung wurde veröffentlicht.', ephemeral: true });
+  } finally {
+    releaseSellingActionLock(lockKey);
+  }
 }
 
 async function handleFaqButton(interaction, key) {
@@ -1956,6 +2277,9 @@ async function handleFaqButton(interaction, key) {
 
 async function archiveAndCloseSupport(interaction) {
   if (!interaction.inGuild() || !interaction.channel) return;
+  const lockKey = `support-close:${interaction.guildId}:${interaction.channelId}`;
+  if (!acquireSellingActionLock(lockKey)) { await interaction.reply({ content: '⏳ Dieses Ticket wird bereits geschlossen.', ephemeral: true }).catch(() => {}); return; }
+  try {
   const ownerMatch = String(interaction.channel.topic || '').match(/selling-owner:(\d+)/);
   const ownerId = ownerMatch?.[1] || null;
   if (interaction.user.id !== ownerId && !canHandleSellingTicket(interaction.member)) {
@@ -1966,6 +2290,9 @@ async function archiveAndCloseSupport(interaction) {
   await archiveSellingTranscript(interaction.channel, 'Support-Transcript', `Geschlossen von <@${interaction.user.id}>`).catch(() => {});
   await logSelling(interaction.guild, '🔒 Support geschlossen', `<@${interaction.user.id}> hat <#${interaction.channel.id}> geschlossen.`);
   setTimeout(() => interaction.channel.delete(`Selling Support geschlossen von ${interaction.user.tag}`).catch(() => {}), 2500);
+  } finally {
+    setTimeout(() => releaseSellingActionLock(lockKey), 5000);
+  }
 }
 
 async function handleOrderTicketButton(interaction) {
@@ -1981,6 +2308,7 @@ async function handleOrderTicketButton(interaction) {
   }
 
   if (interaction.customId.startsWith('selling_claim:')) {
+    if (!isOrderTicketContext(interaction, order) || order.closedAt) { await interaction.reply({ content: '❌ Dieser Button gehört nicht mehr zu einem aktiven Bestell-Ticket.', ephemeral: true }); return; }
     if (!canHandleSellingTicket(interaction.member)) {
       await interaction.reply({ content: '❌ Nur das Shop-Team kann Bestellungen übernehmen.', ephemeral: true });
       return;
@@ -1994,14 +2322,19 @@ async function handleOrderTicketButton(interaction) {
   }
 
   if (interaction.customId.startsWith('selling_status:')) {
+    if (!isOrderTicketContext(interaction, order) || order.closedAt) { await interaction.reply({ content: '❌ Dieser Button gehört nicht mehr zu einem aktiven Bestell-Ticket.', ephemeral: true }); return; }
     if (!canHandleSellingTicket(interaction.member)) {
       await interaction.reply({ content: '❌ Nur das Shop-Team kann Bestellstatus ändern.', ephemeral: true });
       return;
     }
     const status = String(interaction.customId).split(':')[2];
     await interaction.deferReply({ ephemeral: true });
-    await setOrderStatus(interaction.guild, id, status, interaction.user.id);
-    await interaction.editReply(`✅ **${id}** ist jetzt **${orderStatusLabel(status)}**.`);
+    try {
+      await setOrderStatus(interaction.guild, id, status, interaction.user.id);
+      await interaction.editReply(`✅ **${id}** ist jetzt **${orderStatusLabel(status)}**.`);
+    } catch (error) {
+      await interaction.editReply(`❌ ${String(error?.message || error).slice(0, 1200)}`);
+    }
     return;
   }
 
@@ -2011,12 +2344,16 @@ async function handleOrderTicketButton(interaction) {
   }
 
   if (interaction.customId.startsWith('selling_dispute:')) {
+    if (isSellingActionLocked(`delivery:${interaction.guildId}:${id}`) || isSellingActionLocked(`order-status:${interaction.guildId}:${id}`)) { await interaction.reply({ content: '⏳ Die Bestellung wird gerade verarbeitet. Warte bitte kurz.', ephemeral: true }); return; }
+    if (!isOrderTicketContext(interaction, order) || order.closedAt) { await interaction.reply({ content: '❌ Dieser Button gehört nicht mehr zu einem aktiven Bestell-Ticket.', ephemeral: true }); return; }
     if (interaction.user.id !== order.userId && !canHandleSellingTicket(interaction.member)) {
       await interaction.reply({ content: '❌ Keine Berechtigung für diese Bestellung.', ephemeral: true });
       return;
     }
+    if (order.status === 'disputed') { await interaction.reply({ content: '⚠️ Diese Bestellung ist bereits als Streitfall markiert.', ephemeral: true }); return; }
     order.status = 'disputed';
     order.disputedAt = Date.now();
+    order.updatedAt = Date.now();
     saveSellingStore(store);
     await interaction.reply({ content: `⚠️ Bestellung **${id}** wurde als **Streitfall / Problem** markiert. Das Management kann den Vorgang nun gezielt prüfen.` });
     const internal = findSellingTextChannel(interaction.guild, '📦・bestellungen');
@@ -2026,10 +2363,15 @@ async function handleOrderTicketButton(interaction) {
   }
 
   if (interaction.customId.startsWith('selling_close:')) {
-    if (interaction.user.id !== order.userId && !canHandleSellingTicket(interaction.member)) {
-      await interaction.reply({ content: '❌ Du darfst dieses Ticket nicht schließen.', ephemeral: true });
+    if (!isOrderTicketContext(interaction, order) || order.closedAt) { await interaction.reply({ content: '❌ Dieses Bestell-Ticket ist nicht mehr aktiv.', ephemeral: true }); return; }
+    if (!canHandleSellingTicket(interaction.member)) {
+      await interaction.reply({ content: '❌ Bestell-Tickets können nur vom Shop-Team geschlossen werden. So bleibt die Bestellhistorie konsistent.', ephemeral: true });
       return;
     }
+    const closeLock = `order-close:${interaction.guildId}:${id}`;
+    if (!acquireSellingActionLock(closeLock)) { await interaction.reply({ content: '⏳ Dieses Bestell-Ticket wird bereits geschlossen.', ephemeral: true }).catch(() => {}); return; }
+    try {
+    if (isSellingActionLocked(`delivery:${interaction.guildId}:${id}`) || isSellingActionLocked(`order-status:${interaction.guildId}:${id}`)) { await interaction.reply({ content: '⏳ Für diese Bestellung läuft gerade eine Änderung/Lieferung. Bitte versuche es gleich erneut.', ephemeral: true }); return; }
     await interaction.reply({ content: '📄 Transcript wird gespeichert. Danach wird das Ticket geschlossen …' });
     await archiveSellingTranscript(interaction.channel, `Bestellung ${id}`, `Kunde: <@${order.userId}>\nStatus: ${orderStatusLabel(order.status)}`).catch(() => {});
     order.closedAt = Date.now();
@@ -2038,6 +2380,9 @@ async function handleOrderTicketButton(interaction) {
     await refreshOrderStatusPanel(interaction.guild, data).catch(() => {});
     await logSelling(interaction.guild, `🔒 Bestellung geschlossen • ${id}`, `<@${interaction.user.id}> hat das Ticket geschlossen.`);
     setTimeout(() => interaction.channel.delete(`Selling Bestellung ${id} geschlossen`).catch(() => {}), 2500);
+    } finally {
+      setTimeout(() => releaseSellingActionLock(closeLock), 5000);
+    }
   }
 }
 
@@ -2130,6 +2475,14 @@ async function initializeVerificationMembers(guild, structure) {
 
 async function handleVerifyStart(interaction) {
   if (!interaction.inGuild()) return;
+  const now = Date.now();
+  for (const [key, challenge] of sellingVerifyChallenges) {
+    if (!challenge?.expiresAt || challenge.expiresAt < now) sellingVerifyChallenges.delete(key);
+  }
+  if (!consumeSellingRateLimit(`verify:${interaction.guildId}:${interaction.user.id}`, 8, 10 * 60 * 1000)) {
+    await interaction.reply({ content: '⏳ Zu viele Verifizierungsversuche. Bitte warte einige Minuten.', ephemeral: true });
+    return;
+  }
   const { data } = getGuildShopData(interaction.guildId);
   const verifiedId = data.config.roleIds.verified || findSellingRole(interaction.guild, 'verified')?.id;
   if (verifiedId && interaction.member.roles.cache.has(verifiedId)) {
@@ -2296,6 +2649,18 @@ async function handleAntiNukeAuditEvent(guild, label, types, options = {}) {
   if (!data.security.antiNuke.enabled) return;
   const entry = await recentAuditEntry(guild, types, options);
   if (!entry?.executorId) return;
+
+  // Discord can emit multiple gateway events for one audit-log action. Count each
+  // audit entry only once so legitimate single edits cannot trip the threshold.
+  const auditId = String(entry.id || `${entry.executorId}:${entry.createdTimestamp}:${entry.action}`);
+  const dedupKey = `${guild.id}:${auditId}`;
+  const now = Date.now();
+  for (const [key, ts] of sellingAntiNukeProcessedEntries) {
+    if (now - ts > 60_000) sellingAntiNukeProcessedEntries.delete(key);
+  }
+  if (sellingAntiNukeProcessedEntries.has(dedupKey)) return;
+  sellingAntiNukeProcessedEntries.set(dedupKey, now);
+
   const target = options.targetText || (entry.targetId ? `<@${entry.targetId}> / \`${entry.targetId}\`` : '—');
   await recordAntiNukeAction(guild, entry.executorId, label, target);
 }
@@ -2462,6 +2827,7 @@ async function openPriceModal(interaction, orderId) {
   const { data } = getGuildShopData(interaction.guildId);
   const order = data.orders[orderId];
   if (!order || !canHandleSellingTicket(interaction.member)) { await interaction.reply({ content: '❌ Keine Berechtigung oder Bestellung nicht gefunden.', ephemeral: true }); return; }
+  if (order.closedAt || order.acceptedAt || order.paidAt) { await interaction.reply({ content: '❌ Der Preis kann nach Zahlung, Annahme oder Ticket-Abschluss nicht mehr über dieses Panel geändert werden.', ephemeral: true }); return; }
   const modal = new ModalBuilder().setCustomId(`selling_price_modal:${orderId}`).setTitle(`Preis festlegen • ${orderId}`);
   modal.addComponents(
     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price').setLabel('Endgültiger Grundpreis in EUR').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder(String(order.basePrice ?? '25.00')).setMaxLength(20)),
@@ -2478,6 +2844,7 @@ async function submitPriceModal(interaction, orderId) {
   const { store, data } = getGuildShopData(interaction.guildId);
   const order = data.orders[orderId];
   if (!order) return interaction.reply({ content: '❌ Bestellung nicht gefunden.', ephemeral: true });
+  if (order.closedAt || order.acceptedAt || order.paidAt) return interaction.reply({ content: '❌ Der Preis kann nach Zahlung, Annahme oder Ticket-Abschluss nicht mehr geändert werden.', ephemeral: true });
   order.basePrice = Math.round(amount*100)/100;
   order.finalPrice = Math.round(order.basePrice*(1-effectiveDiscountForOrder(order)/100)*100)/100;
   if (revisionsRaw) order.revisionsRemaining = Math.max(0, Math.min(99, Number.parseInt(revisionsRaw,10) || 0));
@@ -2491,9 +2858,14 @@ async function beginDirectDelivery(interaction, orderId) {
   if (!canHandleSellingTicket(interaction.member)) return interaction.reply({ content: '❌ Nur das Shop-Team kann liefern.', ephemeral: true });
   const { data } = getGuildShopData(interaction.guildId); const order = data.orders[orderId];
   if (!order) return interaction.reply({ content: '❌ Bestellung nicht gefunden.', ephemeral: true });
+  if (order.closedAt || !isOrderTicketContext(interaction, order)) return interaction.reply({ content: '❌ Die Lieferung muss im aktiven zugehörigen Bestell-Ticket gestartet werden.', ephemeral: true });
+  if (order.acceptedAt) return interaction.reply({ content: '❌ Diese Bestellung wurde vom Kunden bereits akzeptiert.', ephemeral: true });
+  if (isSellingActionLocked(`delivery:${interaction.guildId}:${orderId}`) || isSellingActionLocked(`order-status:${interaction.guildId}:${orderId}`)) return interaction.reply({ content: '⏳ Für diese Bestellung läuft gerade bereits eine Lieferung oder Statusänderung.', ephemeral: true });
   if (!order.paidAt) return interaction.reply({ content: '❌ Markiere die Bestellung zuerst als **Bezahlt**.', ephemeral: true });
   if (!Number.isFinite(Number(order.finalPrice ?? order.basePrice))) return interaction.reply({ content: '❌ Setze zuerst den Preis.', ephemeral: true });
-  sellingPendingDeliveries.set(`${interaction.guildId}:${interaction.channelId}:${interaction.user.id}`, { orderId, expiresAt: Date.now()+SELLING_DELIVERY_TTL_MS });
+  const now = Date.now();
+  for (const [key, pending] of sellingPendingDeliveries) { if (!pending?.expiresAt || pending.expiresAt < now) sellingPendingDeliveries.delete(key); }
+  sellingPendingDeliveries.set(`${interaction.guildId}:${interaction.channelId}:${interaction.user.id}`, { orderId, expiresAt: now+SELLING_DELIVERY_TTL_MS });
   await interaction.reply({ content: `📤 **Direkt-Lieferung für ${orderId} aktiv.**\nLade jetzt innerhalb von **5 Minuten** die fertige Produktdatei hier im Ticket hoch. Der Bot übernimmt Datei, Watermark (bei Bildern), Lizenz, PDF-Beleg, Delivery-Channel, Kundenrollen und Abschluss-Workflow automatisch.` });
 }
 
@@ -2504,38 +2876,71 @@ async function downloadAttachmentBuffer(attachment, maxMb = 24) {
 }
 
 async function processDeliveryAttachments(message, orderId) {
-  const { store, data } = getGuildShopData(message.guild.id); const order = data.orders[orderId];
-  if (!order) return;
-  const result = await deliverOrder(message.guild, orderId, message.author.id);
-  const deliveryChannel = result.deliveryChannel;
-  const sentUrls = [];
-  for (const attachment of [...message.attachments.values()].slice(0,5)) {
+  const lockKey = `delivery:${message.guild.id}:${orderId}`;
+  if (!acquireSellingActionLock(lockKey)) throw new Error('Für diese Bestellung läuft bereits eine Lieferung.');
+  try {
+    const before = getGuildShopData(message.guild.id).data.orders[orderId];
+    if (!before) throw new Error('Bestellung nicht gefunden.');
+    if (before.closedAt || before.acceptedAt) throw new Error('Diese Bestellung ist bereits geschlossen oder angenommen.');
+    if (!before.paidAt) throw new Error('Bestellung ist noch nicht als bezahlt markiert.');
+    const result = await deliverOrder(message.guild, orderId, message.author.id);
+    const deliveryChannel = result.deliveryChannel;
+    const fresh = getGuildShopData(message.guild.id);
+    const store = fresh.store;
+    const data = fresh.data;
+    const order = data.orders[orderId];
+    if (!order) throw new Error('Bestellung nach Lieferung nicht mehr gefunden.');
+    const sentUrls = [];
+  for (const attachment of [...message.attachments.values()].slice(0, 5)) {
     try {
       const type = String(attachment.contentType || '').toLowerCase();
       if (type.startsWith('image/')) {
         const watermarked = await watermarkOrderImage(message.guild, data, order, attachment);
-        const sent = await deliveryChannel.send({ content: `📦 **Produktdatei • ${order.id}**\nAutomatisch mit Käufer-/Lizenzkennung versehen.`, files: [new AttachmentBuilder(watermarked.buffer, { name: watermarked.fileName })] });
-        const first = sent.attachments.first(); if (first) sentUrls.push(first.url);
+        const sent = await deliveryChannel.send({ content: `📦 **Produktdatei • ${order.id}**
+Automatisch mit Käufer-/Lizenzkennung versehen.`, files: [new AttachmentBuilder(watermarked.buffer, { name: watermarked.fileName })] });
+        const first = sent.attachments.first();
+        if (first) sentUrls.push(first.url);
       } else {
         const buffer = await downloadAttachmentBuffer(attachment);
         if (buffer) {
           const sent = await deliveryChannel.send({ content: `📦 **Produktdatei • ${order.id}**`, files: [new AttachmentBuilder(buffer, { name: attachment.name || `${order.id}-delivery.bin` })] });
-          const first = sent.attachments.first(); if (first) sentUrls.push(first.url);
+          const first = sent.attachments.first();
+          if (first) sentUrls.push(first.url);
         } else {
-          await deliveryChannel.send({ content: `📦 **Produktdatei • ${order.id}**\n${attachment.url}` }); sentUrls.push(attachment.url);
+          const sent = await deliveryChannel.send({ content: `📦 **Produktdatei • ${order.id}**
+${attachment.url}` });
+          if (sent) sentUrls.push(attachment.url);
         }
       }
-    } catch (error) { await deliveryChannel.send({ content: `⚠️ Datei konnte nicht automatisch verarbeitet werden: ${attachment.name || 'Datei'}\n${attachment.url}` }).catch(()=>{}); sentUrls.push(attachment.url); }
+    } catch (error) {
+      const fallback = await deliveryChannel.send({ content: `⚠️ Automatische Dateiverarbeitung fehlgeschlagen: ${attachment.name || 'Datei'}
+Originaldatei: ${attachment.url}` }).catch(() => null);
+      if (fallback) sentUrls.push(attachment.url);
+    }
   }
-  order.deliveryFiles = sentUrls; order.deliveryFileUrl = sentUrls[0] || null; order.deliveryFileName = message.attachments.first()?.name || null; order.updatedAt = Date.now(); saveSellingStore(store);
-  const customerRows = [new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`selling_accept:${order.id}`).setLabel('Produkt akzeptieren').setEmoji('✅').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`selling_revision:${order.id}`).setLabel(`Änderung anfordern (${Math.max(0, Number(order.revisionsRemaining||0))})`).setEmoji('🔄').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`selling_portfolio_consent:${order.id}`).setLabel('Portfolio erlauben').setEmoji('🖼️').setStyle(ButtonStyle.Secondary),
-  )];
+  order.deliveryFiles = sentUrls;
+  order.deliveryFileUrl = sentUrls[0] || null;
+  order.deliveryFileName = firstAttachmentOf(message.attachments)?.name || null;
+  order.deliveryReadyAt = sentUrls.length ? Date.now() : null;
+  order.updatedAt = Date.now();
+  if (!sentUrls.length) {
+    order.status = 'processing';
+    order.deliveredAt = null;
+    order.deliveryFailedAt = Date.now();
+    saveSellingStore(store);
+    await deliveryChannel.send({ embeds: [shopEmbed('⚠️ Lieferung nicht abgeschlossen', 'Keine Produktdatei konnte erfolgreich im Kundenbereich bereitgestellt werden. Die Bestellung wurde wieder auf **In Bearbeitung** gesetzt. Bitte erneut liefern.')] }).catch(() => {});
+    await refreshOrderStatusPanel(message.guild, data).catch(() => {});
+    throw new Error('Keine Produktdatei konnte erfolgreich im Kundenbereich bereitgestellt werden.');
+  }
+  await finalizeSuccessfulDelivery(message.guild, data, order, message.author.id, deliveryChannel);
+  saveSellingStore(store);
+  const customerRows = customerDeliveryRows(order, true);
   await deliveryChannel.send({ content: `<@${order.userId}>`, embeds: [shopEmbed('✅ Lieferung bereit', 'Bitte prüfe die Datei. Wenn alles passt, bestätige **Produkt akzeptieren**. Falls eine inkludierte Revision nötig ist, nutze **Änderung anfordern**. Mit **Portfolio erlauben** darf das Ergebnis öffentlich als Referenz gezeigt werden.')], components: customerRows, allowedMentions:{users:[order.userId]} });
   await message.reply(`✅ **${order.id} automatisch geliefert.** Kundenbereich: <#${deliveryChannel.id}>`);
   await refreshStaffDashboard(message.guild, data).catch(()=>{}); saveSellingStore(store);
+  } finally {
+    releaseSellingActionLock(lockKey);
+  }
 }
 
 async function handlePendingDeliveryMessage(message) {
@@ -2551,7 +2956,9 @@ async function directDeliverSlash(interaction, orderId, attachment) {
   if (!canHandleSellingTicket(interaction.member)) return interaction.reply({content:'❌ Nur das Shop-Team.',ephemeral:true});
   const { data } = getGuildShopData(interaction.guildId); const order=data.orders[orderId];
   if (!order) return interaction.reply({content:'❌ Bestellung nicht gefunden.',ephemeral:true});
+  if (order.closedAt || order.acceptedAt) return interaction.reply({content:'❌ Diese Bestellung ist bereits geschlossen oder vom Kunden angenommen.',ephemeral:true});
   if (!order.paidAt) return interaction.reply({content:'❌ Bestellung zuerst als Bezahlt markieren.',ephemeral:true});
+  if (!attachment?.id || !attachment?.url) return interaction.reply({content:'❌ Keine gültige Produktdatei gefunden.',ephemeral:true});
   await interaction.deferReply({ephemeral:true});
   const fake = { guild: interaction.guild, author: interaction.user, channel: interaction.channel, attachments: new Map([[attachment.id, attachment]]), reply: async()=>{} };
   await processDeliveryAttachments(fake, orderId);
@@ -2563,7 +2970,7 @@ async function createPortfolioFromOrder(guild, data, order, createdBy) {
   if (!order.portfolioConsentAt) throw new Error('Der Kunde hat die Portfolio-Freigabe noch nicht bestätigt.');
   if (order.portfolioId && data.portfolio[order.portfolioId]) return data.portfolio[order.portfolioId];
   const id=`PF-${String(data.nextPortfolio++).padStart(4,'0')}`;
-  const entry={id,title:`${orderProductLabel(order)} • ${order.id}`,url:order.deliveryFileUrl,category:orderProductLabel(order),description:`Kundenprojekt aus Bestellung ${order.id}`,price:Number(order.finalPrice??order.basePrice),createdAt:Date.now(),createdBy,orderId:order.id};
+  const entry={id,title:`${orderProductLabel(order)} • ${order.id}`,url:order.deliveryFileUrl,category:orderProductLabel(order),description:`Kundenprojekt aus Bestellung ${order.id}`,price:null,createdAt:Date.now(),createdBy,orderId:order.id};
   data.portfolio[id]=entry; order.portfolioId=id;
   const channel=findSellingTextChannel(guild,'🖼️・portfolio');
   if(channel){ const embed=shopEmbed(`🖼️ ${entry.title}`,`**Kategorie:** ${entry.category}\n${entry.description}\n${Number.isFinite(entry.price)?`**Beispielpreis:** ${formatEuro(entry.price)}\n`:''}Portfolio-ID: \`${id}\``); if(/^https?:\/\/.+\.(png|jpe?g|webp|gif)(\?.*)?$/i.test(entry.url)||String(entry.url).includes('cdn.discordapp')) embed.setImage(entry.url); await channel.send({embeds:[embed],components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`selling_portfolio_order:${orderProductKeys(order)[0]||'bundle'}`).setLabel('So etwas bestellen').setEmoji('🛒').setStyle(ButtonStyle.Primary))]}); }
@@ -2571,26 +2978,40 @@ async function createPortfolioFromOrder(guild, data, order, createdBy) {
 }
 
 async function acceptDeliveredOrder(interaction, orderId) {
-  const {store,data}=getGuildShopData(interaction.guildId); const order=data.orders[orderId];
-  if(!order||order.userId!==interaction.user.id||!order.deliveredAt) return interaction.reply({content:'❌ Diese Lieferung kannst du nicht bestätigen.',ephemeral:true});
-  order.acceptedAt ||= Date.now(); order.status='delivered'; saveSellingStore(store);
-  await interaction.reply({content:`✅ Danke! **${orderId}** wurde als angenommen markiert. Das ursprüngliche Bestell-Ticket wird automatisch archiviert.`,components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`selling_review_open:${orderId}`).setLabel('Jetzt bewerten').setEmoji('⭐').setStyle(ButtonStyle.Success))]});
-  const ticket=order.channelId?await interaction.guild.channels.fetch(order.channelId).catch(()=>null):null;
-  if(ticket?.isTextBased()){
-    await archiveSellingTranscript(ticket,`Bestellung ${orderId}`,`Automatisch nach Kunden-Abnahme archiviert.`).catch(()=>{});
-    order.closedAt=Date.now(); saveSellingStore(store);
-    setTimeout(()=>ticket.delete(`Bestellung ${orderId} vom Kunden akzeptiert`).catch(()=>{}),5000);
+  const lockKey = `accept:${interaction.guildId}:${orderId}`;
+  if (!acquireSellingActionLock(lockKey)) return interaction.reply({content:'⏳ Die Annahme wird bereits verarbeitet.',ephemeral:true});
+  try {
+    const {store,data}=getGuildShopData(interaction.guildId); const order=data.orders[orderId];
+    if(!order||!isOrderCustomer(interaction,order)||!isOrderDeliveryContext(interaction,order)||!order.deliveredAt||order.status!=='delivered'||!orderHasDeliveredFile(order)) return interaction.reply({content:'❌ Diese Lieferung kannst du noch nicht bestätigen. Nutze den Button im privaten Kundenbereich, nachdem eine Produktdatei vollständig geliefert wurde.',ephemeral:true});
+    if(order.acceptedAt) return interaction.reply({content:'✅ Diese Bestellung wurde bereits akzeptiert.',ephemeral:true});
+    if(isSellingActionLocked(`delivery:${interaction.guildId}:${orderId}`)) return interaction.reply({content:'⏳ Die Produktdatei wird gerade noch verarbeitet. Bitte versuche es gleich erneut.',ephemeral:true});
+    order.acceptedAt = Date.now(); order.status='delivered'; order.updatedAt=Date.now(); saveSellingStore(store);
+    await interaction.reply({content:`✅ Danke! **${orderId}** wurde als angenommen markiert. Du kannst die Bestellung jetzt direkt bewerten.`,components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`selling_review_open:${orderId}`).setLabel('Jetzt bewerten').setEmoji('⭐').setStyle(ButtonStyle.Success))],ephemeral:true});
+    if (interaction.message?.editable) await interaction.message.edit({ components: customerDeliveryRows(order, true) }).catch(()=>{});
+    const ticket=order.channelId?await interaction.guild.channels.fetch(order.channelId).catch(()=>null):null;
+    if(ticket?.isTextBased()){
+      await archiveSellingTranscript(ticket,`Bestellung ${orderId}`,`Automatisch nach Kunden-Abnahme archiviert.`).catch(()=>{});
+      order.closedAt ||= Date.now(); order.channelId = null; saveSellingStore(store);
+      setTimeout(()=>ticket.delete(`Bestellung ${orderId} vom Kunden akzeptiert`).catch(()=>{}),5000);
+    }
+    await refreshStaffDashboard(interaction.guild,data).catch(()=>{}); saveSellingStore(store);
+  } finally {
+    releaseSellingActionLock(lockKey);
   }
-  await refreshStaffDashboard(interaction.guild,data).catch(()=>{}); saveSellingStore(store);
 }
 
 async function portfolioConsent(interaction, orderId) {
-  const {store,data}=getGuildShopData(interaction.guildId); const order=data.orders[orderId];
-  if(!order||order.userId!==interaction.user.id) return interaction.reply({content:'❌ Keine Berechtigung.',ephemeral:true});
-  order.portfolioConsentAt=Date.now(); saveSellingStore(store);
-  let entry=null; try{entry=await createPortfolioFromOrder(interaction.guild,data,order,interaction.user.id);}catch(error){}
-  saveSellingStore(store);
-  await interaction.reply({content:entry?`🖼️ Danke! Das Ergebnis wurde als **${entry.id}** ins Portfolio übernommen.`:'🖼️ Portfolio-Freigabe gespeichert. Das Team kann das Ergebnis jetzt mit einem Klick übernehmen.',ephemeral:true});
+  const lockKey=`portfolio:${interaction.guildId}:${orderId}`;
+  if(!acquireSellingActionLock(lockKey)) return interaction.reply({content:'⏳ Die Portfolio-Freigabe wird bereits verarbeitet.',ephemeral:true});
+  try {
+    const {store,data}=getGuildShopData(interaction.guildId); const order=data.orders[orderId];
+    if(!order||!isOrderCustomer(interaction,order)||!isOrderDeliveryContext(interaction,order)||!order.acceptedAt||!orderHasDeliveredFile(order)) return interaction.reply({content:'❌ Portfolio kann erst nach erfolgreicher Lieferung und deiner Produkt-Abnahme freigegeben werden.',ephemeral:true});
+    if(order.portfolioConsentAt && order.portfolioId && data.portfolio[order.portfolioId]) return interaction.reply({content:`✅ Portfolio bereits freigegeben: **${order.portfolioId}**.`,ephemeral:true});
+    order.portfolioConsentAt ||= Date.now(); saveSellingStore(store);
+    let entry=null; try{entry=await createPortfolioFromOrder(interaction.guild,data,order,interaction.user.id);}catch(error){}
+    saveSellingStore(store);
+    await interaction.reply({content:entry?`🖼️ Danke! Das Ergebnis wurde als **${entry.id}** ins Portfolio übernommen.`:'🖼️ Portfolio-Freigabe gespeichert. Das Team kann das Ergebnis jetzt übernehmen.',ephemeral:true});
+  } finally { releaseSellingActionLock(lockKey); }
 }
 
 async function handleStaffPanelButton(interaction, action) {
@@ -2618,7 +3039,7 @@ async function sellingHealthCheck(guild,data,selfHeal=false){
   let healed=false;
   if(selfHeal&&(missingChannels.length||missingRoles.length)){
     sellingResetGuilds.add(guild.id);
-    try{const structure=await createSellingStructure(guild);data.config.channelIds=Object.fromEntries(Object.entries(structure.channels||{}).map(([key,ch])=>[key,ch.id]));data.config.roleIds=Object.fromEntries(Object.entries(structure.roleMap||{}).map(([key,role])=>[key,role.id]));await seedSellingServer(structure);healed=true;}finally{setTimeout(()=>sellingResetGuilds.delete(guild.id),1500);}
+    try{const structure=await createSellingStructure(guild);data.config.channelIds=Object.fromEntries(Object.entries(structure.channels||{}).map(([key,ch])=>[key,ch.id]));data.config.roleIds=Object.fromEntries(Object.entries(structure.roleMap||{}).map(([key,role])=>[key,role.id]));await seedSellingServer(structure);await initializeVerificationMembers(guild,structure).catch(()=>{});healed=true;}finally{setTimeout(()=>sellingResetGuilds.delete(guild.id),1500);}
   }
   data.automation.lastHealthAt=Date.now();
   return [`Fehlende kritische Channels: **${missingChannels.length}**${missingChannels.length?` (${missingChannels.join(', ')})`:''}`,`Fehlende kritische Rollen: **${missingRoles.length}**${missingRoles.length?` (${missingRoles.join(', ')})`:''}`,`Self-Heal: **${healed?'ausgeführt':'nicht nötig'}**`,`Bot-Rolle: **${guild.members.me?.roles.highest?.name||'unbekannt'}**`].join('\n');
@@ -2626,17 +3047,20 @@ async function sellingHealthCheck(guild,data,selfHeal=false){
 
 function closeTicketAutomatically(guild,data,order,reason){
   if(!order.channelId||order.closedAt)return;
-  guild.channels.fetch(order.channelId).then(async channel=>{if(!channel?.isTextBased())return;await archiveSellingTranscript(channel,`Bestellung ${order.id}`,reason).catch(()=>{});order.closedAt=Date.now();const {store}=getGuildShopData(guild.id);ensureGuildShopData(store,guild.id).orders[order.id]=order;saveSellingStore(store);setTimeout(()=>channel.delete(reason).catch(()=>{}),4000)}).catch(()=>{});
+  guild.channels.fetch(order.channelId).then(async channel=>{if(!channel?.isTextBased())return;await archiveSellingTranscript(channel,`Bestellung ${order.id}`,reason).catch(()=>{});order.closedAt=Date.now();order.channelId=null;order.updatedAt=Date.now();const {store}=getGuildShopData(guild.id);ensureGuildShopData(store,guild.id).orders[order.id]=order;saveSellingStore(store);setTimeout(()=>channel.delete(reason).catch(()=>{}),4000)}).catch(()=>{});
 }
 
 async function backupSellingStore(){
   if(!fs.existsSync(sellingDataPath))return;
+  // Niemals eine beschädigte JSON-Datei als "gutes" Backup rotieren.
+  JSON.parse(fs.readFileSync(sellingDataPath,'utf8'));
   const dir=path.join(sellingStorageDir,'selling-backups');if(!fs.existsSync(dir))fs.mkdirSync(dir,{recursive:true});
   const file=path.join(dir,`selling-${Date.now()}.json`);fs.copyFileSync(sellingDataPath,file);
   const files=fs.readdirSync(dir).filter(x=>x.endsWith('.json')).sort();for(const old of files.slice(0,Math.max(0,files.length-5)))fs.unlinkSync(path.join(dir,old));
 }
 
 async function runSellingAutomationForGuild(guild){
+  if (sellingResetGuilds.has(guild.id)) return;
   const {store,data}=getGuildShopData(guild.id);if(!data.automation.enabled)return;
   const now=Date.now();data.automation.lastTickAt=now;
   const queue=activeQueue(data);
@@ -2644,15 +3068,16 @@ async function runSellingAutomationForGuild(guild){
   for(const order of Object.values(data.orders||{})){
     if(order.closedAt)continue;
     const ticket=order.channelId?await guild.channels.fetch(order.channelId).catch(()=>null):null;
+    if(order.channelId && !ticket){order.closedAt ||= now; order.orphanedAt ||= now; order.channelId=null; await logAutomation(guild,'🧹 Verwaiste Bestellung bereinigt',`**${order.id}** hatte keinen vorhandenen Bestell-Channel mehr und wurde aus der offenen Ticket-Sperre entfernt.`); continue;}
     if(!order.paidAt&&Number.isFinite(Number(order.finalPrice??order.basePrice))&&now-Number(order.lastPaymentReminderAt||order.createdAt)>=Number(data.automation.reminderHours)*3600000){if(ticket?.isTextBased())await ticket.send({content:`<@${order.userId}> 💳 Erinnerung: Für **${order.id}** ist noch keine Zahlung bestätigt. Wenn du bereits bezahlt hast, sende bitte nur die benötigte Transaktionsreferenz ins Ticket.`,allowedMentions:{users:[order.userId]}}).catch(()=>{});order.lastPaymentReminderAt=now;}
-    if(order.deliveredAt&&!order.acceptedAt&&now-Number(order.deliveredAt)>=Number(data.automation.autoCloseHours)*3600000){closeTicketAutomatically(guild,data,order,`Automatisch ${data.automation.autoCloseHours}h nach Lieferung archiviert.`);}
-    if(order.deliveredAt&&!order.reviewSubmitted&&now-Number(order.lastReviewReminderAt||order.deliveredAt)>=Number(data.automation.reviewReminderHours)*3600000){const delivery=order.deliveryChannelId?await guild.channels.fetch(order.deliveryChannelId).catch(()=>null):null;if(delivery?.isTextBased())await delivery.send({content:`<@${order.userId}> ⭐ Wenn alles passt, kannst du deine Bestellung **${order.id}** noch bewerten.`,components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`selling_review_open:${order.id}`).setLabel('Bewertung abgeben').setEmoji('⭐').setStyle(ButtonStyle.Success))],allowedMentions:{users:[order.userId]}}).catch(()=>{});order.lastReviewReminderAt=now;}
+    if(order.deliveryReadyAt&&!order.acceptedAt&&now-Number(order.deliveryReadyAt)>=Number(data.automation.autoCloseHours)*3600000){closeTicketAutomatically(guild,data,order,`Automatisch ${data.automation.autoCloseHours}h nach Lieferung archiviert.`);}
+    if(order.acceptedAt&&!order.reviewSubmitted&&now-Number(order.lastReviewReminderAt||order.acceptedAt)>=Number(data.automation.reviewReminderHours)*3600000){const delivery=order.deliveryChannelId?await guild.channels.fetch(order.deliveryChannelId).catch(()=>null):null;if(delivery?.isTextBased())await delivery.send({content:`<@${order.userId}> ⭐ Wenn alles passt, kannst du deine Bestellung **${order.id}** noch bewerten.`,components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`selling_review_open:${order.id}`).setLabel('Bewertung abgeben').setEmoji('⭐').setStyle(ButtonStyle.Success))],allowedMentions:{users:[order.userId]}}).catch(()=>{});order.lastReviewReminderAt=now;}
   }
   await refreshOrderStatusPanel(guild,data).catch(()=>{});await refreshStaffDashboard(guild,data).catch(()=>{});await refreshShopCatalog(guild,data).catch(()=>{});
   if(now-Number(data.automation.lastHealthAt||0)>30*60*1000){const report=await sellingHealthCheck(guild,data,true);await logAutomation(guild,'❤️ Automatischer Health Check',report);}
   const dateKey=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Vienna',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
   const hour=Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Vienna',hour:'2-digit',hour12:false}).format(new Date()));
-  if(hour>=19&&data.automation.lastDailyReportDate!==dateKey){data.automation.lastDailyReportDate=dateKey;const open=Object.values(data.orders||{}).filter(o=>!o.closedAt).length;const delivered=Object.values(data.orders||{}).filter(o=>o.deliveredAt&&new Date(o.deliveredAt).toDateString()===new Date().toDateString()).length;await logAutomation(guild,'📈 Tagesbericht',`Offene Bestellungen: **${open}**\nQueue: **${queue.length}**\nHeute geliefert: **${delivered}**\nShop: **${availabilityLabel(data.config.availability)}**`);}
+  if(hour>=19&&data.automation.lastDailyReportDate!==dateKey){data.automation.lastDailyReportDate=dateKey;const open=Object.values(data.orders||{}).filter(o=>!o.closedAt).length;const delivered=Object.values(data.orders||{}).filter(o=>o.deliveredAt&&new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Vienna',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(o.deliveredAt))===dateKey).length;await logAutomation(guild,'📈 Tagesbericht',`Offene Bestellungen: **${open}**\nQueue: **${queue.length}**\nHeute geliefert: **${delivered}**\nShop: **${availabilityLabel(data.config.availability)}**`);}
   saveSellingStore(store);
   if(now-sellingAutomationLastBackupAt>24*3600000){await backupSellingStore().catch(()=>{});sellingAutomationLastBackupAt=now;await logAutomation(guild,'💾 Auto-Backup','Selling-Daten wurden gesichert. Es werden maximal die letzten 5 Backups behalten.');}
 }
@@ -2668,6 +3093,11 @@ async function handleSellCommand(interaction) {
 
   const sub = interaction.options.getSubcommand();
   const { store, data } = getGuildShopData(interaction.guildId);
+  const managementOnly = new Set(['product', 'automation', 'wizard', 'blacklist', 'coupon', 'availability', 'paypal']);
+  if (managementOnly.has(sub) && !canManageSellingShop(interaction.member)) {
+    await interaction.reply({ content: '❌ Diese Shop-Verwaltung ist nur für **Management / Server-Inhaber** verfügbar.', ephemeral: true });
+    return;
+  }
 
   if (sub === 'dashboard') {
     await interaction.reply({ embeds: [dashboardEmbed(interaction.guild, data)], ephemeral: true, allowedMentions: { parse: [] } });
@@ -2744,6 +3174,7 @@ async function handleSellCommand(interaction) {
       return;
     }
     if (action === 'assign') {
+      if (order.closedAt || order.acceptedAt) { await interaction.reply({ content: '❌ Diese Bestellung ist bereits abgeschlossen.', ephemeral: true }); return; }
       order.assignedTo = interaction.user.id;
       order.claimedAt = Date.now();
       saveSellingStore(store);
@@ -2751,6 +3182,7 @@ async function handleSellCommand(interaction) {
       return;
     }
     if (action === 'price') {
+      if (order.closedAt || order.acceptedAt || order.paidAt) { await interaction.reply({ content: '❌ Der Preis kann nach Zahlung oder Abschluss nicht mehr geändert werden.', ephemeral: true }); return; }
       const amount = interaction.options.getNumber('betrag');
       if (amount === null) {
         await interaction.reply({ content: '❌ Für **Preis setzen** musst du `betrag` angeben.', ephemeral: true });
@@ -2771,6 +3203,7 @@ async function handleSellCommand(interaction) {
       return;
     }
     if (action === 'revisions') {
+      if (order.closedAt || order.acceptedAt) { await interaction.reply({ content: '❌ Revisionen können bei einer abgeschlossenen Bestellung nicht mehr geändert werden.', ephemeral: true }); return; }
       const amount = interaction.options.getInteger('anzahl');
       if (amount === null) {
         await interaction.reply({ content: '❌ Für **Revisionen setzen** musst du `anzahl` angeben.', ephemeral: true });
@@ -2785,8 +3218,12 @@ async function handleSellCommand(interaction) {
     const statusMap = { pending: 'pending', paid: 'paid', processing: 'processing', delivered: 'delivered', disputed: 'disputed' };
     if (statusMap[action]) {
       await interaction.deferReply({ ephemeral: true });
-      await setOrderStatus(interaction.guild, id, statusMap[action], interaction.user.id);
-      await interaction.editReply(`✅ **${id}** ist jetzt **${orderStatusLabel(statusMap[action])}**.`);
+      try {
+        await setOrderStatus(interaction.guild, id, statusMap[action], interaction.user.id);
+        await interaction.editReply(`✅ **${id}** ist jetzt **${orderStatusLabel(statusMap[action])}**.`);
+      } catch (error) {
+        await interaction.editReply(`❌ ${String(error?.message || error).slice(0, 1200)}`);
+      }
       return;
     }
   }
@@ -2974,6 +3411,7 @@ async function handleSellCommand(interaction) {
     const id = String(interaction.options.getString('order') || '').trim().toUpperCase();
     const order = data.orders[id];
     if (!order) { await interaction.reply({ content: '❌ Bestellung nicht gefunden.', ephemeral: true }); return; }
+    if (!order.paidAt) { await interaction.reply({ content: '❌ Ein Bestellbeleg wird erst nach bestätigter Zahlung erstellt.', ephemeral: true }); return; }
     const license = ensureOrderLicense(data, order);
     saveSellingStore(store);
     const buffer = await buildReceiptPdf(interaction.guild, order, license);
@@ -2986,6 +3424,8 @@ async function handleSellCommand(interaction) {
     const attachment = interaction.options.getAttachment('datei');
     const order = data.orders[id];
     if (!order) { await interaction.reply({ content: '❌ Bestellung nicht gefunden.', ephemeral: true }); return; }
+    if (!order.paidAt) { await interaction.reply({ content: '❌ Watermarking für Lieferdateien ist erst nach bestätigter Zahlung verfügbar.', ephemeral: true }); return; }
+    if (!attachment?.url) { await interaction.reply({ content: '❌ Bitte lade bei `datei` eine Bilddatei hoch.', ephemeral: true }); return; }
     await interaction.deferReply({ ephemeral: true });
     const result = await watermarkOrderImage(interaction.guild, data, order, attachment);
     saveSellingStore(store);

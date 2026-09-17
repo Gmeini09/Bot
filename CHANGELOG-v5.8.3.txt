@@ -1,0 +1,27 @@
+UNFUGSTIFTER SELLING BOT • v5.8.3
+====================================
+
+FULL STABILITY / SECURITY AUDIT
+
+KRITISCH BEHOBEN
+- /sell deliver funktionierte bei Slash-Attachments nicht zuverlässig, weil eine normale Map wie eine discord.js Collection behandelt wurde.
+- Mehrere asynchrone Abläufe konnten eigene Kopien von selling-data.json laden und später neuere Änderungen überschreiben. v5.8.3 nutzt pro Bot-Prozess einen gemeinsamen Store.
+- Manuelle Lieferung und Datei-Lieferung konnten parallel starten. Delivery-/Status-Locks verhindern doppelte Lieferungen.
+- Zahlung/Coupon-State wird vor externen Discord-awaits gespeichert.
+
+USER-/TICKET-HARDENING
+- Accept gegen Doppelklick geschützt.
+- Review gegen Doppelsubmit geschützt.
+- Revision gegen Doppelklick und parallele Lieferung/Statusänderung geschützt.
+- Streitfall/Ticket-Close während aktiver Lieferung/Statusänderung blockiert.
+- Preisänderung nach bestätigter Zahlung/Annahme/Abschluss blockiert.
+- Auto-Close entfernt die alte channelId korrekt.
+
+SECURITY
+- Anti-Nuke dedupliziert Discord-Audit-Log-Entries; eine reale Aktion wird nicht mehrfach gezählt.
+- Full-Reset und Shop-Automation laufen nicht mehr gegeneinander.
+- Verify-/Pending-Delivery-/Rate-Limit-Memory wird bereinigt.
+
+BETRIEB
+- Store-Migration auf Version 3.
+- Railway: eine Bot-Replica empfohlen/erforderlich bei dateibasierter Persistenz.

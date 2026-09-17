@@ -1,0 +1,23 @@
+UNFUGSTIFTER SELLING BOT v5.8.2
+=================================
+Security- und Abuse-Hardening fuer alle normalen User-Pfade.
+
+BEHOBENE KRITISCHE / HOHE PUNKTE
+1. Delivery-State-Overwrite nach Datei-Upload.
+2. Customer Self-Close von Kauf-Tickets / Bypass der offenen Bestell-Sperre.
+3. Coupon-Exhaustion ohne Zahlung.
+4. Unbezahlte Tickets konnten Queue und Auto-Shopstatus beeinflussen.
+5. Revision vor Lieferung bzw. mehrfach waehrend bereits offener Revision.
+6. Review vor Abnahme bzw. ausserhalb des privaten Delivery-Kontexts.
+7. Produkt-Abnahme ohne sicher gespeicherte Produktdatei.
+8. Portfolio-Freigabe vor Abnahme / Duplicate-Race.
+9. Bestellung inzwischen deaktivierter Produkte ueber alte Modals/Warenkoerbe.
+10. Support-/Verify-/Bestell-Spam ohne ausreichende Rate-Limits.
+
+WEITERE FIXES
+- Statusuebergaenge validiert.
+- Coupon-Einloesung wird bei Zahlung atomarer behandelt.
+- Verwaiste Ticket-Datensaetze werden bereinigt.
+- Review-Reminder und Auto-Close an echten Delivery-/Acceptance-State gekoppelt.
+- Auto-Portfolio zeigt keinen individuell ausgehandelten Kundenpreis mehr.
+- Bestehende v5.8.1 Daten werden beim ersten Start migriert.

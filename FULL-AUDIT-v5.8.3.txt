@@ -1,0 +1,46 @@
+FULL BUG AUDIT • v5.8.3
+========================
+
+Geprüfte Bereiche (statischer Best-Effort-Audit):
+- Bot-Start / Event-Hooks / Command-Registration
+- Full Reset / Self-Heal / Automation-Kollisionen
+- Verify / Rollenvergabe / Challenge-TTL
+- Anti-Nuke / Audit-Log-Zuordnung / Doppelzählung
+- Einzelbestellung / Warenkorb / Duplicate-Order-Sperre
+- Support-Tickets / Ticket-Close / Rate-Limits
+- Coupon-Erstellung, Limits, Einlösung und Zahlung
+- Statusübergänge pending -> paid -> processing -> delivered
+- parallele Status-/Delivery-Aktionen
+- Direct Delivery per Button + MessageCreate
+- /sell deliver Slash-Attachment
+- Lizenz / Delivery-Channel / PDF-Beleg
+- Produkt-Abnahme
+- Revisionen
+- Reviews
+- Portfolio-Freigabe
+- Queue / Auto-Auslastung / Auto-Close / Reminder
+- Datenpersistenz / Railway-Restarts / In-Process-State-Races
+- Health Check / verwaiste Channels
+- Memory-Caches und TTL-Bereinigung
+
+Gefundene und behobene wichtige Fehler:
+1. Slash-Delivery Map/Collection Runtime-Fehler.
+2. Async stale-store overwrite zwischen Lieferung, Review, Automation und anderen Interaktionen.
+3. Parallel laufende manuelle + Datei-Lieferung.
+4. Coupon-/Paid-Persistenz erst nach Discord-await.
+5. Accept-Doppelklick.
+6. Review-Doppelsubmit.
+7. Revision-Doppelklick.
+8. Preisänderung nach Zahlung/Abschluss.
+9. Anti-Nuke-Doppelzählung derselben Audit-Log-ID.
+10. Automation konnte während Full Reset anlaufen.
+11. Auto-Close ließ stale channelId zurück.
+12. Abgelaufene Verify-/Pending-Delivery-/Rate-Limit-Einträge konnten Speicher unnötig belegen.
+13. Tagesreport nutzte nicht konsequent Europe/Vienna beim Lieferdatumsvergleich.
+
+Nicht vollständig lokal simulierbar:
+- Echte Discord REST-/Gateway-Antworten und Rate-Limits.
+- Railway-Volume-Verhalten bei mehreren gleichzeitig laufenden Replicas.
+- Externe Netzwerkfehler beim Download/Upload großer Attachments.
+
+Wichtig: Kein statischer Audit kann mathematisch garantieren, dass keinerlei weiterer Bug existiert. Für Production ist ein E2E-Test auf einem Test-Discord mit mindestens einem Staff- und einem Customer-Account weiterhin empfohlen.

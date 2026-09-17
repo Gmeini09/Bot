@@ -1,0 +1,8 @@
+Unfugstifter Selling Setup v5.8.1 – Customer Flow Fix
+
+FIXES
+- Customer kann Produkt im privaten Delivery-Channel akzeptieren.
+- Customer kann eine gelieferte Bestellung bewerten.
+- Bestehende v5.8 Delivery-Channels werden ueber Topic-Fallback erkannt.
+- Customer-Aktionsbuttons werden bei jeder Liefermethode erzeugt.
+- Button-Zustaende werden nach Akzeptanz/Portfolio-Freigabe/Bewertung aktualisiert.

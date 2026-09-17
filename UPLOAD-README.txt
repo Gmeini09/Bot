@@ -1,4 +1,4 @@
-UNFUGSTIFTER SELLING BOT v5.8 AUTOMATION
+UNFUGSTIFTER SELLING BOT v5.8.3 FULL STABILITY + SECURITY AUDIT
 =========================================
 
 UPLOAD / UPDATE
@@ -87,3 +87,55 @@ HINWEISE
 - Große Dateien können abhängig von Discord-Uploadlimits nicht als Bot-Reupload verarbeitet werden; dann wird der Discord-Dateilink weitergereicht.
 - Der Bot verlangt niemals PayPal-Passwörter oder 2FA-Codes.
 - Für persistente Daten auf Railway wird ein Volume empfohlen.
+
+
+=== v5.8.1 CUSTOMER FLOW FIX ===
+- Produkt akzeptieren funktioniert fuer den echten Bestell-Kunden im privaten Delivery-Channel.
+- Bewertung abgeben funktioniert fuer den echten Bestell-Kunden.
+- Fallback fuer bereits mit v5.8 erstellte Delivery-Channels ueber Channel-Topic.
+- Jede Lieferart erzeugt jetzt denselben Customer-Button-Flow: Akzeptieren, Revision, Portfolio, Bewertung.
+- Bereits akzeptierte/freigegebene/bewertete Aktionen werden im Panel deaktiviert.
+
+
+=== v5.8.2 USER-ABUSE / OPEN-TICKET HARDENING ===
+- Kritischer Delivery-State-Overwrite behoben: Lieferung/Lizenz/Delivery-Channel werden nach Datei-Upload nicht mehr durch alte Daten ueberschrieben.
+- Kunden koennen Kauf-Tickets nicht mehr selbst schliessen und dadurch die Ein-Bestellung-Sperre umgehen.
+- Rabattcodes werden erst bei bestaetigter Zahlung verbraucht, nicht schon beim Ticket-Erstellen.
+- Bestehende v5.8.1 Coupon-/Delivery-Daten werden beim ersten Start migriert.
+- Unbezahlte Tickets zaehlen nicht mehr in Queue/Auto-Auslastung.
+- Review erst nach echter Lieferung + Kunden-Abnahme im richtigen Delivery-Channel.
+- Revision nur nach echter Lieferung, vor Abnahme und maximal eine offene Revision gleichzeitig.
+- Portfolio-Freigabe erst nach Abnahme; Doppel-Klick-Race gegen doppelte Portfolio-Eintraege abgesichert.
+- Produkt-Akzeptieren nur nach erfolgreich uebertragener Produktdatei.
+- Deaktivierte Produkte koennen nicht ueber alte Modals/Warenkoerbe bestellt werden.
+- Support-/Order-Erstellung und Verify gegen Spam/Race-Conditions begrenzt.
+- Streitfall-Button ist idempotent und kann nicht beliebig Logs fluten.
+- Verwaiste offene Bestellungen ohne existierenden Ticket-Channel werden automatisch bereinigt.
+- Auto-Review-Reminder erst nach Produkt-Abnahme.
+- Auto-Close basiert auf tatsaechlich bereitgestellter Produktdatei.
+- Automatisch erstelltes Portfolio veroeffentlicht keinen individuell verhandelten Kundenpreis mehr.
+
+UPDATE VON v5.8/v5.8.1
+- Nur selling-entry.js und package.json ersetzen und Railway neu deployen.
+- /setup server selling ist fuer dieses Bugfix-Update NICHT erforderlich.
+
+
+=== v5.8.3 FULL BUG / STABILITY AUDIT ===
+
+Zusätzlich zu v5.8.2 behoben:
+- /sell deliver Slash-Upload: Map/Collection-Fehler bei Attachment-Zugriff behoben.
+- Selling-State wird pro Bot-Prozess als gemeinsames Objekt gehalten; alte async Snapshots überschreiben keine neueren Änderungen mehr.
+- Zahlung/Coupon wird vor Discord-API-await persistiert; letzte Coupon-Nutzung kann im selben Prozess nicht doppelt eingelöst werden.
+- Statuswechsel, manuelle Lieferung und Datei-Lieferung sind gegeneinander verriegelt.
+- Accept, Review und Revision sind gegen parallele Doppelklicks geschützt.
+- Preis kann nach Zahlung/Abschluss nicht versehentlich nachträglich geändert werden.
+- Anti-Nuke zählt dieselbe Discord-Audit-Log-Aktion nur einmal.
+- Automation pausiert während Full-Reset.
+- Verify-Challenges, Delivery-Pending-Einträge und Rate-Limit-Cache werden bereinigt.
+- Auto-Close entfernt veraltete Bestell-Channel-IDs.
+- Health/Self-Heal initialisiert Verify-Rollen nach Reparatur neu.
+- Tagesreport vergleicht Lieferdatum korrekt in Europe/Vienna.
+
+WICHTIG FÜR RAILWAY:
+- Verwende genau EINE laufende Bot-Replica/Instanz, wenn selling-data.json auf einem Volume genutzt wird. Mehrere gleichzeitig schreibende Bot-Prozesse benötigen eine echte externe Datenbank/Locking-Schicht.
+- Fuer das Update von v5.8.2/v5.8.1 KEIN /setup server selling ausfuehren. Nur selling-entry.js und package.json ersetzen und neu deployen.

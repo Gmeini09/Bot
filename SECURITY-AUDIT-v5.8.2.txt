@@ -1,0 +1,34 @@
+USER-ABUSE AUDIT • v5.8.2
+===========================
+Gepruefte user-ausloesbare Bereiche:
+- Einzelbestellung / Warenkorb / offene Kauf-Tickets
+- Support-Tickets
+- Rabattcodes
+- Queue / Auto-Auslastung
+- Delivery / Kundenbereich
+- Produkt-Abnahme
+- Revisionen
+- Reviews
+- Portfolio-Freigabe
+- Verify
+- Button-/Modal-Doppelklicks und Race-Conditions
+- verwaiste offene Tickets
+
+ERGEBNIS
+Alle in dieser Codepruefung bestaetigten normalen User-Abuse-Pfade wurden in v5.8.2 gepatcht.
+Kein statischer Audit kann garantieren, dass niemals weitere Fehler existieren; fuer maximale Sicherheit sollte die Version zusaetzlich auf einem Test-Discord mit zwei Accounts (Staff + Customer) end-to-end getestet werden.
+
+EMPFOHLENER E2E-TEST
+1. Customer verifiziert sich.
+2. Bestellung erstellen; zweite Bestellung muss blockieren.
+3. Customer versucht Kauf-Ticket zu schliessen -> muss blockieren.
+4. Rabattcode verwenden; Uses darf vor Zahlung nicht steigen.
+5. Bestellung bezahlen -> Uses steigt genau einmal.
+6. Revision vor Lieferung -> blockiert.
+7. Review/Portfolio/Akzeptieren vor Produktdatei -> blockiert.
+8. Staff liefert Datei.
+9. Customer Revision -> genau einmal; zweite Revision bis neuer Lieferung blockiert.
+10. Staff liefert Revision neu.
+11. Customer akzeptiert.
+12. Review + Portfolio einmal moeglich; Doppelklick darf keine Duplikate erzeugen.
+13. Support-Ticket mehrfach schnell oeffnen -> nur ein Ticket / Rate-Limit.
