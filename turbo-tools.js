@@ -18,6 +18,14 @@ const {
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const {
+  loadState: loadChangelogState,
+  resolveDetailedChannel,
+  setDetailedChangelogChannel,
+  setupDetailedChangelogChannel,
+  sendChangelogTest,
+  postStartupRelease,
+} = require('./changelog-enhancer.js');
 
 const ADVANCED_VERSION = 1;
 const ADVANCED_COMMANDS = new Set(['tools']);
@@ -162,7 +170,7 @@ function buildAdvancedCommandDefinitions() {
   return [
     {
       name: 'tools',
-      description: 'Turbo Designs Tools: Panels, Config, Library, Setup-Diff und Systemcheck.',
+      description: 'Turbo Designs Tools: Panels, Config, Library, Setup, Changelogs und Systemcheck.',
       type: 1,
       options: [
         {
@@ -239,6 +247,23 @@ function buildAdvancedCommandDefinitions() {
             { type: 1, name: 'save', description: 'Speichert den aktuellen Server als Referenz-Snapshot.' },
             { type: 1, name: 'check', description: 'Zeigt Änderungen seit dem gespeicherten Snapshot.' },
             { type: 1, name: 'repair', description: 'Stellt Snapshot-Rollen/Channels wieder her; Extras bleiben unangetastet.' },
+          ],
+        },
+        {
+          type: 2,
+          name: 'changelog',
+          description: 'Ausführliche GitHub-Changelogs verwalten.',
+          options: [
+            { type: 1, name: 'status', description: 'Zeigt Status und aktuell verwendeten Changelog-Channel.' },
+            { type: 1, name: 'setup', description: 'Erstellt/verwendet automatisch den Channel 📝・changelogs.' },
+            {
+              type: 1,
+              name: 'channel',
+              description: 'Legt einen vorhandenen Text-Channel als Changelog-Channel fest.',
+              options: [{ type: 7, name: 'channel', description: 'Ziel-Channel für ausführliche Changelogs', required: true, channel_types: [0, 5] }],
+            },
+            { type: 1, name: 'test', description: 'Sendet einen Test-Changelog in den eingestellten Channel.' },
+            { type: 1, name: 'release', description: 'Postet die aktuellen Release Notes erneut.' },
           ],
         },
         {
@@ -843,6 +868,49 @@ async function handleSystemCheck(interaction, client) {
   return interaction.editReply({ embeds: [embed] });
 }
 
+async function handleChangelogTools(interaction, client) {
+  if (!hasManagePermission(interaction)) return replyEphemeral(interaction, '❌ Dafür brauchst du **Server verwalten** oder **Administrator**.');
+  const sub = interaction.options.getSubcommand();
+
+  if (sub === 'status') {
+    const state = loadChangelogState();
+    const channel = await resolveDetailedChannel(client, { createIfMissing: false });
+    const secret = Boolean(process.env.GITHUB_WEBHOOK_SECRET);
+    const repo = process.env.GITHUB_REPO || 'Gmeini09/Bot';
+    return replyEphemeral(interaction, { embeds: [advEmbed(interaction.guild.id, '📝 Detaillierte Changelogs', [
+      `**Status:** ${secret ? '🟢 Webhook aktiv' : '🔴 GITHUB_WEBHOOK_SECRET fehlt'}`,
+      `**Repository:** \`${repo}\``,
+      `**Channel:** ${channel ? `<#${channel.id}>` : 'Nicht eingerichtet'}`,
+      `**Letzter Versand:** ${state.lastDelivery ? `<t:${Math.floor(state.lastDelivery / 1000)}:R>` : 'Noch keiner'}`,
+      '',
+      'GitHub-Diffs und Release Notes werden ausgewertet. Generische Commit-Texte wie **files added** werden nicht mehr als alleinige Beschreibung verwendet.',
+    ].join('\n'))] });
+  }
+
+  if (sub === 'setup') {
+    const result = await setupDetailedChangelogChannel(client, interaction.guild);
+    return replyEphemeral(interaction, `✅ ${result.created ? 'Changelog-Channel erstellt' : 'Vorhandenen Changelog-Channel verwendet'}: ${result.channel}`);
+  }
+
+  if (sub === 'channel') {
+    const channel = interaction.options.getChannel('channel', true);
+    if (!channel?.isTextBased?.()) return replyEphemeral(interaction, '❌ Bitte wähle einen Text-Channel.');
+    await setDetailedChangelogChannel(channel);
+    return replyEphemeral(interaction, `✅ Ausführliche Changelogs werden jetzt in ${channel} gepostet.`);
+  }
+
+  if (sub === 'test') {
+    const channel = await sendChangelogTest(client, interaction.guild);
+    return replyEphemeral(interaction, `✅ Test-Changelog wurde in ${channel} gesendet.`);
+  }
+
+  if (sub === 'release') {
+    const result = await postStartupRelease(client, { force: true });
+    if (!result?.channelId) return replyEphemeral(interaction, '❌ Release-Changelog konnte nicht gesendet werden.');
+    return replyEphemeral(interaction, `✅ Aktuelle Release Notes wurden in <#${result.channelId}> gepostet.`);
+  }
+}
+
 async function advancedInteractionHandler(interaction, client) {
   try {
     if (!interaction.inGuild?.()) return;
@@ -883,6 +951,7 @@ async function advancedInteractionHandler(interaction, client) {
     if (group === 'panel') return handlePanelBuilder(interaction);
     if (group === 'config') return handleConfigCenter(interaction);
     if (group === 'setup') return handleSetupDiff(interaction);
+    if (group === 'changelog') return handleChangelogTools(interaction, client);
     if (!group && sub === 'library') return handleLibrary(interaction);
     if (!group && sub === 'systemcheck') return handleSystemCheck(interaction, client);
   } catch (error) {
@@ -901,7 +970,7 @@ function installAdvancedFeatures(client) {
   client.__turboAdvancedFeaturesInstalled = true;
   nativeClientOn.call(client, Events.InteractionCreate, interaction => advancedInteractionHandler(interaction, client));
   nativeClientOn.call(client, Events.ClientReady, () => {
-    console.log('✅ Turbo Tools v5.9.3 aktiv: /tools (Panel, Config, Library, Setup-Diff, Systemcheck)');
+    console.log('✅ Turbo Tools v5.9.4 aktiv: /tools (Panel, Config, Library, Setup-Diff, Changelog, Systemcheck)');
     setInterval(cleanupPendingPanels, 5 * 60 * 1000).unref?.();
   });
 }

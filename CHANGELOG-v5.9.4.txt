@@ -1,0 +1,28 @@
+Turbo Designs Bot v5.9.4
+
+✨ NEU: AUSFÜHRLICHE CHANGELOGS
+- GitHub-Pushes werden nicht mehr nur mit generischen Commit-Nachrichten wie "files added" angezeigt.
+- Der Bot wertet die tatsächlich geänderten Dateien und GitHub-Diffs aus.
+- Änderungen an Checkout, Bestellungen, Datei-Uploads, Tickets, Lizenzen, Gutscheinen, Commands und Railway-Konfiguration werden automatisch erkannt und verständlich beschrieben.
+- CHANGELOG-*.txt und CHANGELOG-*.md Dateien werden als ausführliche Release Notes verwendet.
+
+📝 CHANGELOG-CHANNEL
+- Ein Channel "📝・changelogs" wird automatisch verwendet oder bei Bedarf erstellt.
+- Der ausgewählte Channel wird persistent im Railway-Volume gespeichert.
+- Der bisherige /github-webhook bleibt gleich. Das neue System fängt ihn ab, damit keine doppelte alte "files added"-Nachricht entsteht.
+
+🧰 NEUE /tools CHANGELOG FUNKTIONEN
+- /tools changelog status → Webhook/Channel/letzten Versand prüfen.
+- /tools changelog setup → 📝・changelogs automatisch erstellen bzw. auswählen.
+- /tools changelog channel → vorhandenen Channel festlegen.
+- /tools changelog test → ausführliche Testmeldung senden.
+- /tools changelog release → aktuelle Release Notes erneut posten.
+
+🚀 DEPLOYMENT
+- Nach dem ersten erfolgreichen Start von v5.9.4 werden diese Release Notes einmal automatisch im Changelog-Channel gepostet.
+- Wiederholte Railway-Restarts erzeugen keine doppelte Release-Meldung, da der Status im /data-Volume gespeichert wird.
+
+✅ BESTEHENDE FIXES BLEIBEN ENTHALTEN
+- Checkout/File-Upload-Kompatibilitätsfix aus v5.9.3.
+- Konsolidierter /tools Command zur Einhaltung des Discord-Limits von 100 Application Commands.
+- Bestehendes Selling-, Ticket-, Lizenz-, Gutschein- und Community-System bleibt erhalten.

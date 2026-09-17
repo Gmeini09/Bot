@@ -1,32 +1,21 @@
-Turbo Designs Bot v5.9.3 FIX
+Turbo Designs Bot v5.9.4 – Detailed Changelog Update
 
-Gefixt:
-1. Warenkorb-Checkout: "Invalid component passed in ModalBuilder.addComponents at index 4"
-2. FileUploadBuilder#setFileTypes Kompatibilität für discord.js 14.27.0
-3. Discord Command-Limit: vorher 104 Commands -> neue Advanced-Funktionen sind in EINEM /tools Command gebündelt
+UPLOAD IN DEN GITHUB-ROOT:
+1. compat-fix.js
+2. changelog-enhancer.js
+3. turbo-tools.js
+4. selling-entry-merged.js
+5. package.json
+6. CHANGELOG-v5.9.4.txt
 
-Hochladen/ersetzen im Repo-Root:
-- compat-fix.js                  (neu)
-- turbo-tools.js                 (neu)
-- selling-entry-merged.js        (ersetzen)
-- package.json                   (ersetzen)
+selling-entry.js und index.js NICHT löschen oder ersetzen.
 
-WICHTIG:
-- selling-entry.js NICHT löschen oder ersetzen.
-- index.js NICHT löschen.
-- advanced-features.js kann im Repo bleiben, wird von v5.9.3 aber nicht mehr geladen.
+Railway startet weiterhin: node selling-entry-merged.js
 
-Neue Commands:
-/tools panel create
-/tools panel list
-/tools panel delete
-/tools config show
-/tools config channel
-/tools config role
-/tools config color
-/tools config library
-/tools library
-/tools setup save
-/tools setup check
-/tools setup repair
-/tools systemcheck
+NACH DEM DEPLOY:
+- /tools changelog status
+- /tools changelog setup   (falls du einen neuen 📝・changelogs Channel willst)
+- /tools changelog test
+
+Der bestehende GitHub Webhook /github-webhook und GITHUB_WEBHOOK_SECRET werden weiterverwendet.
+Das neue Modul ersetzt nur die alte generische Changelog-Ausgabe, nicht den restlichen Webserver.

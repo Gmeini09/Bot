@@ -1,7 +1,7 @@
 {
   "name": "community-allround-bot",
-  "version": "5.9.3",
-  "description": "Turbo Designs selling bot v5.9.3: checkout file-upload fix plus consolidated /tools command to stay within Discord's 100-command limit",
+  "version": "5.9.4",
+  "description": "Turbo Designs selling bot v5.9.4: checkout compatibility, consolidated tools and detailed GitHub-to-Discord changelogs",
   "main": "index.js",
   "scripts": {
     "start": "node selling-entry-merged.js",
