@@ -1,0 +1,14 @@
+Turbo Designs Bot v5.9.2
+
+FIXED
+- Warenkorb-Checkout Crash: FileUploadBuilder#setFileTypes is not a function
+- normaler Produkt-Bestellmodal hatte denselben inkompatiblen Methodenaufruf
+- Compatibility-Layer für discord.js 14.27.0 ergänzt
+
+KEPT
+- /panelbuilder
+- /configcenter
+- /library
+- /setupdiff
+- /systemcheck
+- alle bestehenden v5.9.0 Selling-/Order-/License-/Voucher-/Gift-Funktionen
