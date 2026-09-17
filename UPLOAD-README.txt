@@ -1,156 +1,89 @@
-UNFUGSTIFTER SELLING SETUP v5.7 PROFESSIONAL+ SECURITY
+UNFUGSTIFTER SELLING BOT v5.8 AUTOMATION
+=========================================
 
-INSTALLATION
-1. Lade selling-entry.js in den Hauptordner deines GitHub-Repos Gmeini09/Bot.
-2. Ersetze die bestehende package.json durch die package.json aus diesem Paket.
-3. Railway installiert beim Deploy zusätzlich pdfkit und sharp.
-4. Falls Railway einen eigenen Start Command verwendet: node selling-entry.js
-5. Danach stehen /setup server selling und /sell zur Verfügung.
+UPLOAD / UPDATE
+1. Lade selling-entry.js in den Root deines GitHub-Repositories hoch und ersetze die vorhandene Datei.
+2. Ersetze package.json durch die Version aus diesem ZIP.
+3. Deine bestehende index.js bleibt unverändert bestehen.
+4. Railway muss mit `node selling-entry.js` starten. Das package.json setzt dies bereits als Start-Script.
+5. Nach dem Deploy den Bot einmal vollständig neu starten/deployen, damit die neuen Slash-Commands registriert werden.
 
-WICHTIG: FULL RESET
-/setup server selling ist absichtlich destruktiv.
-- Nur der aktuelle Server-Inhaber kann ihn ausführen.
-- Der Bot braucht Administrator.
-- Die Bot-Rolle muss über allen normalen Rollen stehen.
-- Alle löschbaren alten Channels und normalen Rollen werden entfernt.
-- @everyone sowie Discord-/Bot-/Integrationsrollen bleiben technisch bestehen.
-- Der Command-Channel wird nur für die Abschlussmeldung behalten und danach ebenfalls gelöscht.
-- Das Selling-Datensystem wird beim kompletten Neuaufbau frisch initialisiert.
+ERSTES SETUP
+- /setup server selling
+- Nur der Server-Inhaber darf den Full Reset ausführen.
+- Der Bot braucht Administrator und seine Bot-Rolle muss über allen normalen Rollen stehen.
+- ACHTUNG: Der Full Reset löscht die bisherige normale Channel-/Rollenstruktur und baut den Selling-Server neu auf.
 
-NEU IN v5.7
+DANACH EMPFOHLEN
+1. /sell wizard
+   - PayPal-Adresse
+   - Busy-Limit
+   - Auto-Close-Limit
+   - Reminder-Zeit
+2. /sell product action:Preis setzen ...
+   - Standardpreise eintragen. Dann wird der Preis bei Bestellungen automatisch übernommen.
+3. /sell panel
+   - Erstellt/aktualisiert das zentrale Staff-Control-Panel.
 
-0) VERIFY + ANTI-NUKE
-- Neuer Channel ✅・verifizierung mit Rechenprüfung.
-- Neue Rolle ⏳・NICHT VERIFIZIERT und bestehende ✅・VERIFIZIERT Rolle.
-- Shop, Bestellungen, Community und Support sind erst nach erfolgreicher Verifizierung sichtbar.
-- Neue Mitglieder erhalten automatisch die Unverified-Rolle.
-- Bestehende Mitglieder werden beim Full-Setup ebenfalls als unverifiziert markiert, sofern sie noch nicht verifiziert sind.
-- /sell verify action:status bzw. panel.
-- Anti-Nuke ist standardmäßig aktiviert.
-- Überwacht kritische Channel-, Rollen-, Webhook-, Kick- und Ban-Aktionen über Discord Audit Logs.
-- Standard: 4 kritische Aktionen innerhalb von 10 Sekunden lösen die Quarantäne aus.
-- Menschen: entfernbare Rollen werden entzogen und, sofern möglich, 24 Stunden Timeout gesetzt.
-- Bots: können bei Überschreitung automatisch gekickt werden, sofern Discord dies erlaubt.
-- Server-Inhaber ist immer ausgenommen; zusätzliche Whitelist über /sell antinuke.
-- Neuer interner Channel 🛡️・security-logs.
-- Regelwerk erweitert auf 47 konkrete Punkte inklusive Verify-, Account-Sicherheits- und Anti-Nuke-Regeln.
+NORMALER BESTELLABLAUF
+1. Kunde bestellt über den Shop-Katalog/Warenkorb.
+2. Bot weist den Auftrag automatisch einem passenden Teammitglied zu, soweit möglich.
+3. Im Ticket: Preis-Button benutzen, falls kein Standardpreis gesetzt ist.
+4. Nach PayPal-Zahlung: Bezahlt drücken.
+5. Bearbeitung drücken.
+6. Produkt liefern drücken.
+7. Innerhalb von 5 Minuten die fertige Datei direkt im Ticket hochladen.
+8. Bot erledigt automatisch:
+   - Delivery-Channel
+   - Lizenz
+   - Käuferrollen
+   - PDF-Bestellbeleg
+   - Bild-Watermarking (PNG/JPG/WEBP)
+   - Sales-Log
+   - Kunden-Abnahme
+9. Kunde drückt Produkt akzeptieren oder Änderung anfordern.
+10. Kunde kann Portfolio erlauben. Erst dann darf das Ergebnis automatisch öffentlich ins Portfolio übernommen werden.
+11. Nach Abnahme wird das ursprüngliche Bestell-Ticket samt Transcript automatisch archiviert.
 
-BEREITS AUS v5.6
-
-1) WARENKORB
-- Produktbuttons legen Thumbnails, NVE, Soundpacks, Designs, FiveM Assets und Bundles in einen persistenten Warenkorb.
-- Mehrere verschiedene Produkte können gemeinsam bestellt werden.
-- Warenkorb anzeigen, leeren und Checkout per Button.
-- Checkout erstellt genau eine gemeinsame UF-Bestellnummer.
-- Rabattcode, Wünsche, Referenzen, Termin und Zusatzinfos werden im Checkout erfasst.
-- Produkt-Käuferrollen werden bei Kombibestellungen passend zu allen enthaltenen Produkten vergeben.
-
-2) AUTOMATISCHE WARTESCHLANGE + ETA
-- Jede aktive Bestellung wird automatisch nach Erstellzeit einsortiert.
-- Ticket zeigt Queue-Position und geschätzten Start-/Lieferzeitraum.
-- Öffentliche Übersicht in 📊・bestellstatus.
-- Interner Bereich ⏱️・auftrags-warteschlange.
-- /sell queue zeigt dem Team alle aktiven Aufträge.
-- ETA ist bewusst als Schätzung gekennzeichnet und passt sich an den Shop-Status an.
-
-3) STAMMKUNDEN / VIP
-Automatische Stufen nach gelieferten Bestellungen:
-- Bronze: ab 3 Lieferungen -> 5 %
-- Silber: ab 5 -> 8 %
-- Gold: ab 10 -> 12 %
-- VIP: ab 20 -> 15 %
-
-- Rollen werden automatisch aktualisiert.
-- /sell loyalty user:@Kunde zeigt Status.
-- Rabattcode und Stammkundenrabatt werden standardmäßig nicht gestapelt; automatisch gilt der höhere Rabatt.
-- Der finale Preis wird immer im Ticket bestätigt.
-
-4) PDF-BESTELLBELEG
-- Bei Lieferung wird automatisch ein PDF-Bestell-/Zahlungsbeleg erstellt.
-- Enthält Bestellnummer, Discord-ID, Produkte, PayPal als Zahlungsart, Betrag, Bestell-/Zahlungs-/Lieferdatum und Lizenz-ID.
-- Der Beleg wird nicht pauschal als steuerliche Rechnung bezeichnet.
-- /sell receipt order:UF-0001 erstellt den Beleg erneut.
-
-5) ECHTES BILD-WATERMARKING
-- /sell watermark order:UF-0001 datei:<Bild>
-- Unterstützt Bilddateien wie PNG/JPG/WEBP.
-- Das Bild erhält wiederholte sichtbare Käufer-/Lizenz-Wasserzeichen und eine Kennzeichnung am unteren Rand.
-- Verwendet Bestellnummer, Lizenz-ID und Käufermarker.
-- Bilder bis 20 MB.
-- Ergebnis wird als PNG ausgegeben.
-- Andere Dateitypen werden nicht fälschlich als unsichtbar wassergezeichnet bezeichnet.
-
-REGELWERK
-Der Channel 📜・regelwerk enthält jetzt das vollständige Shop-Regelwerk in mehreren Abschnitten mit 47 konkreten Punkten:
-- Geltungsbereich und Vertragsablauf
-- Warenkorb und verbindliche Bestellungen
-- PayPal und Zahlungsnachweise
-- Rabattcodes und VIP/Stammkundenrabatte
-- PDF-Belege
-- Queue und ETA
-- Lieferung, Abnahme und Revisionen
-- persönliche Nutzungslizenz
-- Mehrnutzer-/Serverlizenzen
-- Lizenztransfer
-- Weiterverkauf strikt verboten
-- Leaken/Teilen strikt verboten
-- Reuploads/Reskins/Kopien verboten
-- Käuferkennung und Watermarking
-- Anti-Leak-Nachverfolgung ohne falsche Überwachungsbehauptungen
-- Konsequenzen bei belegtem Lizenzmissbrauch
-- Support und Streitfälle
-- Refund/Widerruf/Gewährleistung ohne pauschalen Ausschluss gesetzlicher Rechte
-- Blacklist und Betrugsversuche
-- Chargebacks / falsche Zahlungsbehauptungen
-- Speicherung von Bestell-/Ticketdaten
-- Ticket-Transkripte
-- Verhalten und Rechte Dritter
-- Produkt-Updates
-- Regeländerungen und Zustimmung
-- Verifizierungspflicht und Schutz vor Verify-Umgehung
-- Account-Sicherheit
-- Anti-Nuke-Schutz, Quarantäne und Security-Logs
-
-BEREITS AUS v5.5 ENTHALTEN
-- UF-Bestellnummern
-- persistente selling-data.json
-- PayPal-System
-- Preis-/Statusverwaltung
-- Käuferrollen
-- Lizenzen und Käufermarker
-- privater Delivery-Bereich
-- Revisionen
-- Ticket-Transkripte
-- verifizierte Bewertungen
-- Blacklist
-- Rabattcodes
+STAFF CONTROL CENTER
+- Offene Aufträge
+- Offene Zahlungen
+- In Bearbeitung
+- Queue
+- Kunden
+- Lizenzen
 - Portfolio
-- Shop-Status
-- Produkt-Updates
-- Owner-Dashboard
-- Support-Ticket-Typen
-- automatische Slash-Command-Registrierung auf neu beigetretenen Discord-Servern
+- Security
+- Health Check
+- Refresh
 
-WICHTIGE TEAM-COMMANDS
-/sell dashboard
-/sell order
-/sell queue
-/sell receipt
-/sell watermark
-/sell loyalty
-/sell license
-/sell blacklist
-/sell coupon
-/sell portfolio
-/sell availability
-/sell update
-/sell paypal
-/sell verify
-/sell antinuke
+NEUE COMMANDS
+/sell panel
+/sell search query:...
+/sell profile user:@user
+/sell product action:... produkt:... preis:...
+/sell automation action:status|enable|disable
+/sell wizard
+/sell deliver order:UF-0001 datei:<Datei>
 
-ABHÄNGIGKEITEN
-- discord.js 14.27.0
-- ws
-- pdfkit
-- sharp
-- Node.js >= 18.17.0
+PORTFOLIO
+- Manuell: /sell portfolio action:Hinzufügen titel:... datei:<Bild> kategorie:... beschreibung:... preis:...
+- Automatisch: Kunde erlaubt Portfolio nach Lieferung -> der Bot übernimmt das gelieferte Ergebnis automatisch.
+- Kein extra Bild-Link mehr nötig, wenn du direkt eine Datei hochlädst.
+
+AUTOMATION
+- Auto-Assign nach Produkttyp
+- Team-Pings nach Kategorie
+- Automatische Shop-Auslastung abhängig von aktiver Queue
+- Zahlungs-Reminder
+- Review-Reminder
+- Auto-Close alter Delivery-Tickets
+- Health Check / Self-Heal
+- täglicher Automation-Report
+- automatische Backups, maximal 5 Versionen
+
+HINWEISE
+- Direktes Bild-Watermarking funktioniert für Bilddateien. Andere Dateitypen erhalten Lizenz-/Bestellzuordnung und werden in den Delivery-Bereich übertragen.
+- Große Dateien können abhängig von Discord-Uploadlimits nicht als Bot-Reupload verarbeitet werden; dann wird der Discord-Dateilink weitergereicht.
+- Der Bot verlangt niemals PayPal-Passwörter oder 2FA-Codes.
+- Für persistente Daten auf Railway wird ein Volume empfohlen.

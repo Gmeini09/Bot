@@ -1,0 +1,43 @@
+UNFUGSTIFTER SELLING SETUP v5.8 AUTOMATION
+===========================================
+
+Neu:
+- Zentrales Staff Control Center mit Buttons
+- /sell panel, /sell search, /sell profile
+- Produktmanager mit Standardpreisen und Aktiv/Deaktiviert
+- Automatische Preisübernahme bei konfigurierten Produkten
+- Preis-Popup direkt im Bestell-Ticket
+- Auto-Assign an passende Teamrolle / freien Mitarbeiter
+- Kategorieabhängige Team-Pings
+- Direkte Lieferung: Button -> Datei im Ticket hochladen
+- /sell deliver als Attachment-Fallback
+- Automatisches Bild-Watermarking bei Lieferung
+- Automatischer Delivery-Channel + Lizenz + PDF-Beleg + Käuferrollen
+- Kunden-Abnahme per Button
+- Revision per Button
+- Portfolio-Freigabe durch Kunden + automatische Portfolio-Übernahme
+- Portfolio-Bilder können direkt als Attachment hochgeladen werden
+- Produktkatalog mit Preis/Verfügbarkeit
+- Automatische Shop-Auslastung
+- Zahlungs-Reminder und Review-Reminder
+- Auto-Close/Archivierung nach Lieferung
+- Health Check + Self-Heal kritischer Shop-Strukturen
+- Täglicher Automation-Report
+- Rotierende Selling-Daten-Backups (max. 5)
+- /sell wizard für PayPal, Queue-Limits, Reminder und Auto-Close
+- Regelwerk auf 54 Punkte erweitert
+
+Bestehend:
+- Full Reset /setup server selling
+- Verify-System
+- Anti-Nuke
+- Warenkorb
+- PayPal
+- Lizenzen
+- PDF-Belege
+- Stammkunde/VIP
+- Queue/ETA
+- Reviews
+- Blacklist
+- Coupons
+- Support/Tickets/Transkripte

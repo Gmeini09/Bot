@@ -96,6 +96,10 @@ const sellingResetGuilds = new Set();
 const sellingVerifyChallenges = new Map();
 const sellingAntiNukeActions = new Map();
 const SELLING_VERIFY_TTL_MS = 5 * 60 * 1000;
+const sellingPendingDeliveries = new Map();
+const SELLING_DELIVERY_TTL_MS = 5 * 60 * 1000;
+const SELLING_AUTOMATION_TICK_MS = 5 * 60 * 1000;
+let sellingAutomationLastBackupAt = 0;
 
 const sellingStorageDir = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || __dirname;
 if (!fs.existsSync(sellingStorageDir)) fs.mkdirSync(sellingStorageDir, { recursive: true });
@@ -113,12 +117,28 @@ function blankGuildShopData() {
     portfolio: {},
     reviews: {},
     carts: {},
+    products: Object.fromEntries(Object.entries(PRODUCT_TYPES).map(([key, item]) => [key, { enabled: true, price: null, etaDays: item.etaDays, description: null }])),
+    automation: {
+      enabled: true,
+      autoAssign: true,
+      autoAvailability: true,
+      busyAt: 5,
+      closeAt: 12,
+      reminderHours: 24,
+      autoCloseHours: 72,
+      reviewReminderHours: 48,
+      lastTickAt: 0,
+      lastHealthAt: 0,
+      lastDailyReportDate: null,
+    },
     config: {
       paypalEmail: null,
       availability: 'open',
       availabilityNote: null,
       channelIds: {},
       roleIds: {},
+      staffDashboardMessageId: null,
+      catalogMessageId: null,
     },
     security: {
       antiNuke: {
@@ -167,6 +187,11 @@ function ensureGuildShopData(store, guildId) {
   data.portfolio = data.portfolio && typeof data.portfolio === 'object' ? data.portfolio : {};
   data.reviews = data.reviews && typeof data.reviews === 'object' ? data.reviews : {};
   data.carts = data.carts && typeof data.carts === 'object' ? data.carts : {};
+  data.products = data.products && typeof data.products === 'object' ? data.products : {};
+  for (const [key, item] of Object.entries(PRODUCT_TYPES)) {
+    data.products[key] = { enabled: true, price: null, etaDays: item.etaDays, description: null, ...(data.products[key] || {}) };
+  }
+  data.automation = { ...blankGuildShopData().automation, ...(data.automation || {}) };
   data.config = { ...blankGuildShopData().config, ...(data.config || {}) };
   data.config.channelIds = data.config.channelIds && typeof data.config.channelIds === 'object' ? data.config.channelIds : {};
   data.config.roleIds = data.config.roleIds && typeof data.config.roleIds === 'object' ? data.config.roleIds : {};
@@ -508,7 +533,10 @@ function buildSellCommandDefinition() {
           { type: 3, name: 'id', description: 'Portfolio-ID', required: false },
           { type: 3, name: 'titel', description: 'Titel', required: false, max_length: 100 },
           { type: 3, name: 'url', description: 'Bild-/Projekt-Link', required: false, max_length: 1000 },
+          { type: 11, name: 'datei', description: 'Bild direkt hochladen (URL nicht nötig)', required: false },
           { type: 3, name: 'kategorie', description: 'Kategorie', required: false, max_length: 50 },
+          { type: 3, name: 'beschreibung', description: 'Kurze Beschreibung', required: false, max_length: 500 },
+          { type: 10, name: 'preis', description: 'Optionaler Beispielpreis in EUR', required: false, min_value: 0 },
         ],
       },
       {
@@ -556,6 +584,40 @@ function buildSellCommandDefinition() {
             { name: 'Whitelist hinzufügen', value: 'whitelist' }, { name: 'Whitelist entfernen', value: 'unwhitelist' },
           ] },
           { type: 6, name: 'user', description: 'Nutzer für Whitelist', required: false },
+        ],
+      },
+      { type: 1, name: 'panel', description: 'Öffnet/aktualisiert das zentrale Staff-Control-Panel.' },
+      {
+        type: 1, name: 'search', description: 'Sucht Bestellung, Lizenz, Kunde oder Portfolio.', options: [
+          { type: 3, name: 'query', description: 'UF-ID, Lizenz-ID, Portfolio-ID, Discord-ID oder Suchtext', required: true, max_length: 150 },
+        ],
+      },
+      {
+        type: 1, name: 'profile', description: 'Zeigt das vollständige Kundenprofil.', options: [
+          { type: 6, name: 'user', description: 'Kunde', required: true },
+        ],
+      },
+      {
+        type: 1, name: 'product', description: 'Verwaltet Produktpreise und Verfügbarkeit.', options: [
+          { type: 3, name: 'action', description: 'Aktion', required: true, choices: [
+            { name: 'Liste', value: 'list' }, { name: 'Preis setzen', value: 'price' }, { name: 'Aktivieren', value: 'enable' }, { name: 'Deaktivieren', value: 'disable' },
+          ] },
+          { type: 3, name: 'produkt', description: 'Produkt', required: false, choices: productChoices },
+          { type: 10, name: 'preis', description: 'Standardpreis in EUR', required: false, min_value: 0 },
+        ],
+      },
+      {
+        type: 1, name: 'automation', description: 'Verwaltet Shop-Automatisierung.', options: [
+          { type: 3, name: 'action', description: 'Aktion', required: true, choices: [
+            { name: 'Status', value: 'status' }, { name: 'Alles aktivieren', value: 'enable' }, { name: 'Alles pausieren', value: 'disable' },
+          ] },
+        ],
+      },
+      { type: 1, name: 'wizard', description: 'Öffnet den Setup-Wizard für PayPal, Limits und Reminder.' },
+      {
+        type: 1, name: 'deliver', description: 'Liefert eine Datei direkt zu einer Bestellung.', options: [
+          { type: 3, name: 'order', description: 'Bestellnummer', required: true },
+          { type: 11, name: 'datei', description: 'Produktdatei', required: true },
         ],
       },
       {
@@ -867,8 +929,9 @@ async function createSellingStructure(guild) {
   channels.securityLogs = await ensureChannel(guild, categories.team, '🛡️・security-logs', { privateForStaff: true, roleMap, topic: 'Anti-Nuke, Verifizierung und Sicherheitsereignisse.' });
   channels.transcripts = await ensureChannel(guild, categories.team, '📄・transkripte', { privateForStaff: true, roleMap, topic: 'Automatisch gespeicherte Ticket-Transkripte.' });
   channels.blacklist = await ensureChannel(guild, categories.team, '🚫・blacklist', { privateForStaff: true, roleMap, topic: 'Interne Shop-Blacklist und Sperrprotokoll.' });
-  channels.dashboard = await ensureChannel(guild, categories.team, '📊・shop-dashboard', { privateForStaff: true, roleMap, topic: 'Interne Kennzahlen und Shop-Übersicht.' });
+  channels.dashboard = await ensureChannel(guild, categories.team, '📊・shop-dashboard', { privateForStaff: true, roleMap, topic: 'Zentrales Staff-Control-Panel: Bestellungen, Zahlung, Lieferung, Kunden und Automatisierung.' });
   channels.queue = await ensureChannel(guild, categories.team, '⏱️・auftrags-warteschlange', { privateForStaff: true, roleMap, topic: 'Automatische Auftragsreihenfolge, Positionen und ETA.' });
+  channels.automation = await ensureChannel(guild, categories.team, '🤖・automation-log', { privateForStaff: true, roleMap, topic: 'Reminder, Auto-Close, Health-Checks, Backups und automatische Shop-Aktionen.' });
   channels.teamVoice = await ensureChannel(guild, categories.team, '🔊・Team Talk', { type: ChannelType.GuildVoice, privateForStaff: true, roleMap });
 
   return { roleMap, categories, channels };
@@ -942,6 +1005,15 @@ async function seedCompleteRulebook(channel) {
       '**45. Anti-Nuke-Schutz**\nDer Server verwendet einen Anti-Nuke-Schutz. Kritische Aktionen wie massenhaftes Löschen oder Erstellen von Channels/Rollen, auffällige Berechtigungsänderungen, Webhook-Missbrauch, Kicks oder Bans können protokolliert und automatisch bewertet werden.',
       '**46. Automatische Sicherheitsmaßnahmen**\nWird innerhalb kurzer Zeit ein festgelegter Schwellenwert kritischer Aktionen überschritten, kann der ausführende Account automatisch quarantänisiert werden. Dabei können entfernbare Rollen entzogen und eine zeitlich begrenzte Kommunikationssperre gesetzt werden. Der Server-Inhaber und ausdrücklich freigegebene Accounts sind ausgenommen.',
       '**47. Security-Logs und Whitelist**\nSicherheitsereignisse werden intern mit Discord-ID, Aktion und Zeitstempel dokumentiert. Die Anti-Nuke-Whitelist darf ausschließlich für vertrauenswürdige Accounts verwendet werden; sie hebt normale Shop- und Lizenzregeln nicht auf.',
+    ]],
+    ['🤖 09 • Automatisierung, Lieferung & Portfolio', [
+      '**48. Automatisierte Bearbeitung**\nDer Shop kann Aufträge automatisch zuständigen Teamrollen oder freien Mitarbeitern zuweisen, Queue-Positionen berechnen, Shop-Auslastung anpassen und Statusmeldungen aktualisieren. Eine automatische Zuweisung ersetzt keine individuelle Leistungszusage.',
+      '**49. Automatische Erinnerungen**\nBei offenen Zahlungen, ausstehender Abnahme oder fehlender Bewertung können automatisierte Erinnerungen gesendet werden. Diese Nachrichten dienen der Organisation und ändern keine gesetzlichen oder individuell vereinbarten Fristen.',
+      '**50. Direkte digitale Lieferung**\nProduktdateien können automatisiert in einen privaten Kundenbereich übertragen werden. Bei geeigneten Bilddateien kann das System automatisch eine Käufer-, Bestell- und Lizenzkennzeichnung einfügen.',
+      '**51. Kunden-Abnahme und Revision**\nNach Lieferung kann der Käufer die Lieferung bestätigen oder – soweit im Auftrag enthalten – eine Revision anfordern. Die Abnahme dokumentiert, dass die bereitgestellte Lieferung aus Sicht des Käufers akzeptiert wurde; zwingende gesetzliche Rechte bleiben unberührt.',
+      '**52. Automatische Archivierung**\nAbgeschlossene oder längere Zeit nach Lieferung offene Bestell-Tickets können nach vorheriger Dokumentation automatisch archiviert bzw. geschlossen werden. Lizenz- und Delivery-Bereiche können davon getrennt bestehen bleiben.',
+      '**53. Portfolio nur mit Freigabe**\nEin kundenspezifisches Ergebnis wird aus einer Bestellung nur dann automatisch als öffentliche Referenz übernommen, wenn eine entsprechende Portfolio-Freigabe über den vorgesehenen Button erteilt wurde. Die Freigabe gilt nur für das gezeigte Ergebnis und nicht für private Ticketinhalte.',
+      '**54. Health-Checks, Self-Heal und Backups**\nDer Bot kann fehlende kritische Shop-Strukturen erkennen, technische Strukturen wiederherstellen und regelmäßige Sicherungen der Shop-Daten erstellen. Solche technischen Maßnahmen dienen Verfügbarkeit und Nachvollziehbarkeit.',
     ]],
   ];
   for (const [title, rules] of sections) {
@@ -1028,10 +1100,11 @@ async function seedSellingServer(structure) {
   await channels.faq.send({ content: '**Schnellhilfe:**', components: [faqButtons] }).catch(() => {});
 
   await seedIfEmpty(channels.productUpdates, { embeds: [shopEmbed('🔄 Produkt-Updates', 'Hier erscheinen neue Versionen und wichtige Hinweise für bereits gekaufte Produkte. Käufer können über ihre jeweilige Produktrolle gezielt informiert werden.')] });
-  await seedIfEmpty(channels.portfolio, { embeds: [shopEmbed('🖼️ Portfolio', 'Ausgewählte Arbeiten und Referenzen werden hier automatisch über `/sell portfolio` gepflegt.')] });
+  await seedIfEmpty(channels.portfolio, { embeds: [shopEmbed('🖼️ Portfolio', 'Ausgewählte Arbeiten und Referenzen erscheinen hier. Nach einer Lieferung kann das Team das Ergebnis mit einem Klick übernehmen; Bilder können auch direkt über `/sell portfolio` hochgeladen werden.')] });
   await seedIfEmpty(channels.orderStatus, { embeds: [shopEmbed('📊 Bestellstatus', '🟢 **Bestellungen offen**\nNeue Aufträge können aktuell angenommen werden.')] });
-  await seedIfEmpty(channels.dashboard, { embeds: [shopEmbed('📊 Shop-Dashboard', 'Interne Shop-Kennzahlen können mit `/sell dashboard` abgerufen werden.')] });
-  await seedIfEmpty(channels.queue, { embeds: [shopEmbed('⏱️ Auftrags-Warteschlange', 'Die aktuelle interne Queue inklusive geschätzter ETA kann mit `/sell queue` angezeigt werden. Der öffentliche Überblick wird automatisch in 📊・bestellstatus aktualisiert.')] });
+  await seedIfEmpty(channels.dashboard, { embeds: [shopEmbed('🧭 Staff Control Center', 'Dieses Panel wird automatisch aktualisiert. Bestellungen, Zahlungen, Lieferung, Kundenprofile, Queue und Shop-Automatisierung lassen sich über Buttons verwalten.')] });
+  await seedIfEmpty(channels.queue, { embeds: [shopEmbed('⏱️ Auftrags-Warteschlange', 'Die aktuelle interne Queue inklusive geschätzter ETA wird automatisch aktualisiert. Der öffentliche Überblick erscheint zusätzlich in 📊・bestellstatus.')] });
+  await seedIfEmpty(channels.automation, { embeds: [shopEmbed('🤖 Automation Log', 'Hier protokolliert der Bot Reminder, Auto-Close, Auto-Assign, automatische Auslastung, Health-Checks, Self-Heal und Backups.')] });
   await seedIfEmpty(channels.securityLogs, { embeds: [shopEmbed('🛡️ Security Center', 'Der **Anti-Nuke-Schutz ist standardmäßig aktiviert**. Kritische Audit-Log-Aktionen werden bewertet und bei Überschreitung des Schwellenwerts automatisch quarantänisiert.\n\nVerwaltung ausschließlich durch den Server-Inhaber über `/sell antinuke`. Verify-Ereignisse und Anti-Nuke-Maßnahmen werden in diesem Channel dokumentiert.')] });
 }
 
@@ -1097,9 +1170,10 @@ function orderActionRows(order) {
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`selling_claim:${id}`).setLabel('Übernehmen').setEmoji('🙋').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`selling_price:${id}`).setLabel('Preis').setEmoji('💶').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`selling_status:${id}:paid`).setLabel('Bezahlt').setEmoji('💳').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId(`selling_status:${id}:processing`).setLabel('Bearbeitung').setEmoji('🛠️').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`selling_status:${id}:delivered`).setLabel('Geliefert').setEmoji('📦').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`selling_deliver_start:${id}`).setLabel('Produkt liefern').setEmoji('📤').setStyle(ButtonStyle.Success),
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`selling_revision:${id}`).setLabel(`Revision (${Math.max(0, Number(order.revisionsRemaining || 0))})`).setEmoji('🔄').setStyle(ButtonStyle.Secondary),
@@ -1205,6 +1279,7 @@ async function handleCartButton(interaction) {
   if (id.startsWith('selling_cart_add:')) {
     const key = id.split(':')[1];
     if (!PRODUCT_TYPES[key]) return;
+    if (!productConfig(data, key)?.enabled) { await interaction.reply({ content: '🔴 Dieses Produkt ist aktuell nicht bestellbar.', ephemeral: true }); return; }
     const cart = cartForUser(data, interaction.user.id);
     if (!cart.items.includes(key)) cart.items.push(key);
     cart.updatedAt = Date.now();
@@ -1313,6 +1388,9 @@ async function createCartOrderFromModal(interaction) {
     saveSellingStore(store); throw error;
   }
   order.channelId = channel.id;
+  const autoPrice = configuredOrderPrice(data, keys);
+  if (autoPrice !== null) { order.basePrice = autoPrice; order.finalPrice = Math.round(autoPrice * (1 - effectiveDiscountForOrder(order) / 100) * 100) / 100; }
+  await automateNewOrder(interaction.guild, data, order, channel).catch(() => {});
   saveSellingStore(store);
   await channel.send({ content: `<@${interaction.user.id}>`, embeds: [orderInfoEmbed(order, data)], components: orderActionRows(order), allowedMentions: { users: [interaction.user.id] } });
   const internal = findSellingTextChannel(interaction.guild, '📦・bestellungen');
@@ -1328,6 +1406,7 @@ async function showOrderModal(interaction, productKey) {
   if (!product || !interaction.inGuild()) return;
 
   const { data } = getGuildShopData(interaction.guildId);
+  if (!productConfig(data, productKey)?.enabled) { await interaction.reply({ content: '🔴 Dieses Produkt ist aktuell nicht bestellbar.', ephemeral: true }); return; }
   if (data.blacklist[interaction.user.id]) {
     const entry = data.blacklist[interaction.user.id];
     await interaction.reply({
@@ -1489,6 +1568,9 @@ async function createOrderFromModal(interaction, productKey) {
   }
 
   order.channelId = channel.id;
+  const autoPrice = configuredOrderPrice(data, [productKey]);
+  if (autoPrice !== null) { order.basePrice = autoPrice; order.finalPrice = Math.round(autoPrice * (1 - effectiveDiscountForOrder(order) / 100) * 100) / 100; }
+  await automateNewOrder(interaction.guild, data, order, channel).catch(() => {});
   saveSellingStore(store);
 
   await channel.send({
@@ -2228,6 +2310,355 @@ async function handleSellingMemberJoin(member) {
   if (role) await member.roles.add(role, 'Selling Verify: neues Mitglied').catch(() => {});
 }
 
+
+function automationLogChannel(guild) {
+  return findSellingTextChannel(guild, '🤖・automation-log') || findSellingTextChannel(guild, '📋・logs');
+}
+
+async function logAutomation(guild, title, description) {
+  const channel = automationLogChannel(guild);
+  if (channel?.isTextBased()) await channel.send({ embeds: [shopEmbed(title, description)], allowedMentions: { parse: [] } }).catch(() => {});
+}
+
+function productConfig(data, key) {
+  const base = PRODUCT_TYPES[key];
+  if (!base) return null;
+  data.products ||= {};
+  data.products[key] = { enabled: true, price: null, etaDays: base.etaDays, description: null, ...(data.products[key] || {}) };
+  return data.products[key];
+}
+
+function configuredOrderPrice(data, keys) {
+  const unique = [...new Set(keys || [])].filter(key => PRODUCT_TYPES[key]);
+  if (!unique.length) return null;
+  const prices = unique.map(key => { const raw = productConfig(data, key)?.price; return raw === null || raw === undefined || raw === '' ? NaN : Number(raw); });
+  if (prices.some(value => !Number.isFinite(value))) return null;
+  return Math.round(prices.reduce((a, b) => a + b, 0) * 100) / 100;
+}
+
+function teamRoleKeyForProduct(key) {
+  if (key === 'thumbnail' || key === 'grafik' || key === 'nve') return 'designer';
+  if (key === 'soundpack') return 'sound';
+  if (key === 'fivem') return 'developer';
+  return 'support';
+}
+
+async function automateNewOrder(guild, data, order, channel) {
+  if (!data.automation?.enabled) return;
+  const keys = orderProductKeys(order);
+  const roleKeys = [...new Set(keys.map(teamRoleKeyForProduct))];
+  const roles = roleKeys.map(key => findSellingRole(guild, key)).filter(Boolean);
+  if (data.automation.autoAssign) {
+    await guild.members.fetch().catch(() => {});
+    const candidates = guild.members.cache.filter(member => !member.user.bot && roles.some(role => member.roles.cache.has(role.id)));
+    const open = Object.values(data.orders || {}).filter(item => !item.closedAt && !item.deliveredAt);
+    let best = null;
+    let bestCount = Infinity;
+    for (const member of candidates.values()) {
+      const count = open.filter(item => item.assignedTo === member.id).length;
+      if (count < bestCount) { best = member; bestCount = count; }
+    }
+    if (best) {
+      order.assignedTo = best.id;
+      order.claimedAt ||= Date.now();
+      if (channel?.isTextBased()) await channel.send({ content: `🤖 Automatisch zugewiesen an <@${best.id}>.`, allowedMentions: { users: [best.id] } }).catch(() => {});
+    }
+  }
+  const internal = findSellingTextChannel(guild, '📦・bestellungen');
+  if (internal && roles.length) {
+    await internal.send({
+      content: roles.map(role => `<@&${role.id}>`).join(' '),
+      embeds: [shopEmbed(`🔔 Neuer Auftrag • ${order.id}`, `${orderProductLabel(order)}\nTicket: <#${channel.id}>${order.assignedTo ? `\nAuto-Assign: <@${order.assignedTo}>` : ''}`)],
+      allowedMentions: { roles: roles.map(role => role.id), users: order.assignedTo ? [order.assignedTo] : [] },
+    }).catch(() => {});
+  }
+  await logAutomation(guild, '🤖 Neue Bestellung automatisiert', `**${order.id}** • ${orderProductLabel(order)}${order.assignedTo ? `\nZugewiesen an <@${order.assignedTo}>` : '\nKeine passende freie Teamrolle gefunden.'}`);
+}
+
+function staffDashboardRows() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('selling_staff:open').setLabel('Offene Aufträge').setEmoji('📦').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('selling_staff:payment').setLabel('Zahlung offen').setEmoji('💳').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_staff:processing').setLabel('In Bearbeitung').setEmoji('🛠️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_staff:queue').setLabel('Queue').setEmoji('⏱️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_staff:refresh').setLabel('Aktualisieren').setEmoji('🔄').setStyle(ButtonStyle.Success),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('selling_staff:customers').setLabel('Kunden').setEmoji('👥').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_staff:licenses').setLabel('Lizenzen').setEmoji('🔐').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_staff:portfolio').setLabel('Portfolio').setEmoji('🖼️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_staff:security').setLabel('Security').setEmoji('🛡️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_staff:health').setLabel('Health Check').setEmoji('❤️').setStyle(ButtonStyle.Danger),
+    ),
+  ];
+}
+
+async function refreshStaffDashboard(guild, data, forceNew = false) {
+  const channel = findSellingTextChannel(guild, '📊・shop-dashboard');
+  if (!channel) return null;
+  let message = !forceNew && data.config.staffDashboardMessageId
+    ? await channel.messages.fetch(data.config.staffDashboardMessageId).catch(() => null)
+    : null;
+  const payload = { embeds: [dashboardEmbed(guild, data)], components: staffDashboardRows(), allowedMentions: { parse: [] } };
+  if (message) await message.edit(payload).catch(() => { message = null; });
+  if (!message) {
+    message = await channel.send(payload);
+    data.config.staffDashboardMessageId = message.id;
+  }
+  return message;
+}
+
+function catalogRows() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('selling_cart_add:thumbnail').setLabel('Thumbnail +').setEmoji('🖼️').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('selling_cart_add:nve').setLabel('NVE +').setEmoji('🌆').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('selling_cart_add:soundpack').setLabel('Soundpack +').setEmoji('🔊').setStyle(ButtonStyle.Primary),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('selling_cart_add:grafik').setLabel('Design +').setEmoji('🎨').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_cart_add:fivem').setLabel('FiveM +').setEmoji('🚗').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_cart_add:bundle').setLabel('Bundle +').setEmoji('📦').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('selling_cart_view').setLabel('Warenkorb').setEmoji('🛒').setStyle(ButtonStyle.Success),
+    ),
+  ];
+}
+
+async function refreshShopCatalog(guild, data) {
+  const channel = findSellingTextChannel(guild, '🛒・bestellen');
+  if (!channel) return null;
+  const lines = Object.entries(PRODUCT_TYPES).map(([key, item]) => {
+    const cfg = productConfig(data, key);
+    return `${cfg.enabled ? '🟢' : '🔴'} ${item.emoji} **${item.label}** • ${cfg.price !== null && cfg.price !== undefined && cfg.price !== '' && Number.isFinite(Number(cfg.price)) ? formatEuro(cfg.price) : 'Preis im Ticket'} • ETA ca. ${cfg.etaDays || item.etaDays} Tag(e)`;
+  }).join('\n');
+  const payload = { embeds: [shopEmbed('🛒 Shop-Katalog', `${lines}\n\nProdukte mit 🟢 können direkt in den Warenkorb gelegt werden. Wenn ein Standardpreis gesetzt ist, übernimmt der Bot ihn automatisch in die Bestellung.`)], components: catalogRows() };
+  let message = data.config.catalogMessageId ? await channel.messages.fetch(data.config.catalogMessageId).catch(() => null) : null;
+  if (message) await message.edit(payload).catch(() => { message = null; });
+  if (!message) { message = await channel.send(payload); data.config.catalogMessageId = message.id; }
+  return message;
+}
+
+function customerProfileEmbed(data, user) {
+  const orders = Object.values(data.orders || {}).filter(order => order.userId === user.id).sort((a,b) => Number(b.createdAt)-Number(a.createdAt));
+  const licenses = Object.values(data.licenses || {}).filter(lic => lic.userId === user.id);
+  const reviews = Object.values(data.reviews || {}).filter(review => review.userId === user.id);
+  const spent = orders.filter(order => order.paidAt).reduce((sum, order) => sum + Number(order.finalPrice ?? order.basePrice ?? 0), 0);
+  const loyalty = loyaltyForUser(data, user.id);
+  return shopEmbed(`👤 Kundenprofil • ${user.username}`, [
+    `**Discord:** <@${user.id}> • \`${user.id}\``,
+    `**Bestellungen:** ${orders.length} • geliefert: ${orders.filter(o=>o.deliveredAt).length}`,
+    `**Erfasster Umsatz:** ${formatEuro(spent)}`,
+    `**Lizenzen:** ${licenses.length}`,
+    `**Bewertungen:** ${reviews.length}`,
+    `**Status:** ${loyalty.level ? `${loyalty.level.label} (${loyalty.discount}% Rabatt)` : 'Standardkunde'}`,
+    `**Blacklist:** ${data.blacklist[user.id] ? `Ja • ${data.blacklist[user.id].reason || 'ohne Grund'}` : 'Nein'}`,
+    '',
+    orders.slice(0,8).map(o => `• ${o.id} • ${orderStatusLabel(o.status)} • ${orderProductLabel(o)}`).join('\n') || '*Noch keine Bestellungen.*',
+  ].join('\n'));
+}
+
+async function openPriceModal(interaction, orderId) {
+  const { data } = getGuildShopData(interaction.guildId);
+  const order = data.orders[orderId];
+  if (!order || !canHandleSellingTicket(interaction.member)) { await interaction.reply({ content: '❌ Keine Berechtigung oder Bestellung nicht gefunden.', ephemeral: true }); return; }
+  const modal = new ModalBuilder().setCustomId(`selling_price_modal:${orderId}`).setTitle(`Preis festlegen • ${orderId}`);
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price').setLabel('Endgültiger Grundpreis in EUR').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder(String(order.basePrice ?? '25.00')).setMaxLength(20)),
+    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('revisions').setLabel('Inkludierte Revisionen').setStyle(TextInputStyle.Short).setRequired(false).setPlaceholder(String(order.revisionsRemaining ?? 1)).setMaxLength(2)),
+  );
+  await interaction.showModal(modal);
+}
+
+async function submitPriceModal(interaction, orderId) {
+  if (!canHandleSellingTicket(interaction.member)) return interaction.reply({ content: '❌ Nur das Shop-Team.', ephemeral: true });
+  const amount = Number(String(interaction.fields.getTextInputValue('price')).replace(',', '.'));
+  const revisionsRaw = interaction.fields.getTextInputValue('revisions').trim();
+  if (!Number.isFinite(amount) || amount < 0) return interaction.reply({ content: '❌ Ungültiger Preis.', ephemeral: true });
+  const { store, data } = getGuildShopData(interaction.guildId);
+  const order = data.orders[orderId];
+  if (!order) return interaction.reply({ content: '❌ Bestellung nicht gefunden.', ephemeral: true });
+  order.basePrice = Math.round(amount*100)/100;
+  order.finalPrice = Math.round(order.basePrice*(1-effectiveDiscountForOrder(order)/100)*100)/100;
+  if (revisionsRaw) order.revisionsRemaining = Math.max(0, Math.min(99, Number.parseInt(revisionsRaw,10) || 0));
+  order.updatedAt = Date.now(); saveSellingStore(store);
+  const paypal = data.config.paypalEmail ? `\n**PayPal:** \`${data.config.paypalEmail}\`` : '\n**PayPal:** wird im Ticket bestätigt';
+  await interaction.reply({ embeds: [shopEmbed(`💶 Preis bestätigt • ${orderId}`, `Grundpreis: **${formatEuro(order.basePrice)}**\nEndpreis nach Rabatt: **${formatEuro(order.finalPrice)}**${paypal}\nRevisionen: **${order.revisionsRemaining}**`)] });
+  await refreshStaffDashboard(interaction.guild, data).catch(()=>{}); saveSellingStore(store);
+}
+
+async function beginDirectDelivery(interaction, orderId) {
+  if (!canHandleSellingTicket(interaction.member)) return interaction.reply({ content: '❌ Nur das Shop-Team kann liefern.', ephemeral: true });
+  const { data } = getGuildShopData(interaction.guildId); const order = data.orders[orderId];
+  if (!order) return interaction.reply({ content: '❌ Bestellung nicht gefunden.', ephemeral: true });
+  if (!order.paidAt) return interaction.reply({ content: '❌ Markiere die Bestellung zuerst als **Bezahlt**.', ephemeral: true });
+  if (!Number.isFinite(Number(order.finalPrice ?? order.basePrice))) return interaction.reply({ content: '❌ Setze zuerst den Preis.', ephemeral: true });
+  sellingPendingDeliveries.set(`${interaction.guildId}:${interaction.channelId}:${interaction.user.id}`, { orderId, expiresAt: Date.now()+SELLING_DELIVERY_TTL_MS });
+  await interaction.reply({ content: `📤 **Direkt-Lieferung für ${orderId} aktiv.**\nLade jetzt innerhalb von **5 Minuten** die fertige Produktdatei hier im Ticket hoch. Der Bot übernimmt Datei, Watermark (bei Bildern), Lizenz, PDF-Beleg, Delivery-Channel, Kundenrollen und Abschluss-Workflow automatisch.` });
+}
+
+async function downloadAttachmentBuffer(attachment, maxMb = 24) {
+  if (Number(attachment.size || 0) > maxMb*1024*1024) return null;
+  const response = await fetch(attachment.url); if (!response.ok) return null;
+  return Buffer.from(await response.arrayBuffer());
+}
+
+async function processDeliveryAttachments(message, orderId) {
+  const { store, data } = getGuildShopData(message.guild.id); const order = data.orders[orderId];
+  if (!order) return;
+  const result = await deliverOrder(message.guild, orderId, message.author.id);
+  const deliveryChannel = result.deliveryChannel;
+  const sentUrls = [];
+  for (const attachment of [...message.attachments.values()].slice(0,5)) {
+    try {
+      const type = String(attachment.contentType || '').toLowerCase();
+      if (type.startsWith('image/')) {
+        const watermarked = await watermarkOrderImage(message.guild, data, order, attachment);
+        const sent = await deliveryChannel.send({ content: `📦 **Produktdatei • ${order.id}**\nAutomatisch mit Käufer-/Lizenzkennung versehen.`, files: [new AttachmentBuilder(watermarked.buffer, { name: watermarked.fileName })] });
+        const first = sent.attachments.first(); if (first) sentUrls.push(first.url);
+      } else {
+        const buffer = await downloadAttachmentBuffer(attachment);
+        if (buffer) {
+          const sent = await deliveryChannel.send({ content: `📦 **Produktdatei • ${order.id}**`, files: [new AttachmentBuilder(buffer, { name: attachment.name || `${order.id}-delivery.bin` })] });
+          const first = sent.attachments.first(); if (first) sentUrls.push(first.url);
+        } else {
+          await deliveryChannel.send({ content: `📦 **Produktdatei • ${order.id}**\n${attachment.url}` }); sentUrls.push(attachment.url);
+        }
+      }
+    } catch (error) { await deliveryChannel.send({ content: `⚠️ Datei konnte nicht automatisch verarbeitet werden: ${attachment.name || 'Datei'}\n${attachment.url}` }).catch(()=>{}); sentUrls.push(attachment.url); }
+  }
+  order.deliveryFiles = sentUrls; order.deliveryFileUrl = sentUrls[0] || null; order.deliveryFileName = message.attachments.first()?.name || null; order.updatedAt = Date.now(); saveSellingStore(store);
+  const customerRows = [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`selling_accept:${order.id}`).setLabel('Produkt akzeptieren').setEmoji('✅').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`selling_revision:${order.id}`).setLabel(`Änderung anfordern (${Math.max(0, Number(order.revisionsRemaining||0))})`).setEmoji('🔄').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`selling_portfolio_consent:${order.id}`).setLabel('Portfolio erlauben').setEmoji('🖼️').setStyle(ButtonStyle.Secondary),
+  )];
+  await deliveryChannel.send({ content: `<@${order.userId}>`, embeds: [shopEmbed('✅ Lieferung bereit', 'Bitte prüfe die Datei. Wenn alles passt, bestätige **Produkt akzeptieren**. Falls eine inkludierte Revision nötig ist, nutze **Änderung anfordern**. Mit **Portfolio erlauben** darf das Ergebnis öffentlich als Referenz gezeigt werden.')], components: customerRows, allowedMentions:{users:[order.userId]} });
+  await message.reply(`✅ **${order.id} automatisch geliefert.** Kundenbereich: <#${deliveryChannel.id}>`);
+  await refreshStaffDashboard(message.guild, data).catch(()=>{}); saveSellingStore(store);
+}
+
+async function handlePendingDeliveryMessage(message) {
+  if (!message.guild || message.author.bot || !message.attachments.size) return;
+  const key = `${message.guild.id}:${message.channel.id}:${message.author.id}`;
+  const pending = sellingPendingDeliveries.get(key); if (!pending) return;
+  if (pending.expiresAt < Date.now()) { sellingPendingDeliveries.delete(key); return; }
+  sellingPendingDeliveries.delete(key);
+  await processDeliveryAttachments(message, pending.orderId).catch(async error => { console.error('Delivery automation:',error); await message.reply(`❌ Automatische Lieferung fehlgeschlagen: ${String(error.message||error).slice(0,500)}`).catch(()=>{}); });
+}
+
+async function directDeliverSlash(interaction, orderId, attachment) {
+  if (!canHandleSellingTicket(interaction.member)) return interaction.reply({content:'❌ Nur das Shop-Team.',ephemeral:true});
+  const { data } = getGuildShopData(interaction.guildId); const order=data.orders[orderId];
+  if (!order) return interaction.reply({content:'❌ Bestellung nicht gefunden.',ephemeral:true});
+  if (!order.paidAt) return interaction.reply({content:'❌ Bestellung zuerst als Bezahlt markieren.',ephemeral:true});
+  await interaction.deferReply({ephemeral:true});
+  const fake = { guild: interaction.guild, author: interaction.user, channel: interaction.channel, attachments: new Map([[attachment.id, attachment]]), reply: async()=>{} };
+  await processDeliveryAttachments(fake, orderId);
+  await interaction.editReply(`✅ **${orderId}** wurde automatisch geliefert.`);
+}
+
+async function createPortfolioFromOrder(guild, data, order, createdBy) {
+  if (!order.deliveryFileUrl) throw new Error('Für diese Bestellung ist keine gelieferte Datei gespeichert.');
+  if (!order.portfolioConsentAt) throw new Error('Der Kunde hat die Portfolio-Freigabe noch nicht bestätigt.');
+  if (order.portfolioId && data.portfolio[order.portfolioId]) return data.portfolio[order.portfolioId];
+  const id=`PF-${String(data.nextPortfolio++).padStart(4,'0')}`;
+  const entry={id,title:`${orderProductLabel(order)} • ${order.id}`,url:order.deliveryFileUrl,category:orderProductLabel(order),description:`Kundenprojekt aus Bestellung ${order.id}`,price:Number(order.finalPrice??order.basePrice),createdAt:Date.now(),createdBy,orderId:order.id};
+  data.portfolio[id]=entry; order.portfolioId=id;
+  const channel=findSellingTextChannel(guild,'🖼️・portfolio');
+  if(channel){ const embed=shopEmbed(`🖼️ ${entry.title}`,`**Kategorie:** ${entry.category}\n${entry.description}\n${Number.isFinite(entry.price)?`**Beispielpreis:** ${formatEuro(entry.price)}\n`:''}Portfolio-ID: \`${id}\``); if(/^https?:\/\/.+\.(png|jpe?g|webp|gif)(\?.*)?$/i.test(entry.url)||String(entry.url).includes('cdn.discordapp')) embed.setImage(entry.url); await channel.send({embeds:[embed],components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`selling_portfolio_order:${orderProductKeys(order)[0]||'bundle'}`).setLabel('So etwas bestellen').setEmoji('🛒').setStyle(ButtonStyle.Primary))]}); }
+  return entry;
+}
+
+async function acceptDeliveredOrder(interaction, orderId) {
+  const {store,data}=getGuildShopData(interaction.guildId); const order=data.orders[orderId];
+  if(!order||order.userId!==interaction.user.id||!order.deliveredAt) return interaction.reply({content:'❌ Diese Lieferung kannst du nicht bestätigen.',ephemeral:true});
+  order.acceptedAt ||= Date.now(); order.status='delivered'; saveSellingStore(store);
+  await interaction.reply({content:`✅ Danke! **${orderId}** wurde als angenommen markiert. Das ursprüngliche Bestell-Ticket wird automatisch archiviert.`,components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`selling_review_open:${orderId}`).setLabel('Jetzt bewerten').setEmoji('⭐').setStyle(ButtonStyle.Success))]});
+  const ticket=order.channelId?await interaction.guild.channels.fetch(order.channelId).catch(()=>null):null;
+  if(ticket?.isTextBased()){
+    await archiveSellingTranscript(ticket,`Bestellung ${orderId}`,`Automatisch nach Kunden-Abnahme archiviert.`).catch(()=>{});
+    order.closedAt=Date.now(); saveSellingStore(store);
+    setTimeout(()=>ticket.delete(`Bestellung ${orderId} vom Kunden akzeptiert`).catch(()=>{}),5000);
+  }
+  await refreshStaffDashboard(interaction.guild,data).catch(()=>{}); saveSellingStore(store);
+}
+
+async function portfolioConsent(interaction, orderId) {
+  const {store,data}=getGuildShopData(interaction.guildId); const order=data.orders[orderId];
+  if(!order||order.userId!==interaction.user.id) return interaction.reply({content:'❌ Keine Berechtigung.',ephemeral:true});
+  order.portfolioConsentAt=Date.now(); saveSellingStore(store);
+  let entry=null; try{entry=await createPortfolioFromOrder(interaction.guild,data,order,interaction.user.id);}catch(error){}
+  saveSellingStore(store);
+  await interaction.reply({content:entry?`🖼️ Danke! Das Ergebnis wurde als **${entry.id}** ins Portfolio übernommen.`:'🖼️ Portfolio-Freigabe gespeichert. Das Team kann das Ergebnis jetzt mit einem Klick übernehmen.',ephemeral:true});
+}
+
+async function handleStaffPanelButton(interaction, action) {
+  if(!canHandleSellingTicket(interaction.member)) return interaction.reply({content:'❌ Nur das Shop-Team.',ephemeral:true});
+  const {store,data}=getGuildShopData(interaction.guildId);
+  if(action==='refresh'){await refreshStaffDashboard(interaction.guild,data);saveSellingStore(store);return interaction.reply({content:'✅ Dashboard aktualisiert.',ephemeral:true});}
+  if(action==='health'){const report=await sellingHealthCheck(interaction.guild,data,true);saveSellingStore(store);return interaction.reply({embeds:[shopEmbed('❤️ Shop Health Check',report)],ephemeral:true});}
+  const orders=Object.values(data.orders||{});
+  let text='';
+  if(action==='open') text=orders.filter(o=>!o.closedAt).slice(-25).reverse().map(o=>`• ${o.id} • ${orderStatusLabel(o.status)} • <@${o.userId}>`).join('\n')||'Keine offenen Aufträge.';
+  if(action==='payment') text=orders.filter(o=>!o.closedAt&&!o.paidAt).slice(-25).reverse().map(o=>`• ${o.id} • <@${o.userId}> • ${orderProductLabel(o)}`).join('\n')||'Keine offenen Zahlungen.';
+  if(action==='processing') text=orders.filter(o=>o.status==='processing'&&!o.closedAt).slice(-25).reverse().map(o=>`• ${o.id} • <@${o.userId}> • ${o.assignedTo?`<@${o.assignedTo}>`:'nicht zugewiesen'}`).join('\n')||'Nichts in Bearbeitung.';
+  if(action==='queue') text=activeQueue(data).slice(0,25).map((o,i)=>`#${i+1} • ${o.id} • ${orderProductLabel(o)}`).join('\n')||'Queue leer.';
+  if(action==='customers'){const users=[...new Set(orders.map(o=>o.userId))];text=users.slice(-25).reverse().map(id=>{const l=loyaltyForUser(data,id);return `• <@${id}> • ${l.count} geliefert • ${l.level?.label||'Standard'}`}).join('\n')||'Keine Kunden.';}
+  if(action==='licenses') text=Object.values(data.licenses||{}).slice(-25).reverse().map(l=>`• \`${l.id}\` • <@${l.userId}> • ${l.active?'aktiv':'inaktiv'}`).join('\n')||'Keine Lizenzen.';
+  if(action==='portfolio') text=Object.values(data.portfolio||{}).slice(-25).reverse().map(e=>`• \`${e.id}\` • ${e.title}`).join('\n')||'Portfolio leer.';
+  if(action==='security') text=`Anti-Nuke: **${data.security.antiNuke.enabled?'aktiv':'inaktiv'}**\nWhitelist: **${data.security.antiNuke.whitelist.length}**\nLimit: **${data.security.antiNuke.threshold} Aktionen / ${Math.round(data.security.antiNuke.windowMs/1000)}s**`;
+  await interaction.reply({embeds:[shopEmbed(`🧭 Staff • ${action}`,text||'Keine Daten.')],ephemeral:true,allowedMentions:{parse:[]}});
+}
+
+async function sellingHealthCheck(guild,data,selfHeal=false){
+  const requiredChannels=['📜・regelwerk','✅・verifizierung','🛒・bestellen','🎫・support-ticket','📊・shop-dashboard','📋・logs','🛡️・security-logs','🤖・automation-log'];
+  const missingChannels=requiredChannels.filter(name=>!findSellingTextChannel(guild,name));
+  const missingRoles=['owner','management','support','verified'].filter(key=>!findSellingRole(guild,key));
+  let healed=false;
+  if(selfHeal&&(missingChannels.length||missingRoles.length)){
+    sellingResetGuilds.add(guild.id);
+    try{const structure=await createSellingStructure(guild);data.config.channelIds=Object.fromEntries(Object.entries(structure.channels||{}).map(([key,ch])=>[key,ch.id]));data.config.roleIds=Object.fromEntries(Object.entries(structure.roleMap||{}).map(([key,role])=>[key,role.id]));await seedSellingServer(structure);healed=true;}finally{setTimeout(()=>sellingResetGuilds.delete(guild.id),1500);}
+  }
+  data.automation.lastHealthAt=Date.now();
+  return [`Fehlende kritische Channels: **${missingChannels.length}**${missingChannels.length?` (${missingChannels.join(', ')})`:''}`,`Fehlende kritische Rollen: **${missingRoles.length}**${missingRoles.length?` (${missingRoles.join(', ')})`:''}`,`Self-Heal: **${healed?'ausgeführt':'nicht nötig'}**`,`Bot-Rolle: **${guild.members.me?.roles.highest?.name||'unbekannt'}**`].join('\n');
+}
+
+function closeTicketAutomatically(guild,data,order,reason){
+  if(!order.channelId||order.closedAt)return;
+  guild.channels.fetch(order.channelId).then(async channel=>{if(!channel?.isTextBased())return;await archiveSellingTranscript(channel,`Bestellung ${order.id}`,reason).catch(()=>{});order.closedAt=Date.now();const {store}=getGuildShopData(guild.id);ensureGuildShopData(store,guild.id).orders[order.id]=order;saveSellingStore(store);setTimeout(()=>channel.delete(reason).catch(()=>{}),4000)}).catch(()=>{});
+}
+
+async function backupSellingStore(){
+  if(!fs.existsSync(sellingDataPath))return;
+  const dir=path.join(sellingStorageDir,'selling-backups');if(!fs.existsSync(dir))fs.mkdirSync(dir,{recursive:true});
+  const file=path.join(dir,`selling-${Date.now()}.json`);fs.copyFileSync(sellingDataPath,file);
+  const files=fs.readdirSync(dir).filter(x=>x.endsWith('.json')).sort();for(const old of files.slice(0,Math.max(0,files.length-5)))fs.unlinkSync(path.join(dir,old));
+}
+
+async function runSellingAutomationForGuild(guild){
+  const {store,data}=getGuildShopData(guild.id);if(!data.automation.enabled)return;
+  const now=Date.now();data.automation.lastTickAt=now;
+  const queue=activeQueue(data);
+  if(data.automation.autoAvailability){const old=data.config.availability;data.config.availability=queue.length>=Number(data.automation.closeAt)?'closed':queue.length>=Number(data.automation.busyAt)?'busy':'open';if(old!==data.config.availability)await logAutomation(guild,'🚦 Shop-Status automatisch geändert',`${availabilityLabel(old)} → **${availabilityLabel(data.config.availability)}** • aktive Queue: ${queue.length}`);}
+  for(const order of Object.values(data.orders||{})){
+    if(order.closedAt)continue;
+    const ticket=order.channelId?await guild.channels.fetch(order.channelId).catch(()=>null):null;
+    if(!order.paidAt&&Number.isFinite(Number(order.finalPrice??order.basePrice))&&now-Number(order.lastPaymentReminderAt||order.createdAt)>=Number(data.automation.reminderHours)*3600000){if(ticket?.isTextBased())await ticket.send({content:`<@${order.userId}> 💳 Erinnerung: Für **${order.id}** ist noch keine Zahlung bestätigt. Wenn du bereits bezahlt hast, sende bitte nur die benötigte Transaktionsreferenz ins Ticket.`,allowedMentions:{users:[order.userId]}}).catch(()=>{});order.lastPaymentReminderAt=now;}
+    if(order.deliveredAt&&!order.acceptedAt&&now-Number(order.deliveredAt)>=Number(data.automation.autoCloseHours)*3600000){closeTicketAutomatically(guild,data,order,`Automatisch ${data.automation.autoCloseHours}h nach Lieferung archiviert.`);}
+    if(order.deliveredAt&&!order.reviewSubmitted&&now-Number(order.lastReviewReminderAt||order.deliveredAt)>=Number(data.automation.reviewReminderHours)*3600000){const delivery=order.deliveryChannelId?await guild.channels.fetch(order.deliveryChannelId).catch(()=>null):null;if(delivery?.isTextBased())await delivery.send({content:`<@${order.userId}> ⭐ Wenn alles passt, kannst du deine Bestellung **${order.id}** noch bewerten.`,components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`selling_review_open:${order.id}`).setLabel('Bewertung abgeben').setEmoji('⭐').setStyle(ButtonStyle.Success))],allowedMentions:{users:[order.userId]}}).catch(()=>{});order.lastReviewReminderAt=now;}
+  }
+  await refreshOrderStatusPanel(guild,data).catch(()=>{});await refreshStaffDashboard(guild,data).catch(()=>{});await refreshShopCatalog(guild,data).catch(()=>{});
+  if(now-Number(data.automation.lastHealthAt||0)>30*60*1000){const report=await sellingHealthCheck(guild,data,true);await logAutomation(guild,'❤️ Automatischer Health Check',report);}
+  const dateKey=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Vienna',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+  const hour=Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Vienna',hour:'2-digit',hour12:false}).format(new Date()));
+  if(hour>=19&&data.automation.lastDailyReportDate!==dateKey){data.automation.lastDailyReportDate=dateKey;const open=Object.values(data.orders||{}).filter(o=>!o.closedAt).length;const delivered=Object.values(data.orders||{}).filter(o=>o.deliveredAt&&new Date(o.deliveredAt).toDateString()===new Date().toDateString()).length;await logAutomation(guild,'📈 Tagesbericht',`Offene Bestellungen: **${open}**\nQueue: **${queue.length}**\nHeute geliefert: **${delivered}**\nShop: **${availabilityLabel(data.config.availability)}**`);}
+  saveSellingStore(store);
+  if(now-sellingAutomationLastBackupAt>24*3600000){await backupSellingStore().catch(()=>{});sellingAutomationLastBackupAt=now;await logAutomation(guild,'💾 Auto-Backup','Selling-Daten wurden gesichert. Es werden maximal die letzten 5 Backups behalten.');}
+}
+
+async function runSellingAutomation(client){for(const guild of client.guilds.cache.values())await runSellingAutomationForGuild(guild).catch(error=>console.error('Selling automation tick:',error));}
+
 async function handleSellCommand(interaction) {
   if (!interaction.inGuild()) return;
   if (!canHandleSellingTicket(interaction.member)) {
@@ -2241,6 +2672,62 @@ async function handleSellCommand(interaction) {
   if (sub === 'dashboard') {
     await interaction.reply({ embeds: [dashboardEmbed(interaction.guild, data)], ephemeral: true, allowedMentions: { parse: [] } });
     return;
+  }
+
+  if (sub === 'panel') {
+    const message = await refreshStaffDashboard(interaction.guild, data, true);
+    saveSellingStore(store);
+    await interaction.reply({ content: message ? `✅ Staff-Control-Panel erstellt/aktualisiert: ${message.url}` : '❌ Dashboard-Channel fehlt.', ephemeral: true });
+    return;
+  }
+
+  if (sub === 'profile') {
+    const user = interaction.options.getUser('user');
+    await interaction.reply({ embeds: [customerProfileEmbed(data, user)], ephemeral: true, allowedMentions: { parse: [] } });
+    return;
+  }
+
+  if (sub === 'search') {
+    const q = String(interaction.options.getString('query') || '').trim().toLowerCase();
+    const orders = Object.values(data.orders || {}).filter(o => o.id.toLowerCase().includes(q) || o.userId.includes(q) || orderProductLabel(o).toLowerCase().includes(q));
+    const licenses = Object.values(data.licenses || {}).filter(l => l.id.toLowerCase().includes(q) || l.userId.includes(q) || l.orderId.toLowerCase().includes(q));
+    const portfolio = Object.values(data.portfolio || {}).filter(e => e.id.toLowerCase().includes(q) || String(e.title||'').toLowerCase().includes(q));
+    const text = [`**Bestellungen (${orders.length})**`, ...(orders.slice(0,10).map(o=>`• ${o.id} • <@${o.userId}> • ${orderStatusLabel(o.status)}`)), '', `**Lizenzen (${licenses.length})**`, ...(licenses.slice(0,10).map(l=>`• \`${l.id}\` • ${l.orderId} • <@${l.userId}>`)), '', `**Portfolio (${portfolio.length})**`, ...(portfolio.slice(0,10).map(e=>`• \`${e.id}\` • ${e.title}`))].join('\n');
+    await interaction.reply({ embeds: [shopEmbed(`🔍 Suche • ${interaction.options.getString('query')}`, text.slice(0,3900))], ephemeral: true, allowedMentions:{parse:[]} });
+    return;
+  }
+
+  if (sub === 'product') {
+    const action = interaction.options.getString('action'); const key = interaction.options.getString('produkt');
+    if (action === 'list') {
+      const text = Object.entries(PRODUCT_TYPES).map(([k,item])=>{const cfg=productConfig(data,k);return `${cfg.enabled?'🟢':'🔴'} ${item.emoji} **${item.label}** • ${cfg.price !== null && cfg.price !== undefined && cfg.price !== '' && Number.isFinite(Number(cfg.price))?formatEuro(cfg.price):'Preis im Ticket'}`}).join('\n');
+      await interaction.reply({embeds:[shopEmbed('🛍️ Produktmanager',text)],ephemeral:true}); return;
+    }
+    if (!key || !PRODUCT_TYPES[key]) { await interaction.reply({content:'❌ Bitte ein Produkt auswählen.',ephemeral:true}); return; }
+    const cfg=productConfig(data,key);
+    if(action==='price'){const price=interaction.options.getNumber('preis');if(price===null){await interaction.reply({content:'❌ `preis` fehlt.',ephemeral:true});return;}cfg.price=Math.round(price*100)/100;}
+    if(action==='enable')cfg.enabled=true;if(action==='disable')cfg.enabled=false;
+    await refreshShopCatalog(interaction.guild,data);saveSellingStore(store);await interaction.reply({content:`✅ **${PRODUCT_TYPES[key].label}** aktualisiert.`,ephemeral:true});return;
+  }
+
+  if (sub === 'automation') {
+    const action=interaction.options.getString('action'); if(action==='enable')data.automation.enabled=true;if(action==='disable')data.automation.enabled=false;saveSellingStore(store);
+    await interaction.reply({embeds:[shopEmbed('🤖 Shop-Automatisierung',`Status: **${data.automation.enabled?'aktiv':'pausiert'}**\nAuto-Assign: **${data.automation.autoAssign?'an':'aus'}**\nAuto-Auslastung: **${data.automation.autoAvailability?'an':'aus'}**\nBusy ab: **${data.automation.busyAt}**\nAuto-Close ab: **${data.automation.autoCloseHours}h**\nReminder: **${data.automation.reminderHours}h**`)],ephemeral:true});return;
+  }
+
+  if (sub === 'wizard') {
+    const modal=new ModalBuilder().setCustomId('selling_wizard_modal').setTitle('Selling Automation Wizard');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('paypal').setLabel('PayPal E-Mail').setStyle(TextInputStyle.Short).setRequired(false).setValue(data.config.paypalEmail||'')),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('busy').setLabel('Hohe Auslastung ab X Aufträgen').setStyle(TextInputStyle.Short).setRequired(true).setValue(String(data.automation.busyAt))),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('close').setLabel('Shop automatisch schließen ab X').setStyle(TextInputStyle.Short).setRequired(true).setValue(String(data.automation.closeAt))),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('reminder').setLabel('Zahlungs-Reminder nach Stunden').setStyle(TextInputStyle.Short).setRequired(true).setValue(String(data.automation.reminderHours))),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('autoclose').setLabel('Ticket Auto-Close nach Lieferung (h)').setStyle(TextInputStyle.Short).setRequired(true).setValue(String(data.automation.autoCloseHours))),
+    ); await interaction.showModal(modal); return;
+  }
+
+  if (sub === 'deliver') {
+    const id=String(interaction.options.getString('order')||'').trim().toUpperCase(); const attachment=interaction.options.getAttachment('datei'); await directDeliverSlash(interaction,id,attachment); return;
   }
 
   if (sub === 'order') {
@@ -2422,18 +2909,23 @@ async function handleSellCommand(interaction) {
       return;
     }
     const title = interaction.options.getString('titel');
-    const url = interaction.options.getString('url');
+    const attachment = interaction.options.getAttachment('datei');
+    const url = interaction.options.getString('url') || attachment?.url || null;
     const category = interaction.options.getString('kategorie') || 'Sonstiges';
+    const description = interaction.options.getString('beschreibung') || '';
+    const price = interaction.options.getNumber('preis');
     if (!title || !url) {
-      await interaction.reply({ content: '❌ Für **Hinzufügen** brauchst du `titel` und `url`.', ephemeral: true });
+      await interaction.reply({ content: '❌ Für **Hinzufügen** brauchst du `titel` und entweder `datei` oder `url`.', ephemeral: true });
       return;
     }
     const id = `PF-${String(data.nextPortfolio++).padStart(4, '0')}`;
-    data.portfolio[id] = { id, title, url, category, createdAt: Date.now(), createdBy: interaction.user.id };
+    data.portfolio[id] = { id, title, url, category, description, price, createdAt: Date.now(), createdBy: interaction.user.id };
     saveSellingStore(store);
     const publicChannel = findSellingTextChannel(interaction.guild, '🖼️・portfolio');
     if (publicChannel) {
-      await publicChannel.send({ embeds: [shopEmbed(`🖼️ ${title}`, `**Kategorie:** ${category}\n**Referenz:** ${url}\n\nPortfolio-ID: \`${id}\``)] }).catch(() => {});
+      const embed=shopEmbed(`🖼️ ${title}`, `**Kategorie:** ${category}${price!==null?`\n**Beispielpreis:** ${formatEuro(price)}`:''}${description?`\n\n${description}`:''}\n\nPortfolio-ID: \`${id}\``);
+      if (attachment?.contentType?.startsWith('image/') || /cdn\.discordapp|media\.discordapp/i.test(url)) embed.setImage(url);
+      await publicChannel.send({ embeds: [embed] }).catch(() => {});
     }
     await interaction.reply({ content: `✅ Portfolio-Eintrag \`${id}\` veröffentlicht.`, ephemeral: true });
     return;
@@ -2620,6 +3112,9 @@ async function runSellingSetup(interaction) {
     await seedSellingServer(structure);
     await refreshOrderStatusPanel(interaction.guild, freshShopData).catch(() => {});
     await refreshPaymentPanel(interaction.guild, freshShopData).catch(() => {});
+    await refreshStaffDashboard(interaction.guild, freshShopData, true).catch(() => {});
+    await refreshShopCatalog(interaction.guild, freshShopData).catch(() => {});
+    const freshStore = loadSellingStore(); ensureGuildShopData(freshStore, guildId).config = { ...ensureGuildShopData(freshStore, guildId).config, ...freshShopData.config }; saveSellingStore(freshStore);
 
     await interaction.editReply([
       '✅ **FULL RESET abgeschlossen – Selling Server wurde komplett neu erstellt.**',
@@ -2628,7 +3123,7 @@ async function runSellingSetup(interaction) {
       `🗑️ Gelöschte alte normale Rollen: **${deleted.deletedRoles}**`,
       deleted.skippedManagedRoles.length ? `🔒 Nicht löschbare Discord-/Bot-Systemrollen: **${deleted.skippedManagedRoles.length}**` : null,
       '',
-      'Neu erstellt wurden professionelle Bereiche für **Thumbnails, NVE/Grafik-Setups, Soundpacks, Designs, FiveM-Assets, Bundles, Warenkorb, PayPal, PDF-Belege, Käufer-Watermarking, Lizenzen, Stammkunden/VIP, Queue/ETA, Verify-System, Anti-Nuke, Support, Kauf-Tickets und Team-Verwaltung**.',
+      'Neu erstellt wurden professionelle Bereiche für **Shop-Katalog, Warenkorb, Auto-Assign, Staff-Control-Panel, direkte Lieferung, Käufer-Watermarking, Kunden-Abnahme, Auto-Portfolio, PDF-Belege, Lizenzen, Stammkunden/VIP, Queue/ETA, Reminder, Auto-Close, Health/Self-Heal, Backups, Verify, Anti-Nuke und Support**.',
       'Der bisherige Command-Channel wird als letzter alter Channel nach dieser Meldung ebenfalls entfernt.',
     ].filter(Boolean).join('\n'));
 
@@ -2714,6 +3209,34 @@ async function handleSellingInteraction(interaction) {
     return true;
   }
 
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_staff:')) {
+    await handleStaffPanelButton(interaction, String(interaction.customId).split(':')[1]); return true;
+  }
+
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_price:')) {
+    await openPriceModal(interaction, String(interaction.customId).split(':')[1]); return true;
+  }
+  if (interaction.isModalSubmit?.() && String(interaction.customId || '').startsWith('selling_price_modal:')) {
+    await submitPriceModal(interaction, String(interaction.customId).split(':')[1]); return true;
+  }
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_deliver_start:')) {
+    await beginDirectDelivery(interaction, String(interaction.customId).split(':')[1]); return true;
+  }
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_accept:')) {
+    await acceptDeliveredOrder(interaction, String(interaction.customId).split(':')[1]); return true;
+  }
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_portfolio_consent:')) {
+    await portfolioConsent(interaction, String(interaction.customId).split(':')[1]); return true;
+  }
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_portfolio_order:')) {
+    await showOrderModal(interaction, String(interaction.customId).split(':')[1]); return true;
+  }
+  if (interaction.isModalSubmit?.() && interaction.customId === 'selling_wizard_modal') {
+    if (!canHandleSellingTicket(interaction.member)) { await interaction.reply({content:'❌ Nur das Shop-Team.',ephemeral:true}); return true; }
+    const {store,data}=getGuildShopData(interaction.guildId); const paypal=interaction.fields.getTextInputValue('paypal').trim();
+    data.config.paypalEmail=paypal||null; data.automation.busyAt=Math.max(1,Number.parseInt(interaction.fields.getTextInputValue('busy'),10)||5); data.automation.closeAt=Math.max(data.automation.busyAt+1,Number.parseInt(interaction.fields.getTextInputValue('close'),10)||12); data.automation.reminderHours=Math.max(1,Number.parseInt(interaction.fields.getTextInputValue('reminder'),10)||24); data.automation.autoCloseHours=Math.max(1,Number.parseInt(interaction.fields.getTextInputValue('autoclose'),10)||72); data.automation.enabled=true; saveSellingStore(store); await refreshPaymentPanel(interaction.guild,data).catch(()=>{}); await refreshStaffDashboard(interaction.guild,data).catch(()=>{}); saveSellingStore(store); await interaction.reply({content:'✅ Automation-Wizard gespeichert. Shop-Automatisierung ist aktiv.',ephemeral:true}); return true;
+  }
+
   if (interaction.isButton?.() && (
     String(interaction.customId || '').startsWith('selling_claim:')
     || String(interaction.customId || '').startsWith('selling_status:')
@@ -2777,6 +3300,15 @@ Client.prototype.login = function patchedLogin(...args) {
 
     this.on(Events.GuildMemberAdd, async member => {
       await handleSellingMemberJoin(member).catch(error => console.error('❌ Verify Join Fehler:', error));
+    });
+
+    this.on(Events.MessageCreate, async message => {
+      await handlePendingDeliveryMessage(message).catch(error => console.error('❌ Direct Delivery Fehler:', error));
+    });
+
+    this.once(Events.ClientReady, async () => {
+      await runSellingAutomation(this).catch(() => {});
+      setInterval(() => runSellingAutomation(this).catch(error => console.error('❌ Selling Automation:', error)), SELLING_AUTOMATION_TICK_MS).unref?.();
     });
 
     this.on(Events.ChannelCreate, async channel => {
