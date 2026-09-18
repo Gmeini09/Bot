@@ -1,0 +1,25 @@
+# v5.11 – Stability & Database
+
+## PostgreSQL
+- PostgreSQL über DATABASE_URL/POSTGRES_URL/POSTGRESQL_URL.
+- Eine JSONB-State-Tabelle wird automatisch angelegt.
+- Beim Start wird der neuere Datenstand zwischen DB und lokaler Fallback-Datei gewählt.
+- Writes werden zusätzlich persistent in PostgreSQL gespiegelt.
+- JSON bleibt als lokaler Fallback und Backup-Quelle bestehen.
+
+## Fehlerdiagnose
+- Zentrale Fehler-IDs (ERR-XXXXXX).
+- Interne Stacktraces in 📋・logs bzw. 🤖・automation-log.
+- Nutzer sehen nur die Fehler-ID statt interner Details.
+- /sell diagnose mit Check-/Repair-Modus.
+
+## Permission Audit & Self-Heal
+- /sell audit prüft Bot-Rechte, Rollen-Hierarchie, kritische Channels und private Ticket-Rechte.
+- Prüft veraltete gespeicherte Channel-IDs und verwaiste Order-/Delivery-Referenzen.
+- Self-Heal synchronisiert Struktur und offene Ticket-/Delivery-Rechte.
+- Debounced Self-Heal nach relevanten Channel-/Rollenänderungen.
+
+## Order Timeline
+- Neuer Order-Action-Eintrag „Timeline anzeigen“.
+- Neue Bestellungen speichern chronologische Ereignisse.
+- Bestehende Bestellungen werden aus vorhandenen Zeitstempeln ergänzt.

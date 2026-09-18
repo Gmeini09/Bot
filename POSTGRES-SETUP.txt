@@ -1,0 +1,19 @@
+RAILWAY POSTGRESQL – KURZANLEITUNG
+
+1. Railway Projekt öffnen.
+2. + New / Add Service -> PostgreSQL hinzufügen.
+3. Beim Bot-Service unter Variables eine Referenz auf die PostgreSQL DATABASE_URL hinzufügen.
+   Unterstützte Variablennamen im Bot:
+   - DATABASE_URL
+   - POSTGRES_URL
+   - POSTGRESQL_URL
+4. Neu deployen.
+5. In Discord `/sell diagnose action:Prüfen` ausführen.
+
+Erwartetes Ergebnis:
+PostgreSQL: ✅ verbunden
+
+Der Bot legt die Tabelle `turbo_selling_state` beim Start automatisch an.
+Du musst keine SQL-Datei manuell importieren.
+
+Wenn PostgreSQL ausfällt, arbeitet der Bot mit dem lokalen JSON-Fallback weiter.

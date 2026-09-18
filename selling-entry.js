@@ -26,6 +26,7 @@ const sharp = require('sharp');
 const http = require('http');
 const crypto = require('crypto');
 const QRCode = require('qrcode');
+const { Pool } = require('pg');
 
 // Turbo Design Branding Banner (embedded so Railway only needs selling-entry.js + package.json)
 const TURBO_DESIGN_BANNER_NAME = 'turbo-design-banner.jpeg';
@@ -124,6 +125,7 @@ const sellingActionLocks = new Set();
 const sellingActionLockStartedAt = new Map();
 const sellingActionLockTimers = new Map();
 const SELLING_DELIVERY_TTL_MS = 5 * 60 * 1000;
+const sellingSelfHealTimers = new Map();
 
 // Locks protect double-clicks and concurrent Discord interactions. They must never
 // be able to brick an order permanently if an API call stalls or Railway/Discord
@@ -243,6 +245,122 @@ const sellingStorageDir = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.D
 if (!fs.existsSync(sellingStorageDir)) fs.mkdirSync(sellingStorageDir, { recursive: true });
 const sellingDataPath = path.join(sellingStorageDir, 'selling-data.json');
 
+const SELLING_DB_ROW_ID = 'turbo-designs-global';
+let sellingPgPool = null;
+let sellingPgReady = false;
+let sellingPgLastSyncAt = 0;
+let sellingPgLastError = null;
+let sellingPgWriteTimer = null;
+let sellingPgWriteQueue = Promise.resolve();
+
+function sellingPostgresUrl() {
+  return process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRESQL_URL || null;
+}
+
+function sellingDatabaseStatus() {
+  const configured = Boolean(sellingPostgresUrl());
+  const connected = Boolean(sellingPgReady && sellingPgPool && !sellingPgLastError);
+  return {
+    configured,
+    connected,
+    lastSyncAt: sellingPgLastSyncAt || null,
+    lastError: sellingPgLastError || null,
+    mode: connected ? 'PostgreSQL + JSON-Fallback' : configured ? 'PostgreSQL gestört + JSON-Fallback' : 'JSON-Fallback',
+  };
+}
+
+function writeSellingJsonSnapshot(store) {
+  const tmp = `${sellingDataPath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(store, null, 2), 'utf8');
+  fs.renameSync(tmp, sellingDataPath);
+}
+
+async function persistSellingStoreToPostgres(snapshot) {
+  if (!sellingPgReady || !sellingPgPool || !snapshot) return false;
+  try {
+    await sellingPgPool.query(
+      `INSERT INTO turbo_selling_state (id, data, updated_at)
+       VALUES ($1, $2::jsonb, NOW())
+       ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+      [SELLING_DB_ROW_ID, JSON.stringify(snapshot)],
+    );
+    sellingPgLastSyncAt = Date.now();
+    sellingPgLastError = null;
+    return true;
+  } catch (error) {
+    sellingPgLastError = String(error?.message || error).slice(0, 500);
+    console.error('❌ PostgreSQL Selling Sync:', error);
+    return false;
+  }
+}
+
+function scheduleSellingPostgresWrite() {
+  if (!sellingPgReady || !sellingPgPool || sellingPgWriteTimer) return;
+  sellingPgWriteTimer = setTimeout(() => {
+    sellingPgWriteTimer = null;
+    const snapshot = sellingStoreCache ? JSON.parse(JSON.stringify(sellingStoreCache)) : null;
+    sellingPgWriteQueue = sellingPgWriteQueue
+      .catch(() => {})
+      .then(() => persistSellingStoreToPostgres(snapshot));
+  }, 600);
+  sellingPgWriteTimer.unref?.();
+}
+
+async function initSellingPostgres() {
+  const url = sellingPostgresUrl();
+  if (!url) {
+    sellingPgReady = false;
+    sellingPgLastError = 'DATABASE_URL/POSTGRES_URL nicht gesetzt';
+    console.warn('⚠️ Turbo Designs: Keine PostgreSQL-URL gefunden. JSON-Fallback bleibt aktiv.');
+    return false;
+  }
+  try {
+    sellingPgPool = new Pool({ connectionString: url, max: 3, idleTimeoutMillis: 30000, connectionTimeoutMillis: 10000 });
+    await sellingPgPool.query(`CREATE TABLE IF NOT EXISTS turbo_selling_state (
+      id TEXT PRIMARY KEY,
+      data JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+    sellingPgReady = false;
+    sellingPgLastError = null;
+
+    const localFileUpdatedAt = fs.existsSync(sellingDataPath) ? Number(fs.statSync(sellingDataPath).mtimeMs || 0) : 0;
+    const local = loadSellingStore();
+    const result = await sellingPgPool.query('SELECT data, updated_at FROM turbo_selling_state WHERE id = $1 LIMIT 1', [SELLING_DB_ROW_ID]);
+    let shouldWriteLocalToDb = false;
+    if (result.rows.length) {
+      const row = result.rows[0];
+      const dbStore = row.data && typeof row.data === 'object' ? row.data : null;
+      const dbUpdatedAt = row.updated_at ? new Date(row.updated_at).getTime() : 0;
+      if (dbStore && dbUpdatedAt > localFileUpdatedAt) {
+        dbStore.guilds = dbStore.guilds && typeof dbStore.guilds === 'object' ? dbStore.guilds : {};
+        dbStore.version = Number(dbStore.version || 1);
+        migrateSellingStore(dbStore);
+        dbStore._updatedAt = dbUpdatedAt;
+        sellingStoreCache = dbStore;
+        writeSellingJsonSnapshot(dbStore);
+        console.log('✅ Turbo Designs: Selling-Daten aus PostgreSQL geladen.');
+      } else {
+        shouldWriteLocalToDb = true;
+      }
+    } else {
+      shouldWriteLocalToDb = true;
+    }
+    sellingPgReady = true;
+    if (shouldWriteLocalToDb) await persistSellingStoreToPostgres(local);
+    sellingPgLastSyncAt = Date.now();
+    console.log('✅ Turbo Designs: PostgreSQL-Persistenz aktiv.');
+    return true;
+  } catch (error) {
+    sellingPgReady = false;
+    sellingPgLastError = String(error?.message || error).slice(0, 500);
+    console.error('❌ Turbo Designs PostgreSQL init fehlgeschlagen; JSON-Fallback bleibt aktiv:', error);
+    try { await sellingPgPool?.end(); } catch (_) {}
+    sellingPgPool = null;
+    return false;
+  }
+}
+
 function blankGuildShopData() {
   return {
     nextOrder: 1,
@@ -308,6 +426,8 @@ function blankGuildShopData() {
       testMode: false,
       expressSurchargePercent: 20,
       revisionExtraPrice: 5,
+      selfHealEnabled: true,
+      permissionAuditOnStartup: true,
     },
     security: {
       antiNuke: {
@@ -413,6 +533,22 @@ function migrateSellingStore(store) {
     changed = true;
   }
 
+  // v6 adds PostgreSQL persistence metadata, order timelines and hardened diagnostics/self-heal.
+  if (version < 6) {
+    for (const data of Object.values(store.guilds || {})) {
+      if (!data || typeof data !== 'object') continue;
+      data.config ||= {};
+      if (typeof data.config.selfHealEnabled !== 'boolean') data.config.selfHealEnabled = true;
+      if (typeof data.config.permissionAuditOnStartup !== 'boolean') data.config.permissionAuditOnStartup = true;
+      for (const order of Object.values(data.orders || {})) {
+        if (!order || typeof order !== 'object') continue;
+        order.timeline = Array.isArray(order.timeline) ? order.timeline : [];
+      }
+    }
+    version = 6;
+    changed = true;
+  }
+
   store.version = version;
   return changed;
 }
@@ -447,12 +583,12 @@ function loadSellingStore() {
   if (sellingStoreCache) return sellingStoreCache;
   try {
     if (!fs.existsSync(sellingDataPath)) {
-      sellingStoreCache = { version: 5, guilds: {} };
+      sellingStoreCache = { version: 6, guilds: {} };
       return sellingStoreCache;
     }
     const parsed = JSON.parse(fs.readFileSync(sellingDataPath, 'utf8'));
     if (!parsed || typeof parsed !== 'object') {
-      sellingStoreCache = { version: 5, guilds: {} };
+      sellingStoreCache = { version: 6, guilds: {} };
       return sellingStoreCache;
     }
     parsed.version = Number(parsed.version || 1);
@@ -479,10 +615,10 @@ function loadSellingStore() {
 }
 
 function saveSellingStore(store) {
+  store._updatedAt = Date.now();
   sellingStoreCache = store;
-  const tmp = `${sellingDataPath}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(store, null, 2), 'utf8');
-  fs.renameSync(tmp, sellingDataPath);
+  writeSellingJsonSnapshot(store);
+  scheduleSellingPostgresWrite();
 }
 
 function ensureGuildShopData(store, guildId) {
@@ -576,6 +712,53 @@ function orderStatusLabel(status) {
     delivered: '✅ Geliefert',
     disputed: '🔴 Streitfall',
   }[status] || '🟡 Zahlung offen';
+}
+
+function addOrderTimeline(order, type, text, actorId = null, at = Date.now(), meta = null) {
+  if (!order || typeof order !== 'object') return null;
+  order.timeline = Array.isArray(order.timeline) ? order.timeline : [];
+  const event = {
+    id: `TL-${String(order.timeline.length + 1).padStart(3, '0')}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,
+    type: String(type || 'event').slice(0, 40),
+    text: String(text || '').slice(0, 500),
+    actorId: actorId || null,
+    at: Number(at || Date.now()),
+    meta: meta && typeof meta === 'object' ? meta : null,
+  };
+  order.timeline.push(event);
+  if (order.timeline.length > 200) order.timeline = order.timeline.slice(-200);
+  return event;
+}
+
+function orderTimelineEvents(order) {
+  if (!order) return [];
+  order.timeline = Array.isArray(order.timeline) ? order.timeline : [];
+  const events = [...order.timeline];
+  const derived = [
+    ['created', 'Bestellung erstellt', order.createdAt],
+    ['claimed', 'Bestellung übernommen', order.claimedAt],
+    ['paid', 'Zahlung bestätigt', order.paidAt],
+    ['processing', 'Bearbeitung gestartet', order.processingAt],
+    ['delivered', 'Lieferung erstellt', order.deliveredAt],
+    ['ready', 'Produktdatei bereitgestellt', order.deliveryReadyAt],
+    ['accepted', 'Vom Kunden abgenommen', order.acceptedAt],
+    ['closed', 'Ticket abgeschlossen', order.closedAt],
+  ];
+  const existingTypes = new Set(events.map(e => e.type));
+  for (const [type, text, at] of derived) {
+    if (at && !existingTypes.has(type)) events.push({ id: `derived-${type}`, type, text, actorId: null, at: Number(at), meta: { derived: true } });
+  }
+  return events.filter(e => Number(e.at) > 0).sort((a, b) => Number(a.at) - Number(b.at));
+}
+
+function orderTimelineEmbed(order) {
+  const events = orderTimelineEvents(order);
+  const rows = events.slice(-30).map(event => {
+    const actor = event.actorId ? ` • <@${event.actorId}>` : '';
+    return `<t:${Math.floor(Number(event.at) / 1000)}:f> • **${String(event.text || event.type).slice(0, 160)}**${actor}`;
+  });
+  const older = events.length > 30 ? `\n\n*+ ${events.length - 30} ältere Ereignisse*` : '';
+  return shopEmbed(`🧾 Order-Timeline • ${order.id}`, `${rows.join('\n') || 'Noch keine Timeline-Einträge.'}${older}`);
 }
 
 function availabilityLabel(status) {
@@ -1309,11 +1492,17 @@ function buildSellCommandDefinition() {
     type: 1,
     options: [
       { type: 1, name: 'dashboard', description: 'Zeigt das interne Shop-Dashboard.' },
+      { type: 1, name: 'audit', description: 'Prüft Rollen, Channels, Ticket-Privatsphäre und Bot-Rechte.' },
+      { type: 1, name: 'diagnose', description: 'Diagnose für Datenbank, Rechte, Locks und Shop-Struktur.', options: [
+        { type: 3, name: 'action', description: 'Nur prüfen oder automatisch reparieren', required: false, choices: [
+          { name: 'Prüfen', value: 'check' }, { name: 'Prüfen + reparieren', value: 'repair' },
+        ] },
+      ] },
       {
         type: 1, name: 'order', description: 'Verwaltet eine Bestellung.', options: [
           { type: 3, name: 'order', description: 'Bestellnummer, z. B. UF-0001', required: true },
           { type: 3, name: 'action', description: 'Aktion', required: true, choices: [
-            { name: 'Info anzeigen', value: 'info' }, { name: 'Preis setzen', value: 'price' },
+            { name: 'Info anzeigen', value: 'info' }, { name: 'Timeline anzeigen', value: 'timeline' }, { name: 'Preis setzen', value: 'price' },
             { name: 'Revisionen setzen', value: 'revisions' }, { name: 'Mir zuweisen', value: 'assign' },
             { name: 'Zahlung offen', value: 'pending' }, { name: 'Bezahlt', value: 'paid' },
             { name: 'In Bearbeitung', value: 'processing' }, { name: 'Geliefert', value: 'delivered' },
@@ -2936,7 +3125,9 @@ async function createCartOrderFromModal(interaction) {
     priority: 'normal', waitingOn: 'staff', lastActivityAt: Date.now(), lastCustomerAt: Date.now(),
     initialRevisions: revisions, testMode: Boolean(data.config.testMode),
     extraCharges: [], expressRequested: false, expressApproved: false,
+    timeline: [],
   };
+  addOrderTimeline(order, 'created', `Bestellung ${orderId} erstellt`, interaction.user.id, order.createdAt);
   data.orders[orderId] = order;
   data.carts[interaction.user.id] = { items: [], updatedAt: Date.now() };
   saveSellingStore(store);
@@ -3389,6 +3580,7 @@ async function deliverOrder(guild, orderId, actorId = null) {
   ensureOrderLicense(data, order);
   order.status = 'delivered';
   order.deliveredAt ||= Date.now();
+  addOrderTimeline(order, 'delivered', 'Lieferung wurde erstellt', actorId, order.deliveredAt);
   order.waitingOn = 'customer';
   order.updatedAt = Date.now();
   order.lastActivityAt = Date.now();
@@ -3500,6 +3692,7 @@ async function setOrderStatus(guild, orderId, status, actorId) {
 
     if (status === 'paid' && !order.paidAt) redeemCouponForPaidOrder(data, order);
     order.status = status;
+    addOrderTimeline(order, status, `Status geändert: ${orderStatusLabel(status)}`, actorId);
     if (status === 'paid') { order.paidAt ||= Date.now(); order.waitingOn = 'staff'; }
     if (status === 'processing') { order.processingAt ||= Date.now(); order.waitingOn = 'staff'; }
     if (status === 'disputed') { order.disputedAt ||= Date.now(); order.waitingOn = 'staff'; }
@@ -3566,6 +3759,7 @@ async function requestRevision(interaction, orderId) {
   order.lastRevisionAt = Date.now();
   order.deliveryReadyAt = null;
   order.updatedAt = Date.now();
+  addOrderTimeline(order, 'revision', `Revision angefordert • verbleibend ${order.revisionsRemaining}`, interaction.user.id, order.lastRevisionAt);
   saveSellingStore(store);
   await interaction.reply({
     content: `🔄 Revision für **${order.id}** wurde registriert. Verbleibend: **${order.revisionsRemaining}**.\nBitte beschreibe die gewünschte Änderung jetzt möglichst genau.`,
@@ -3764,6 +3958,7 @@ async function handleOrderTicketButton(interaction) {
     }
     order.assignedTo = interaction.user.id;
     order.claimedAt = Date.now();
+    addOrderTimeline(order, 'claimed', 'Bestellung über Ticket-Button übernommen', interaction.user.id, order.claimedAt);
     saveSellingStore(store);
     await interaction.reply({ content: `🙋 Bestellung **${id}** wurde von <@${interaction.user.id}> übernommen.` });
     await logSelling(interaction.guild, `🙋 Bestellung übernommen • ${id}`, `<@${interaction.user.id}> ist jetzt zuständig.`);
@@ -3803,6 +3998,7 @@ async function handleOrderTicketButton(interaction) {
     order.status = 'disputed';
     order.disputedAt = Date.now();
     order.updatedAt = Date.now();
+    addOrderTimeline(order, 'disputed', 'Bestellung als Streitfall markiert', interaction.user.id, order.disputedAt);
     saveSellingStore(store);
     await interaction.reply({ content: `⚠️ Bestellung **${id}** wurde als **Streitfall / Problem** markiert. Das Management kann den Vorgang nun gezielt prüfen.` });
     const internal = findSellingTextChannel(interaction.guild, '📦・bestellungen');
@@ -3824,6 +4020,7 @@ async function handleOrderTicketButton(interaction) {
     await interaction.reply({ content: '📄 Transcript wird gespeichert. Danach wird das Ticket geschlossen …' });
     await archiveSellingTranscript(interaction.channel, `Bestellung ${id}`, `Kunde: <@${order.userId}>\nStatus: ${orderStatusLabel(order.status)}`).catch(() => {});
     order.closedAt = Date.now();
+    addOrderTimeline(order, 'closed', 'Bestell-Ticket manuell geschlossen', interaction.user.id, order.closedAt);
     order.channelId = null;
     saveSellingStore(store);
     await refreshOrderStatusPanel(interaction.guild, data).catch(() => {});
@@ -4215,6 +4412,7 @@ async function automateNewOrder(guild, data, order, channel) {
     if (best) {
       order.assignedTo = best.id;
       order.claimedAt ||= Date.now();
+      addOrderTimeline(order, 'claimed', 'Automatisch einem Mitarbeiter zugewiesen', best.id, order.claimedAt);
       if (channel?.isTextBased()) await channel.send({ content: `🤖 Automatisch zugewiesen an <@${best.id}>.`, allowedMentions: { users: [best.id] } }).catch(() => {});
     }
   }
@@ -4348,7 +4546,7 @@ async function submitPriceModal(interaction, orderId) {
   order.basePrice = Math.round(amount*100)/100;
   order.finalPrice = calculateOrderFinalPrice(order);
   if (revisionsRaw) order.revisionsRemaining = Math.max(0, Math.min(99, Number.parseInt(revisionsRaw,10) || 0));
-  order.updatedAt = Date.now(); saveSellingStore(store);
+  order.updatedAt = Date.now(); addOrderTimeline(order, 'price', `Preis gesetzt: ${formatEuro(order.finalPrice)}`, interaction.user.id); saveSellingStore(store);
   const paypal = data.config.paypalEmail ? `\n**PayPal:** \`${data.config.paypalEmail}\`` : '\n**PayPal:** wird im Ticket bestätigt';
   await interaction.reply({ embeds: [shopEmbed(`💶 Preis bestätigt • ${orderId}`, `Grundpreis: **${formatEuro(order.basePrice)}**\nExpress: **${order.expressApproved ? `${order.expressSurchargePercent || 0} % (${formatEuro(expressFeeForOrder(order))})` : 'Nein'}**\nZusatzkosten: **${formatEuro(acceptedExtraChargesTotal(order))}**\nEndpreis: **${formatEuro(order.finalPrice)}**${paypal}\nRevisionen: **${order.revisionsRemaining}**`)] });
   await refreshStaffDashboard(interaction.guild, data).catch(()=>{}); saveSellingStore(store);
@@ -4431,6 +4629,7 @@ Originaldatei: ${attachment.url}` }).catch(() => null);
   order.deliveryFileUrl = sentUrls[0] || null;
   order.deliveryFileName = firstAttachmentOf(message.attachments)?.name || null;
   order.deliveryReadyAt = sentUrls.length ? Date.now() : null;
+  if (order.deliveryReadyAt) addOrderTimeline(order, 'ready', `${sentUrls.length} Produktdatei(en) bereitgestellt`, message.author.id, order.deliveryReadyAt);
   order.updatedAt = Date.now();
   if (!sentUrls.length) {
     order.status = 'processing';
@@ -4559,7 +4758,7 @@ async function acceptDeliveredOrder(interaction, orderId) {
     if(!order||!isOrderCustomer(interaction,order)||!isOrderDeliveryContext(interaction,order)||!order.deliveredAt||order.status!=='delivered'||!orderHasDeliveredFile(order)) return interaction.reply({content:'❌ Diese Lieferung kannst du noch nicht bestätigen. Nutze den Button im privaten Kundenbereich, nachdem eine Produktdatei vollständig geliefert wurde.',ephemeral:true});
     if(order.acceptedAt) return interaction.reply({content:'✅ Diese Bestellung wurde bereits akzeptiert.',ephemeral:true});
     if(isSellingActionLocked(`delivery:${interaction.guildId}:${orderId}`)) return interaction.reply({content:'⏳ Die Produktdatei wird gerade noch verarbeitet. Bitte versuche es gleich erneut.',ephemeral:true});
-    order.acceptedAt = Date.now(); order.status='delivered'; order.waitingOn=null; order.updatedAt=Date.now(); saveSellingStore(store);
+    order.acceptedAt = Date.now(); order.status='delivered'; order.waitingOn=null; order.updatedAt=Date.now(); addOrderTimeline(order, 'accepted', 'Produkt vom Kunden abgenommen', interaction.user.id, order.acceptedAt); saveSellingStore(store);
     await interaction.reply({content:`✅ Danke! **${orderId}** wurde als angenommen markiert. Du kannst die Bestellung jetzt direkt bewerten.`,components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`selling_review_open:${orderId}`).setLabel('Jetzt bewerten').setEmoji('⭐').setStyle(ButtonStyle.Success))],ephemeral:true});
     if (interaction.message?.editable) await interaction.message.edit({ components: customerDeliveryRows(order, true) }).catch(()=>{});
     const ticket=order.channelId?await interaction.guild.channels.fetch(order.channelId).catch(()=>null):null;
@@ -4614,6 +4813,172 @@ async function handleStaffPanelButton(interaction, action) {
   await interaction.reply({embeds:[shopEmbed(`🧭 Staff • ${action}`,text||'Keine Daten.')],ephemeral:true,allowedMentions:{parse:[]}});
 }
 
+
+async function sellingPermissionAudit(guild, data) {
+  const issues = [];
+  const warnings = [];
+  const ok = [];
+  const me = guild.members.me;
+  const criticalRoleKeys = ['owner','management','support','designer','sound','developer','customer','verified','unverified'];
+  const criticalChannels = ['📜・regelwerk','✅・verifizierung','👥・teamliste','🛒・bestellen','🎫・support-ticket','📊・shop-dashboard','📋・logs','🛡️・security-logs','🤖・automation-log'];
+
+  if (!me) issues.push('Bot-Mitglied konnte im Guild-Cache nicht aufgelöst werden.');
+  else {
+    const requiredPerms = [
+      ['Kanäle verwalten', PermissionFlagsBits.ManageChannels],
+      ['Rollen verwalten', PermissionFlagsBits.ManageRoles],
+      ['Nachrichten verwalten', PermissionFlagsBits.ManageMessages],
+      ['Kanäle sehen', PermissionFlagsBits.ViewChannel],
+      ['Nachrichten senden', PermissionFlagsBits.SendMessages],
+      ['Embeds senden', PermissionFlagsBits.EmbedLinks],
+      ['Dateien anhängen', PermissionFlagsBits.AttachFiles],
+    ];
+    for (const [label, perm] of requiredPerms) {
+      if (me.permissions.has(PermissionFlagsBits.Administrator) || me.permissions.has(perm)) ok.push(`Bot-Recht: ${label}`);
+      else issues.push(`Bot-Recht fehlt: ${label}`);
+    }
+  }
+
+  for (const key of criticalRoleKeys) {
+    const role = findSellingRole(guild, key);
+    if (!role) issues.push(`Rolle fehlt: ${SELLING.roles.find(r => r.key === key)?.name || key}`);
+    else if (me && role.id !== guild.roles.everyone.id && role.position >= me.roles.highest.position && key !== 'owner') {
+      issues.push(`Bot-Rolle ist nicht über ${role.name}; Rollenvergabe kann fehlschlagen.`);
+    }
+  }
+
+  for (const name of criticalChannels) {
+    const channel = findSellingTextChannel(guild, name);
+    if (!channel) issues.push(`Channel fehlt: ${name}`);
+    else ok.push(`Channel vorhanden: ${name}`);
+  }
+
+  const configuredIds = Object.entries(data.config?.channelIds || {});
+  for (const [key, id] of configuredIds) {
+    if (id && !guild.channels.cache.has(id)) warnings.push(`Gespeicherte Channel-ID ist veraltet: ${key} → ${id}`);
+  }
+
+  const ticketChannels = guild.channels.cache.filter(ch => ch?.isTextBased?.() && String(ch.topic || '').includes('selling-kind:'));
+  for (const channel of ticketChannels.values()) {
+    const topic = String(channel.topic || '');
+    const everyoneOw = channel.permissionOverwrites.cache.get(guild.roles.everyone.id);
+    if (!everyoneOw?.deny?.has(PermissionFlagsBits.ViewChannel)) issues.push(`#${channel.name}: @everyone kann möglicherweise das private Ticket sehen.`);
+    const customerId = topic.match(/selling-owner:([^|]+)/)?.[1];
+    if (customerId) {
+      const customerOw = channel.permissionOverwrites.cache.get(customerId);
+      if (!customerOw?.allow?.has(PermissionFlagsBits.ViewChannel)) issues.push(`#${channel.name}: Kunde ${customerId} hat keinen expliziten ViewChannel-Overwrite.`);
+    }
+    for (const key of ['support','management','owner']) {
+      const role = findSellingRole(guild, key);
+      if (!role) continue;
+      const perms = channel.permissionsFor(role);
+      if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.SendMessages)) {
+        issues.push(`#${channel.name}: ${role.name} hat keine vollständigen Ticket-Rechte.`);
+      }
+    }
+  }
+
+  for (const order of Object.values(data.orders || {})) {
+    if (order.channelId && !guild.channels.cache.has(order.channelId)) warnings.push(`${order.id}: gespeicherter Bestell-Channel ${order.channelId} existiert nicht mehr.`);
+    if (order.deliveryChannelId && !guild.channels.cache.has(order.deliveryChannelId)) warnings.push(`${order.id}: gespeicherter Delivery-Channel ${order.deliveryChannelId} existiert nicht mehr.`);
+  }
+
+  return { issues, warnings, ok, ticketCount: ticketChannels.size };
+}
+
+function sellingAuditEmbed(audit) {
+  const issueLines = audit.issues.slice(0, 18).map(x => `❌ ${x}`);
+  const warningLines = audit.warnings.slice(0, 12).map(x => `⚠️ ${x}`);
+  const text = [
+    `**Ergebnis:** ${audit.issues.length ? `❌ ${audit.issues.length} Problem(e)` : '✅ keine kritischen Probleme'}`,
+    `**Warnungen:** ${audit.warnings.length}`,
+    `**Private Selling-Tickets geprüft:** ${audit.ticketCount}`,
+    '',
+    ...issueLines,
+    ...warningLines,
+    audit.issues.length > issueLines.length ? `… +${audit.issues.length - issueLines.length} weitere Probleme` : null,
+    audit.warnings.length > warningLines.length ? `… +${audit.warnings.length - warningLines.length} weitere Warnungen` : null,
+  ].filter(Boolean).join('\n');
+  return shopEmbed('🛡️ Permission Audit', text.slice(0, 3900));
+}
+
+async function sellingDiagnose(guild, data, repair = false) {
+  const before = await sellingPermissionAudit(guild, data);
+  let healReport = null;
+  if (repair) healReport = await sellingHealthCheck(guild, data, true);
+  const after = repair ? await sellingPermissionAudit(guild, data) : before;
+  let jsonOk = true;
+  let jsonError = null;
+  try {
+    if (fs.existsSync(sellingDataPath)) JSON.parse(fs.readFileSync(sellingDataPath, 'utf8'));
+    fs.accessSync(sellingStorageDir, fs.constants.R_OK | fs.constants.W_OK);
+  } catch (error) {
+    jsonOk = false;
+    jsonError = String(error?.message || error).slice(0, 240);
+  }
+  const db = sellingDatabaseStatus();
+  const openOrders = Object.values(data.orders || {}).filter(o => !o.closedAt).length;
+  const openSupport = Object.values(data.supportTickets || {}).filter(t => t.status !== 'closed').length;
+  const lines = [
+    `**Version:** v5.11`,
+    `**Gateway-Ping:** ${Math.round(guild.client.ws.ping || 0)} ms`,
+    `**Datenspeicher:** ${jsonOk ? '✅ JSON-Fallback les-/schreibbar' : `❌ ${jsonError}`}`,
+    `**PostgreSQL:** ${db.connected ? '✅ verbunden' : db.configured ? '⚠️ konfiguriert, aber nicht verbunden' : '⚠️ nicht konfiguriert'}`,
+    db.lastSyncAt ? `**Letzter DB-Sync:** <t:${Math.floor(db.lastSyncAt/1000)}:R>` : null,
+    db.lastError ? `**DB-Hinweis:** ${db.lastError}` : null,
+    `**Offene Bestellungen:** ${openOrders}`,
+    `**Offene Support-Tickets:** ${openSupport}`,
+    `**Aktive Workflow-Locks:** ${sellingActionLocks.size}`,
+    `**Permission-Probleme:** ${after.issues.length}`,
+    `**Permission-Warnungen:** ${after.warnings.length}`,
+    `**Self-Heal:** ${repair ? '✅ ausgeführt' : 'nicht ausgeführt'}`,
+    data.automation.lastHealthAt ? `**Letzter Health-Check:** <t:${Math.floor(data.automation.lastHealthAt/1000)}:R>` : '**Letzter Health-Check:** noch keiner',
+    healReport ? `\n**Self-Heal Bericht**\n${healReport}` : null,
+  ].filter(Boolean);
+  return { audit: after, text: lines.join('\n').slice(0, 3900) };
+}
+
+function isTrackedSellingChannel(guild, channel) {
+  if (!guild || !channel) return false;
+  try {
+    const data = getGuildShopData(guild.id).data;
+    if (Object.values(data.config?.channelIds || {}).includes(channel.id)) return true;
+  } catch (_) {}
+  const topic = String(channel.topic || '');
+  if (topic.includes('selling-kind:') || topic.includes('selling-delivery:')) return true;
+  const knownNames = new Set([
+    '📜・regelwerk','✅・verifizierung','👥・teamliste','🛒・bestellen','🎫・support-ticket','📊・shop-dashboard','📋・logs','🛡️・security-logs','🤖・automation-log',
+    '💳・zahlung','🖼️・portfolio','📄・transkripte','📦・bestellungen','💰・verkäufe','📅・auftragskalender','🏆・staff-stats',
+  ]);
+  return knownNames.has(channel.name);
+}
+
+function dataRoleIdMatches(guildId, roleKey, roleId) {
+  try { return getGuildShopData(guildId).data.config?.roleIds?.[roleKey] === roleId; } catch (_) { return false; }
+}
+
+function scheduleSellingSelfHeal(guild, reason = 'Strukturänderung erkannt') {
+  if (!guild || sellingResetGuilds.has(guild.id)) return;
+  const { data } = getGuildShopData(guild.id);
+  if (data.config?.selfHealEnabled === false) return;
+  const old = sellingSelfHealTimers.get(guild.id);
+  if (old) clearTimeout(old);
+  const timer = setTimeout(async () => {
+    sellingSelfHealTimers.delete(guild.id);
+    if (sellingResetGuilds.has(guild.id)) return;
+    try {
+      const { store, data: fresh } = getGuildShopData(guild.id);
+      const report = await sellingHealthCheck(guild, fresh, true);
+      saveSellingStore(store);
+      await logAutomation(guild, '🧰 Self-Heal ausgeführt', `${reason}\n\n${report}`).catch(() => {});
+    } catch (error) {
+      await reportSellingError(guild, error, { source: 'self-heal', reason }).catch(() => {});
+    }
+  }, 5000);
+  timer.unref?.();
+  sellingSelfHealTimers.set(guild.id, timer);
+}
+
 async function sellingHealthCheck(guild,data,selfHeal=false){
   const requiredChannels=['📜・regelwerk','✅・verifizierung','👥・teamliste','🛒・bestellen','🎫・support-ticket','📊・shop-dashboard','📋・logs','🛡️・security-logs','🤖・automation-log'];
   const missingChannels=requiredChannels.filter(name=>!findSellingTextChannel(guild,name));
@@ -4637,12 +5002,15 @@ async function sellingHealthCheck(guild,data,selfHeal=false){
     }
   }
   data.automation.lastHealthAt=Date.now();
+  const auditAfter = await sellingPermissionAudit(guild, data).catch(() => ({ issues: [], warnings: [] }));
   return [
-    `Fehlende kritische Channels: **${missingChannels.length}**${missingChannels.length?` (${missingChannels.join(', ')})`:''}`,
-    `Fehlende kritische Rollen: **${missingRoles.length}**${missingRoles.length?` (${missingRoles.join(', ')})`:''}`,
-    `Struktur-Heal: **${healed?'ausgeführt':'nicht nötig'}**`,
+    `Fehlende kritische Channels vor Heal: **${missingChannels.length}**${missingChannels.length?` (${missingChannels.join(', ')})`:''}`,
+    `Fehlende kritische Rollen vor Heal: **${missingRoles.length}**${missingRoles.length?` (${missingRoles.join(', ')})`:''}`,
+    `Struktur-Heal: **${healed?'ausgeführt':'geprüft'}**`,
     `Rollen-/Channel-Rechte synchronisiert: **${permissionSync?'ja':'nein'}**`,
     `Offene Ticket-/Delivery-Rechte aktualisiert: **${dynamicPermissionsUpdated}**`,
+    `Permission-Probleme nach Heal: **${auditAfter.issues.length}**`,
+    `Permission-Warnungen nach Heal: **${auditAfter.warnings.length}**`,
     `Bot-Rolle: **${guild.members.me?.roles.highest?.name||'unbekannt'}**`,
   ].join('\n');
 }
@@ -4825,7 +5193,7 @@ async function runSellingAutomationForGuild(guild){
     await logAutomation(guild,'💾 Auto-Backup','Selling-Daten wurden gesichert. Es werden maximal die letzten 5 Backups behalten.');
   }
 }
-async function runSellingAutomation(client){for(const guild of client.guilds.cache.values())await runSellingAutomationForGuild(guild).catch(error=>console.error('Selling automation tick:',error));}
+async function runSellingAutomation(client){for(const guild of client.guilds.cache.values()){try{await runSellingAutomationForGuild(guild);}catch(error){await reportSellingError(guild,error,{source:'automation-tick'}).catch(()=>{});}}}
 
 
 async function createOfferForOrder(guild, data, order, { price, days, scope, by }) {
@@ -4842,6 +5210,7 @@ async function createOfferForOrder(guild, data, order, { price, days, scope, by 
   order.waitingOn = 'customer';
   order.lastStaffAt = Date.now();
   order.lastActivityAt = Date.now();
+  addOrderTimeline(order, 'offer', `Angebot ${id} erstellt: ${formatEuro(offer.price)}`, by);
   const channel = order.channelId ? await guild.channels.fetch(order.channelId).catch(() => null) : null;
   if (channel?.isTextBased()) {
     await channel.send({
@@ -4880,6 +5249,7 @@ async function handleOfferButton(interaction, action, offerId) {
       order.waitingOn = 'staff';
       order.lastCustomerAt = Date.now();
       order.lastActivityAt = Date.now();
+      addOrderTimeline(order, 'offer-accepted', `Angebot ${offerId} angenommen`, interaction.user.id);
       await interaction.update({ content: `✅ <@${order.userId}> hat **${offerId}** angenommen.`, embeds: interaction.message.embeds, components: [] }).catch(() => {});
       await interaction.followUp({ content: `✅ Angebot angenommen. Endpreis: **${formatEuro(order.finalPrice)}**. Das Team kann jetzt die Zahlung bestätigen.`, ephemeral: true }).catch(() => {});
     } else {
@@ -4887,6 +5257,7 @@ async function handleOfferButton(interaction, action, offerId) {
       order.waitingOn = 'staff';
       order.lastCustomerAt = Date.now();
       order.lastActivityAt = Date.now();
+      addOrderTimeline(order, 'offer-declined', `Angebot ${offerId} abgelehnt`, interaction.user.id);
       await interaction.update({ content: `❌ <@${order.userId}> hat **${offerId}** abgelehnt.`, embeds: interaction.message.embeds, components: [] }).catch(() => {});
     }
     saveSellingStore(store);
@@ -5339,9 +5710,9 @@ async function handleSellCommand(interaction) {
     return;
   }
 
-  const managementSensitive = new Set(['dashboard', 'panel']);
+  const managementSensitive = new Set(['dashboard', 'panel', 'audit', 'diagnose']);
   if (managementSensitive.has(sub) && !isOwnerOrManagement(interaction.member)) {
-    await interaction.reply({ content: '❌ Dashboard und Control-Panel sind nur für **Management oder Inhaber** verfügbar.', ephemeral: true });
+    await interaction.reply({ content: '❌ Dashboard, Audit und Diagnose sind nur für **Management oder Inhaber** verfügbar.', ephemeral: true });
     return;
   }
 
@@ -5353,6 +5724,21 @@ async function handleSellCommand(interaction) {
 
   if (sub === 'portfolio' && !(isOwnerOrManagement(interaction.member) || memberHasSellingRole(interaction.member, 'designer'))) {
     await interaction.reply({ content: '❌ Portfolio-Verwaltung ist nur für **Designer, Management oder Inhaber** verfügbar.', ephemeral: true });
+    return;
+  }
+
+  if (sub === 'audit') {
+    const audit = await sellingPermissionAudit(interaction.guild, data);
+    await interaction.reply({ embeds: [sellingAuditEmbed(audit)], ephemeral: true, allowedMentions: { parse: [] } });
+    return;
+  }
+
+  if (sub === 'diagnose') {
+    const action = interaction.options.getString('action') || 'check';
+    await interaction.deferReply({ ephemeral: true });
+    const result = await sellingDiagnose(interaction.guild, data, action === 'repair');
+    saveSellingStore(store);
+    await interaction.editReply({ embeds: [shopEmbed(action === 'repair' ? '🧰 Diagnose + Reparatur' : '🩺 Selling Diagnose', result.text)], allowedMentions: { parse: [] } });
     return;
   }
 
@@ -5435,10 +5821,15 @@ async function handleSellCommand(interaction) {
       await interaction.reply({ embeds: [orderInfoEmbed(order, data)], ephemeral: true, allowedMentions: { parse: [] } });
       return;
     }
+    if (action === 'timeline') {
+      await interaction.reply({ embeds: [orderTimelineEmbed(order)], ephemeral: true, allowedMentions: { parse: [] } });
+      return;
+    }
     if (action === 'assign') {
       if (order.closedAt || order.acceptedAt) { await interaction.reply({ content: '❌ Diese Bestellung ist bereits abgeschlossen.', ephemeral: true }); return; }
       order.assignedTo = interaction.user.id;
       order.claimedAt = Date.now();
+      addOrderTimeline(order, 'claimed', 'Bestellung manuell übernommen', interaction.user.id, order.claimedAt);
       saveSellingStore(store);
       await interaction.reply({ content: `✅ **${id}** wurde dir zugewiesen.`, ephemeral: true });
       return;
@@ -5453,6 +5844,7 @@ async function handleSellCommand(interaction) {
       order.basePrice = Math.round(Number(amount) * 100) / 100;
       const discount = effectiveDiscountForOrder(order);
       order.finalPrice = calculateOrderFinalPrice(order);
+      addOrderTimeline(order, 'price', `Preis gesetzt: ${formatEuro(order.finalPrice)}`, interaction.user.id);
       saveSellingStore(store);
       const channel = order.channelId ? await interaction.guild.channels.fetch(order.channelId).catch(() => null) : null;
       if (channel?.isTextBased()) {
@@ -5472,6 +5864,7 @@ async function handleSellCommand(interaction) {
         return;
       }
       order.revisionsRemaining = amount;
+      addOrderTimeline(order, 'revisions', `Revisionen auf ${amount} gesetzt`, interaction.user.id);
       saveSellingStore(store);
       await interaction.reply({ content: `✅ **${id}** hat jetzt **${amount}** inkludierte Revision(en).`, ephemeral: true });
       return;
@@ -6026,6 +6419,37 @@ async function handleSellingInteraction(interaction) {
   return false;
 }
 
+
+function sellingErrorId() {
+  return `ERR-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+}
+
+async function reportSellingError(guild, error, context = {}) {
+  const id = sellingErrorId();
+  const message = String(error?.message || error || 'Unbekannter Fehler').slice(0, 1000);
+  const stack = String(error?.stack || error || '').slice(0, 3200);
+  const contextText = Object.entries(context || {}).map(([k,v]) => `${k}=${String(v).slice(0,180)}`).join(' | ');
+  console.error(`❌ [${id}] Turbo Designs v5.11`, contextText, error);
+  if (guild) {
+    const channel = findSellingTextChannel(guild, '📋・logs') || findSellingTextChannel(guild, '🤖・automation-log');
+    if (channel?.isTextBased()) {
+      await channel.send({
+        embeds: [shopEmbed(`🚨 Fehler ${id}`, [
+          `**Quelle:** ${context.source || 'Selling-System'}`,
+          `**Fehler:** ${message}`,
+          contextText ? `**Kontext:** ${contextText}` : null,
+          '',
+          '```',
+          stack.slice(0, 2800),
+          '```',
+        ].filter(Boolean).join('\n').slice(0, 3900))],
+        allowedMentions: { parse: [] },
+      }).catch(() => {});
+    }
+  }
+  return id;
+}
+
 const originalLogin = Client.prototype.login;
 Client.prototype.login = function patchedLogin(...args) {
   sellingLoginToken = args[0] || sellingLoginToken;
@@ -6036,8 +6460,13 @@ Client.prototype.login = function patchedLogin(...args) {
       try {
         await handleSellingInteraction(interaction);
       } catch (error) {
-        console.error('❌ Selling Setup Fehler [v5.10]:', error);
-        const payload = { content: '❌ Beim Selling-System ist ein Fehler aufgetreten. Prüfe die Bot-Rechte und Railway-Logs.', ephemeral: true };
+        const errorId = await reportSellingError(interaction.guild, error, {
+          source: 'interaction',
+          command: interaction.commandName || interaction.customId || 'unknown',
+          user: interaction.user?.id || 'unknown',
+          channel: interaction.channelId || 'unknown',
+        });
+        const payload = { content: `❌ Beim Selling-System ist ein Fehler aufgetreten. Fehler-ID: \`${errorId}\``, ephemeral: true };
         if (interaction.deferred || interaction.replied) await interaction.followUp(payload).catch(() => {});
         else await interaction.reply(payload).catch(() => {});
       }
@@ -6071,18 +6500,25 @@ Client.prototype.login = function patchedLogin(...args) {
     });
 
     this.once(Events.ClientReady, async () => {
+      await initSellingPostgres();
       for (const guild of this.guilds.cache.values()) {
         try {
           const { store, data } = getGuildShopData(guild.id);
-          await sellingHealthCheck(guild, data, true);
+          const startupAudit = await sellingPermissionAudit(guild, data);
+          if (data.config?.selfHealEnabled !== false && (startupAudit.issues.length || startupAudit.warnings.length)) {
+            await sellingHealthCheck(guild, data, true);
+          } else {
+            await sellingHealthCheck(guild, data, false);
+          }
           await refreshTeamList(guild, data).catch(() => {});
           saveSellingStore(store);
+          if (startupAudit.issues.length) await logAutomation(guild, '🛡️ Startup Permission Audit', `Vor Startup-Heal erkannt: **${startupAudit.issues.length}** Problem(e), **${startupAudit.warnings.length}** Warnung(en).`).catch(()=>{});
         } catch (error) {
-          console.error(`❌ Permission Sync auf ${guild.name}:`, error);
+          await reportSellingError(guild, error, { source: 'startup-health' }).catch(() => {});
         }
       }
       await runSellingAutomation(this).catch(() => {});
-      setInterval(() => runSellingAutomation(this).catch(error => console.error('❌ Selling Automation:', error)), SELLING_AUTOMATION_TICK_MS).unref?.();
+      setInterval(() => runSellingAutomation(this).catch(error => console.error('❌ Selling Automation Hauptloop:', error)), SELLING_AUTOMATION_TICK_MS).unref?.();
     });
 
     this.on(Events.ChannelCreate, async channel => {
@@ -6090,6 +6526,7 @@ Client.prototype.login = function patchedLogin(...args) {
     });
     this.on(Events.ChannelDelete, async channel => {
       await handleAntiNukeAuditEvent(channel.guild, 'Channel gelöscht', [AuditLogEvent.ChannelDelete], { targetId: channel.id, targetText: `#${channel.name}` }).catch(() => {});
+      if (isTrackedSellingChannel(channel.guild, channel)) scheduleSellingSelfHeal(channel.guild, `Selling-Channel gelöscht: #${channel.name}`);
     });
     this.on(Events.ChannelUpdate, async (oldChannel, newChannel) => {
       if (sellingResetGuilds.has(newChannel.guild.id)) return;
@@ -6099,18 +6536,21 @@ Client.prototype.login = function patchedLogin(...args) {
         : false;
       if (!permissionsChanged && oldChannel.name === newChannel.name) return;
       await handleAntiNukeAuditEvent(newChannel.guild, permissionsChanged ? 'Channel-Berechtigungen geändert' : 'Channel geändert', [AuditLogEvent.ChannelUpdate], { targetId: newChannel.id, targetText: `#${newChannel.name}` }).catch(() => {});
+      if ((permissionsChanged || oldChannel.name !== newChannel.name) && (isTrackedSellingChannel(newChannel.guild, oldChannel) || isTrackedSellingChannel(newChannel.guild, newChannel))) scheduleSellingSelfHeal(newChannel.guild, `Selling-Channel geändert: #${newChannel.name}`);
     });
     this.on(Events.GuildRoleCreate, async role => {
       await handleAntiNukeAuditEvent(role.guild, 'Rolle erstellt', [AuditLogEvent.RoleCreate], { targetId: role.id, targetText: `@${role.name}` }).catch(() => {});
     });
     this.on(Events.GuildRoleDelete, async role => {
       await handleAntiNukeAuditEvent(role.guild, 'Rolle gelöscht', [AuditLogEvent.RoleDelete], { targetId: role.id, targetText: `@${role.name}` }).catch(() => {});
+      if (SELLING.roles.some(r => r.name === role.name || dataRoleIdMatches(role.guild.id, r.key, role.id))) scheduleSellingSelfHeal(role.guild, `Selling-Rolle gelöscht: @${role.name}`);
     });
     this.on(Events.GuildRoleUpdate, async (oldRole, newRole) => {
       if (sellingResetGuilds.has(newRole.guild.id)) return;
       const permsChanged = oldRole.permissions.bitfield !== newRole.permissions.bitfield;
       if (!permsChanged && oldRole.name === newRole.name) return;
       await handleAntiNukeAuditEvent(newRole.guild, permsChanged ? 'Rollen-Berechtigungen geändert' : 'Rolle geändert', [AuditLogEvent.RoleUpdate], { targetId: newRole.id, targetText: `@${newRole.name}` }).catch(() => {});
+      if (SELLING.roles.some(r => r.name === oldRole.name || r.name === newRole.name || dataRoleIdMatches(newRole.guild.id, r.key, newRole.id))) scheduleSellingSelfHeal(newRole.guild, `Selling-Rolle geändert: @${newRole.name}`);
     });
     this.on(Events.GuildBanAdd, async ban => {
       await handleAntiNukeAuditEvent(ban.guild, 'Mitglied gebannt', [AuditLogEvent.MemberBanAdd], { targetId: ban.user.id, targetText: `<@${ban.user.id}>` }).catch(() => {});
