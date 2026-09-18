@@ -1,10 +1,10 @@
 {
   "name": "community-allround-bot",
-  "version": "5.9.4",
-  "description": "Turbo Designs selling bot v5.9.4: checkout compatibility, consolidated tools and detailed GitHub-to-Discord changelogs",
+  "version": "5.10.0",
+  "description": "Turbo Designs selling bot v5.10 with support IDs, internal ticket notes, express orders, extra charges, workload dashboard, enhanced customer profiles and automatic weekly reports",
   "main": "index.js",
   "scripts": {
-    "start": "node selling-entry-merged.js",
+    "start": "node selling-entry.js",
     "start:core": "node index.js",
     "deploy": "node deploy-commands.js"
   },

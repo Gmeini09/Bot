@@ -11,6 +11,7 @@ const {
   EmbedBuilder,
   Events,
   FileUploadBuilder,
+  LabelBuilder,
   ModalBuilder,
   PermissionFlagsBits,
   REST,
@@ -99,7 +100,7 @@ const SUPPORT_TYPES = {
 function isSellingInteraction(interaction) {
   try {
     if (interaction.isChatInputCommand?.()) {
-      if (interaction.commandName === 'sell') return true;
+      if (interaction.commandName === 'sell' || interaction.commandName === 'paypal') return true;
       return interaction.commandName === 'setup'
         && interaction.options.getSubcommandGroup(false) === 'server'
         && interaction.options.getSubcommand(false) === 'selling';
@@ -120,7 +121,20 @@ const SELLING_VERIFY_TTL_MS = 5 * 60 * 1000;
 const sellingPendingDeliveries = new Map();
 const sellingUserRateLimits = new Map();
 const sellingActionLocks = new Set();
+const sellingActionLockStartedAt = new Map();
+const sellingActionLockTimers = new Map();
 const SELLING_DELIVERY_TTL_MS = 5 * 60 * 1000;
+
+// Locks protect double-clicks and concurrent Discord interactions. They must never
+// be able to brick an order permanently if an API call stalls or Railway/Discord
+// interrupts an async workflow. Status locks are intentionally short; real file
+// deliveries get a much longer window because watermarking/uploads can take time.
+function sellingActionLockTtlMs(key) {
+  if (String(key).startsWith('delivery:')) return 15 * 60 * 1000;
+  if (String(key).startsWith('order-status:')) return 45 * 1000;
+  if (String(key).startsWith('order-create:') || String(key).startsWith('support-create:')) return 2 * 60 * 1000;
+  return 2 * 60 * 1000;
+}
 
 function consumeSellingRateLimit(key, maxActions, windowMs) {
   const now = Date.now();
@@ -140,13 +154,46 @@ function consumeSellingRateLimit(key, maxActions, windowMs) {
   return true;
 }
 
+function releaseSellingActionLock(key) {
+  sellingActionLocks.delete(key);
+  sellingActionLockStartedAt.delete(key);
+  const timer = sellingActionLockTimers.get(key);
+  if (timer) clearTimeout(timer);
+  sellingActionLockTimers.delete(key);
+}
+
+function pruneStaleSellingActionLock(key) {
+  if (!sellingActionLocks.has(key)) return false;
+  const startedAt = Number(sellingActionLockStartedAt.get(key) || 0);
+  const ttl = sellingActionLockTtlMs(key);
+  if (!startedAt || Date.now() - startedAt >= ttl) {
+    releaseSellingActionLock(key);
+    return true;
+  }
+  return false;
+}
+
 function acquireSellingActionLock(key) {
+  pruneStaleSellingActionLock(key);
   if (sellingActionLocks.has(key)) return false;
+  const startedAt = Date.now();
   sellingActionLocks.add(key);
+  sellingActionLockStartedAt.set(key, startedAt);
+  const ttl = sellingActionLockTtlMs(key);
+  const timer = setTimeout(() => {
+    // Only clear the exact generation of this lock. A newer lock with the same
+    // key must not be released by an older timeout.
+    if (sellingActionLockStartedAt.get(key) === startedAt) releaseSellingActionLock(key);
+  }, ttl + 1000);
+  timer.unref?.();
+  sellingActionLockTimers.set(key, timer);
   return true;
 }
-function releaseSellingActionLock(key) { sellingActionLocks.delete(key); }
-function isSellingActionLocked(key) { return sellingActionLocks.has(key); }
+
+function isSellingActionLocked(key) {
+  pruneStaleSellingActionLock(key);
+  return sellingActionLocks.has(key);
+}
 function firstAttachmentOf(collection) {
   if (!collection) return null;
   if (typeof collection.first === 'function') return collection.first() || null;
@@ -206,6 +253,7 @@ function blankGuildShopData() {
     nextPartner: 1,
     nextRefund: 1,
     nextLeak: 1,
+    nextSupport: 1,
     orders: {},
     licenses: {},
     blacklist: {},
@@ -219,6 +267,8 @@ function blankGuildShopData() {
     releases: {},
     refunds: {},
     leakReports: {},
+    supportTickets: {},
+    ticketNotes: {},
     expenses: {},
     downloads: {},
     products: Object.fromEntries(Object.entries(PRODUCT_TYPES).map(([key, item]) => [key, { enabled: true, price: null, etaDays: item.etaDays, description: null }])),
@@ -239,6 +289,9 @@ function blankGuildShopData() {
       lastTickAt: 0,
       lastHealthAt: 0,
       lastDailyReportDate: null,
+      lastWeeklyReportKey: null,
+      weeklyReportWeekday: 5,
+      weeklyReportHour: 19,
     },
     config: {
       paypalEmail: null,
@@ -253,6 +306,8 @@ function blankGuildShopData() {
       partnerSpotlightMessageId: null,
       teamListMessageId: null,
       testMode: false,
+      expressSurchargePercent: 20,
+      revisionExtraPrice: 5,
     },
     security: {
       antiNuke: {
@@ -333,6 +388,31 @@ function migrateSellingStore(store) {
     changed = true;
   }
 
+  // v5 adds support IDs, internal ticket notes, express jobs, extra charges and weekly reports.
+  if (version < 5) {
+    for (const data of Object.values(store.guilds || {})) {
+      if (!data || typeof data !== 'object') continue;
+      data.nextSupport ||= 1;
+      data.supportTickets ||= {};
+      data.ticketNotes ||= {};
+      data.config ||= {};
+      if (!Number.isFinite(Number(data.config.expressSurchargePercent))) data.config.expressSurchargePercent = 20;
+      if (!Number.isFinite(Number(data.config.revisionExtraPrice))) data.config.revisionExtraPrice = 5;
+      data.automation ||= {};
+      data.automation.weeklyReportWeekday ??= 5;
+      data.automation.weeklyReportHour ??= 19;
+      data.automation.lastWeeklyReportKey ||= null;
+      for (const order of Object.values(data.orders || {})) {
+        if (!order || typeof order !== 'object') continue;
+        order.extraCharges = Array.isArray(order.extraCharges) ? order.extraCharges : [];
+        order.expressRequested = Boolean(order.expressRequested);
+        order.expressApproved = Boolean(order.expressApproved);
+      }
+    }
+    version = 5;
+    changed = true;
+  }
+
   store.version = version;
   return changed;
 }
@@ -367,12 +447,12 @@ function loadSellingStore() {
   if (sellingStoreCache) return sellingStoreCache;
   try {
     if (!fs.existsSync(sellingDataPath)) {
-      sellingStoreCache = { version: 4, guilds: {} };
+      sellingStoreCache = { version: 5, guilds: {} };
       return sellingStoreCache;
     }
     const parsed = JSON.parse(fs.readFileSync(sellingDataPath, 'utf8'));
     if (!parsed || typeof parsed !== 'object') {
-      sellingStoreCache = { version: 4, guilds: {} };
+      sellingStoreCache = { version: 5, guilds: {} };
       return sellingStoreCache;
     }
     parsed.version = Number(parsed.version || 1);
@@ -418,6 +498,7 @@ function ensureGuildShopData(store, guildId) {
   data.nextPartner = Number(data.nextPartner || 1);
   data.nextRefund = Number(data.nextRefund || 1);
   data.nextLeak = Number(data.nextLeak || 1);
+  data.nextSupport = Number(data.nextSupport || 1);
   data.orders = data.orders && typeof data.orders === 'object' ? data.orders : {};
   data.licenses = data.licenses && typeof data.licenses === 'object' ? data.licenses : {};
   data.blacklist = data.blacklist && typeof data.blacklist === 'object' ? data.blacklist : {};
@@ -431,6 +512,8 @@ function ensureGuildShopData(store, guildId) {
   data.releases = data.releases && typeof data.releases === 'object' ? data.releases : {};
   data.refunds = data.refunds && typeof data.refunds === 'object' ? data.refunds : {};
   data.leakReports = data.leakReports && typeof data.leakReports === 'object' ? data.leakReports : {};
+  data.supportTickets = data.supportTickets && typeof data.supportTickets === 'object' ? data.supportTickets : {};
+  data.ticketNotes = data.ticketNotes && typeof data.ticketNotes === 'object' ? data.ticketNotes : {};
   data.expenses = data.expenses && typeof data.expenses === 'object' ? data.expenses : {};
   data.downloads = data.downloads && typeof data.downloads === 'object' ? data.downloads : {};
   data.products = data.products && typeof data.products === 'object' ? data.products : {};
@@ -743,12 +826,26 @@ function getDiscountCodeState(data, rawCode) {
   return { code, coupon: null, voucher: null, error: 'Der Rabatt- oder Gutscheincode existiert nicht.' };
 }
 
+function acceptedExtraChargesTotal(order) {
+  return (Array.isArray(order?.extraCharges) ? order.extraCharges : [])
+    .filter(item => item && item.status === 'accepted')
+    .reduce((sum, item) => sum + Math.max(0, Number(item.amount || 0)), 0);
+}
+
+function expressFeeForOrder(order) {
+  const base = Number(order?.basePrice);
+  if (!order?.expressApproved || !Number.isFinite(base)) return 0;
+  const percent = Math.max(0, Number(order.expressSurchargePercent || 0));
+  return Math.round(base * percent) / 100;
+}
+
 function calculateOrderFinalPrice(order) {
   const base = Number(order.basePrice);
   if (!Number.isFinite(base)) return null;
   const percent = effectiveDiscountForOrder(order);
   const fixed = Math.max(0, Number(order.voucherAmount || 0));
-  return Math.max(0, Math.round((base * (1 - percent / 100) - fixed) * 100) / 100);
+  const subtotal = base + expressFeeForOrder(order) + acceptedExtraChargesTotal(order);
+  return Math.max(0, Math.round((subtotal * (1 - percent / 100) - fixed) * 100) / 100);
 }
 
 function redeemDiscountCodeForPaidOrder(data, order) {
@@ -1428,6 +1525,32 @@ function buildSellCommandDefinition() {
             ],
           },
           {
+            type: 1, name: 'note', description: 'Interne Notizen im aktuellen Selling-Ticket.', options: [
+              { type: 3, name: 'action', description: 'Aktion', required: true, choices: [
+                { name: 'Notiz hinzufügen', value: 'add' }, { name: 'Notizen anzeigen', value: 'list' }, { name: 'Notizen löschen', value: 'clear' },
+              ] },
+              { type: 3, name: 'text', description: 'Interne Notiz', required: false, max_length: 1000 },
+            ],
+          },
+          {
+            type: 1, name: 'extra', description: 'Zusatzkosten zu einer Bestellung.', options: [
+              { type: 3, name: 'action', description: 'Aktion', required: true, choices: [
+                { name: 'Hinzufügen', value: 'add' }, { name: 'Liste', value: 'list' },
+              ] },
+              { type: 3, name: 'order', description: 'Bestellnummer', required: true },
+              { type: 10, name: 'betrag', description: 'Zusatzbetrag in EUR', required: false, min_value: 0.01 },
+              { type: 3, name: 'text', description: 'Grund / Leistung', required: false, max_length: 500 },
+            ],
+          },
+          {
+            type: 1, name: 'pricing', description: 'Express- und Revisionspreise konfigurieren.', options: [
+              { type: 10, name: 'express_prozent', description: 'Express-Aufschlag in Prozent', required: false, min_value: 0, max_value: 500 },
+              { type: 10, name: 'revision_preis', description: 'Richtpreis für zusätzliche Revision in EUR', required: false, min_value: 0 },
+            ],
+          },
+          { type: 1, name: 'workload', description: 'Zeigt die aktuelle Team-Auslastung.' },
+          { type: 1, name: 'weeklyreport', description: 'Erstellt den Wochenbericht sofort.' },
+          {
             type: 1, name: 'summary', description: 'Erstellt eine kompakte Ticket-Zusammenfassung.', options: [
               { type: 3, name: 'order', description: 'Bestellnummer', required: true },
             ],
@@ -1441,6 +1564,50 @@ function buildSellCommandDefinition() {
       },
     ],
   };
+}
+
+function buildPaypalSendCommandDefinition() {
+  return {
+    name: 'paypal',
+    description: 'Sendet die PayPal-Zahlungsdaten im aktuellen Selling-Ticket.',
+    dm_permission: false,
+  };
+}
+
+async function handlePaypalSendCommand(interaction) {
+  if (!interaction.guild || !interaction.channel) {
+    await interaction.reply({ content: '❌ Dieser Command funktioniert nur auf dem Discord-Server.', ephemeral: true }).catch(() => {});
+    return;
+  }
+
+  if (!canHandleSupportTicket(interaction.member)) {
+    await interaction.reply({ content: '❌ Nur Support, Management oder Inhaber können die PayPal-Zahlungsdaten senden.', ephemeral: true }).catch(() => {});
+    return;
+  }
+
+  const { data } = getGuildShopData(interaction.guildId);
+  const paypalEmail = String(data.config?.paypalEmail || '').trim();
+  if (!paypalEmail) {
+    await interaction.reply({ content: '⚠️ Es ist noch keine PayPal-Mail hinterlegt. Management kann sie mit `/sell paypal email:DEINE-MAIL` setzen.', ephemeral: true }).catch(() => {});
+    return;
+  }
+
+  const topic = String(interaction.channel.topic || '');
+  const isSellingTicket = topic.includes('selling-kind:order') || topic.includes('selling-kind:support');
+  if (!isSellingTicket) {
+    await interaction.reply({ content: '❌ `/paypal` kann nur in einem privaten Bestell- oder Support-Ticket verwendet werden.', ephemeral: true }).catch(() => {});
+    return;
+  }
+
+  const orderMatch = topic.match(/selling-order:([^|]+)/);
+  const orderLine = orderMatch?.[1] ? `\n**Bestellung:** \`${orderMatch[1]}\`` : '';
+  const embed = shopEmbed(
+    '💳 PayPal-Zahlung',
+    `**PayPal-Mail:** \`${paypalEmail}\`\n**Zahlungsart:** **Familie und Freunde**${orderLine}\n\nBitte sende den im Ticket vereinbarten Betrag an die oben angegebene PayPal-Adresse.\n\n⚠️ **Wichtig:** Niemals PayPal-Passwort, 2FA-Code oder Login-Code senden.`,
+  );
+
+  await interaction.reply({ embeds: [embed] });
+  await logSelling(interaction.guild, '💳 PayPal-Daten gesendet', `<@${interaction.user.id}> hat die PayPal-Zahlungsdaten in <#${interaction.channel.id}> gesendet.`).catch(() => {});
 }
 
 function addSellingSetupCommand(body) {
@@ -1461,6 +1628,7 @@ function addSellingSetupCommand(body) {
     return patched;
   });
   if (!patchedBody.some(command => command?.name === 'sell')) patchedBody.push(buildSellCommandDefinition());
+  if (!patchedBody.some(command => command?.name === 'paypal')) patchedBody.push(buildPaypalSendCommandDefinition());
   return patchedBody;
 }
 // Der Hauptbot registriert seine Commands selbst. Wir ergänzen dabei nur
@@ -2512,6 +2680,9 @@ function orderActionRows(order) {
       new ButtonBuilder().setCustomId(`selling_dispute:${id}`).setLabel('Problem / Streitfall').setEmoji('⚠️').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`selling_close:${id}`).setLabel('Ticket schließen').setEmoji('🔒').setStyle(ButtonStyle.Danger),
     ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`selling_express:${id}`).setLabel(order.expressRequested ? 'Express angefragt' : 'Express anfragen').setEmoji('⚡').setStyle(ButtonStyle.Danger).setDisabled(Boolean(order.expressRequested || order.paidAt || order.closedAt)),
+    ),
   ];
 }
 
@@ -2545,7 +2716,9 @@ function orderInfoEmbed(order, data = null) {
     `**Käufer:** <@${order.userId}>`,
     order.giftRecipientId ? `**Geschenk-Empfänger:** <@${order.giftRecipientId}>` : null,
     `**Zuständig:** ${assigned}`,
-    `**Preis:** ${basePrice}${effectiveDiscount ? ` → **${finalPrice}**` : ''}`,
+    `**Preis:** ${basePrice}${(effectiveDiscount || expressFeeForOrder(order) || acceptedExtraChargesTotal(order)) ? ` → **${finalPrice}**` : ''}`,
+    `**Express:** ${order.expressRequested ? `⚡ Ja${order.expressApproved ? ` (+${Number(order.expressSurchargePercent || 0)} %)` : ' • wartet auf Bestätigung'}` : 'Nein'}`,
+    `**Zusatzkosten:** ${formatEuro(acceptedExtraChargesTotal(order))}${(order.extraCharges || []).some(item => item?.status === 'pending') ? ' • offene Freigabe vorhanden' : ''}`,
     `**Rabatt:** ${discountParts.length ? discountParts.join(' • ') : 'Keiner'}`,
     `**Revisionen:** ${Math.max(0, Number(order.revisionsRemaining || 0))}`,
     `**Richtwert Lieferung:** ${orderEtaDays(order)} Tag(e) / nach Umfang`,
@@ -2567,6 +2740,11 @@ function dashboardEmbed(guild, data) {
   const delivered = orders.filter(order => order.deliveredAt);
   const revenue = paidOrders.reduce((sum, order) => sum + Number(order.finalPrice ?? order.basePrice ?? 0), 0);
   const open = orders.filter(order => !order.closedAt).length;
+  const supportOpen = Object.values(data.supportTickets || {}).filter(ticket => ticket.status !== 'closed').length;
+  const waitStaff = orders.filter(order => !order.closedAt && order.waitingOn === 'staff').length;
+  const waitCustomer = orders.filter(order => !order.closedAt && order.waitingOn === 'customer').length;
+  const expressOpen = orders.filter(order => !order.closedAt && order.expressRequested).length;
+  const overdue = orders.filter(order => !order.closedAt && order.dueAt && !order.deliveredAt && Number(order.dueAt) < Date.now()).length;
   const disputed = orders.filter(order => order.status === 'disputed' && !order.closedAt).length;
   const productCounts = {};
   for (const order of orders) {
@@ -2599,6 +2777,8 @@ function dashboardEmbed(guild, data) {
     { name: 'Service', value: `Ø Lieferung: **${avgDelivery}**\nBewertungen: **${reviews.length}**\nØ Rating: **${avgRating}**`, inline: true },
     { name: 'Top-Produkte', value: topProducts },
     { name: 'Warteschlange', value: `Aktiv: **${queue.length}**\nKunden mit Lieferung: **${loyaltyCounts}**`, inline: true },
+    { name: 'Live-Service', value: `Support offen: **${supportOpen}**\nWartet auf Staff: **${waitStaff}**\nWartet auf Kunde: **${waitCustomer}**`, inline: true },
+    { name: 'Priorität', value: `Express: **${expressOpen}**\nÜberfällig: **${overdue}**`, inline: true },
     { name: 'Shop-Status', value: `${availabilityLabel(data.config.availability)}${data.config.availabilityNote ? `\n${data.config.availabilityNote}` : ''}` },
   ]);
 }
@@ -2672,12 +2852,27 @@ async function handleCartButton(interaction) {
       return;
     }
     const modal = new ModalBuilder().setCustomId('selling_cart_checkout_modal').setTitle('Warenkorb bestellen');
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('details').setLabel('Auftrag / Wünsche').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1500)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('style').setLabel('Stil / Look / Richtung').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(200)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('deadline').setLabel('Wunschtermin').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(100)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('coupon').setLabel('Rabatt-/Gutscheincode').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(30)),
-      new FileUploadBuilder().setCustomId('references').setMinValues(0).setMaxValues(3).setFileTypes('image', '.pdf', '.zip').setRequired(false),
+    modal.addLabelComponents(
+      new LabelBuilder()
+        .setLabel('Auftrag / Wünsche')
+        .setDescription('Beschreibe möglichst genau, was du möchtest.')
+        .setTextInputComponent(new TextInputBuilder().setCustomId('details').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1500)),
+      new LabelBuilder()
+        .setLabel('Stil / Look / Richtung')
+        .setDescription('Optional, z. B. Clean, Dark, GTA, Gambo oder Luxury.')
+        .setTextInputComponent(new TextInputBuilder().setCustomId('style').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(200)),
+      new LabelBuilder()
+        .setLabel('Wunschtermin')
+        .setDescription('Optional. Der endgültige Termin wird im Ticket bestätigt.')
+        .setTextInputComponent(new TextInputBuilder().setCustomId('deadline').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(100)),
+      new LabelBuilder()
+        .setLabel('Rabatt- / Gutscheincode')
+        .setDescription('Optional.')
+        .setTextInputComponent(new TextInputBuilder().setCustomId('coupon').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(30)),
+      new LabelBuilder()
+        .setLabel('Referenzen hochladen')
+        .setDescription('Optional: bis zu 3 Bilder, PDFs oder ZIP-Dateien.')
+        .setFileUploadComponent(new FileUploadBuilder().setCustomId('references').setMinValues(0).setMaxValues(3).setRequired(false)),
     );
     await interaction.showModal(modal);
   }
@@ -2740,6 +2935,7 @@ async function createCartOrderFromModal(interaction) {
     licenseId: null, reviewSubmitted: false, couponRedeemedAt: null, voucherRedeemedAt: null,
     priority: 'normal', waitingOn: 'staff', lastActivityAt: Date.now(), lastCustomerAt: Date.now(),
     initialRevisions: revisions, testMode: Boolean(data.config.testMode),
+    extraCharges: [], expressRequested: false, expressApproved: false,
   };
   data.orders[orderId] = order;
   data.carts[interaction.user.id] = { items: [], updatedAt: Date.now() };
@@ -2818,49 +3014,60 @@ async function showOrderModal(interaction, productKey) {
     .setCustomId(`selling_order_modal:${productKey}`)
     .setTitle(`${product.label} bestellen`.slice(0, 45));
 
-  modal.addComponents(
-    new ActionRowBuilder().addComponents(
-      new TextInputBuilder()
-        .setCustomId('details')
-        .setLabel((PRODUCT_ORDER_TEMPLATES[productKey]?.details || 'Was genau möchtest du?').slice(0, 45))
-        .setPlaceholder((PRODUCT_ORDER_TEMPLATES[productKey]?.hint || 'Produkt, Stil, Umfang, gewünschte Änderungen ...').slice(0, 100))
-        .setStyle(TextInputStyle.Paragraph)
-        .setRequired(true)
-        .setMaxLength(1500),
-    ),
-    new ActionRowBuilder().addComponents(
-      new TextInputBuilder()
-        .setCustomId('style')
-        .setLabel((PRODUCT_ORDER_TEMPLATES[productKey]?.style || 'Stil / Look').slice(0, 45))
-        .setPlaceholder('z. B. Clean, Dark, GTA, Gambo, Luxury ...')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(false)
-        .setMaxLength(200),
-    ),
-    new ActionRowBuilder().addComponents(
-      new TextInputBuilder()
-        .setCustomId('deadline')
-        .setLabel('Wunschtermin')
-        .setPlaceholder(`Optional • Richtwert: ${product.delivery}`)
-        .setStyle(TextInputStyle.Short)
-        .setRequired(false)
-        .setMaxLength(100),
-    ),
-    new ActionRowBuilder().addComponents(
-      new TextInputBuilder()
-        .setCustomId('coupon')
-        .setLabel('Rabattcode')
-        .setPlaceholder('Optional')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(false)
-        .setMaxLength(30),
-    ),
-    new FileUploadBuilder()
-      .setCustomId('references')
-      .setMinValues(0)
-      .setMaxValues(3)
-      .setFileTypes('image', '.pdf', '.zip')
-      .setRequired(false),
+  modal.addLabelComponents(
+    new LabelBuilder()
+      .setLabel((PRODUCT_ORDER_TEMPLATES[productKey]?.details || 'Was genau möchtest du?').slice(0, 45))
+      .setDescription((PRODUCT_ORDER_TEMPLATES[productKey]?.hint || 'Beschreibe Produkt, Umfang und gewünschte Änderungen.').slice(0, 100))
+      .setTextInputComponent(
+        new TextInputBuilder()
+          .setCustomId('details')
+          .setPlaceholder((PRODUCT_ORDER_TEMPLATES[productKey]?.hint || 'Produkt, Stil, Umfang, gewünschte Änderungen ...').slice(0, 100))
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMaxLength(1500),
+      ),
+    new LabelBuilder()
+      .setLabel((PRODUCT_ORDER_TEMPLATES[productKey]?.style || 'Stil / Look').slice(0, 45))
+      .setDescription('Optional: z. B. Clean, Dark, GTA, Gambo oder Luxury.')
+      .setTextInputComponent(
+        new TextInputBuilder()
+          .setCustomId('style')
+          .setPlaceholder('z. B. Clean, Dark, GTA, Gambo, Luxury ...')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setMaxLength(200),
+      ),
+    new LabelBuilder()
+      .setLabel('Wunschtermin')
+      .setDescription(`Optional • Richtwert: ${product.delivery}`.slice(0, 100))
+      .setTextInputComponent(
+        new TextInputBuilder()
+          .setCustomId('deadline')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setMaxLength(100),
+      ),
+    new LabelBuilder()
+      .setLabel('Rabatt- / Gutscheincode')
+      .setDescription('Optional.')
+      .setTextInputComponent(
+        new TextInputBuilder()
+          .setCustomId('coupon')
+          .setPlaceholder('Optional')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setMaxLength(30),
+      ),
+    new LabelBuilder()
+      .setLabel('Referenzen hochladen')
+      .setDescription('Optional: bis zu 3 Bilder, PDFs oder ZIP-Dateien.')
+      .setFileUploadComponent(
+        new FileUploadBuilder()
+          .setCustomId('references')
+          .setMinValues(0)
+          .setMaxValues(3)
+          .setRequired(false),
+      ),
   );
 
   await interaction.showModal(modal);
@@ -2946,6 +3153,7 @@ async function createOrderFromModal(interaction, productKey) {
     lastCustomerAt: Date.now(),
     initialRevisions: Number(product.revisions || 0),
     testMode: Boolean(data.config.testMode),
+    extraCharges: [], expressRequested: false, expressApproved: false,
   };
   data.orders[orderId] = order;
   saveSellingStore(store);
@@ -3040,18 +3248,24 @@ async function openSupportTicket(interaction, supportKey = 'general') {
     return;
   }
 
+  const { store, data } = getGuildShopData(interaction.guildId);
+  const supportId = nextAdvancedId(data, 'nextSupport', 'SUP');
   const channel = await interaction.guild.channels.create({
-    name: `support-${supportKey}-${sanitizeName(interaction.user.username)}`.slice(0, 95),
+    name: `${supportId.toLowerCase()}-${supportKey}-${sanitizeName(interaction.user.username)}`.slice(0, 95),
     type: ChannelType.GuildText,
     parent: category.id,
-    topic: `selling-owner:${interaction.user.id}|selling-kind:support|selling-support:${supportKey}|selling-status:open`,
+    topic: `selling-owner:${interaction.user.id}|selling-kind:support|selling-support:${supportKey}|selling-support-id:${supportId}|selling-status:open`,
     permissionOverwrites: sellingSupportTicketOverwrites(interaction.guild, interaction.user.id),
     reason: `Selling Support von ${interaction.user.tag}`,
   });
 
+  data.supportTickets[supportId] = { id: supportId, userId: interaction.user.id, supportKey, channelId: channel.id, status: 'open', assignedTo: null, createdAt: Date.now(), lastActivityAt: Date.now(), waitingOn: 'staff' };
+  saveSellingStore(store);
+
   await channel.send({
     content: `<@${interaction.user.id}>`,
-    embeds: [shopEmbed(`${supportType.emoji} Support • ${supportType.label}`, `Hallo <@${interaction.user.id}>!\n\nBitte beschreibe dein Anliegen strukturiert und vollständig. Hilfreich sind:\n• betroffenes Produkt / Bestellung\n• ungefähres Kaufdatum oder Bestellnummer\n• genaue Fehlerbeschreibung oder Frage\n• Screenshots / Logs, falls vorhanden\n• bereits getestete Schritte\n\n**Keine Passwörter, PayPal-Login-Codes, 2FA-Codes oder sonstige Zugangsdaten senden.**`, [
+    embeds: [shopEmbed(`${supportType.emoji} Support ${supportId} • ${supportType.label}`, `Hallo <@${interaction.user.id}>!\n\nBitte beschreibe dein Anliegen strukturiert und vollständig. Hilfreich sind:\n• betroffenes Produkt / Bestellung\n• ungefähres Kaufdatum oder Bestellnummer\n• genaue Fehlerbeschreibung oder Frage\n• Screenshots / Logs, falls vorhanden\n• bereits getestete Schritte\n\n**Keine Passwörter, PayPal-Login-Codes, 2FA-Codes oder sonstige Zugangsdaten senden.**`, [
+      { name: 'Ticket-ID', value: `\`${supportId}\``, inline: true },
       { name: 'Kunde', value: `<@${interaction.user.id}>`, inline: true },
       { name: 'Bereich', value: supportType.label, inline: true },
       { name: 'Status', value: 'Offen', inline: true },
@@ -3060,8 +3274,8 @@ async function openSupportTicket(interaction, supportKey = 'general') {
     allowedMentions: { users: [interaction.user.id] },
   });
 
-  await interaction.reply({ content: `✅ Dein **${supportType.label}**-Ticket wurde erstellt: <#${channel.id}>`, ephemeral: true });
-  await logSelling(interaction.guild, '🎫 Neues Support-Ticket', `<@${interaction.user.id}> hat **${supportType.label}** erstellt: <#${channel.id}>`);
+  await interaction.reply({ content: `✅ Dein **${supportType.label}**-Ticket **${supportId}** wurde erstellt: <#${channel.id}>`, ephemeral: true });
+  await logSelling(interaction.guild, '🎫 Neues Support-Ticket', `<@${interaction.user.id}> hat **${supportId} • ${supportType.label}** erstellt: <#${channel.id}>`);
   } finally {
     releaseSellingActionLock(createLock);
   }
@@ -3342,7 +3556,8 @@ async function requestRevision(interaction, orderId) {
     return;
   }
   if (Number(order.revisionsRemaining || 0) <= 0) {
-    await interaction.reply({ content: '❌ Für diese Bestellung sind keine inkludierten Revisionen mehr übrig. Weitere Änderungen können als Zusatzauftrag berechnet werden.', ephemeral: true });
+    const extraPrice = Math.max(0, Number(data.config.revisionExtraPrice || 0));
+    await interaction.reply({ content: `❌ Für diese Bestellung sind keine inkludierten Revisionen mehr übrig. Weitere Änderungen können als Zusatzleistung berechnet werden${extraPrice ? ` (Richtpreis aktuell **${formatEuro(extraPrice)}** pro zusätzlicher Revision)` : ''}. Das Team kann die Zusatzkosten direkt im Ticket zur Freigabe senden.`, ephemeral: true });
     return;
   }
   order.revisionsRemaining = Number(order.revisionsRemaining || 0) - 1;
@@ -3518,9 +3733,11 @@ async function archiveAndCloseSupport(interaction) {
     await interaction.reply({ content: '❌ Du darfst dieses Support-Ticket nicht schließen.', ephemeral: true });
     return;
   }
-  await interaction.reply({ content: '📄 Transcript wird gespeichert. Danach wird das Ticket geschlossen …' });
+  const supportId = String(interaction.channel.topic || '').match(/selling-support-id:([^|]+)/)?.[1]?.toUpperCase() || null;
+  if (supportId) { const { store, data } = getGuildShopData(interaction.guildId); const rec = data.supportTickets?.[supportId]; if (rec) { rec.status = 'closed'; rec.closedAt = Date.now(); rec.closedBy = interaction.user.id; rec.channelId = null; saveSellingStore(store); } }
+  await interaction.reply({ content: `📄 Transcript wird gespeichert. Danach wird das Ticket${supportId ? ` **${supportId}**` : ''} geschlossen …` });
   await archiveSellingTranscript(interaction.channel, 'Support-Transcript', `Geschlossen von <@${interaction.user.id}>`).catch(() => {});
-  await logSelling(interaction.guild, '🔒 Support geschlossen', `<@${interaction.user.id}> hat <#${interaction.channel.id}> geschlossen.`);
+  await logSelling(interaction.guild, '🔒 Support geschlossen', `<@${interaction.user.id}> hat ${supportId ? `**${supportId}** ` : ''}<#${interaction.channel.id}> geschlossen.`);
   setTimeout(() => interaction.channel.delete(`Selling Support geschlossen von ${interaction.user.tag}`).catch(() => {}), 2500);
   } finally {
     setTimeout(() => releaseSellingActionLock(lockKey), 5000);
@@ -3625,7 +3842,10 @@ async function handleSupportButton(interaction) {
       await interaction.reply({ content: '❌ Nur Support, Management oder Inhaber können Support-Tickets übernehmen.', ephemeral: true });
       return;
     }
-    await interaction.reply({ content: `🙋 <@${interaction.user.id}> hat dieses Support-Ticket übernommen.` });
+    const topic = String(interaction.channel.topic || '');
+    const supportId = topic.match(/selling-support-id:([^|]+)/)?.[1]?.toUpperCase();
+    if (supportId) { const { store, data } = getGuildShopData(interaction.guildId); const rec = data.supportTickets?.[supportId]; if (rec) { rec.assignedTo = interaction.user.id; rec.claimedAt = Date.now(); rec.lastActivityAt = Date.now(); saveSellingStore(store); } }
+    await interaction.reply({ content: `🙋 <@${interaction.user.id}> hat dieses Support-Ticket${supportId ? ` **${supportId}**` : ''} übernommen.` });
     await logSelling(interaction.guild, '🙋 Support übernommen', `<@${interaction.user.id}> hat <#${interaction.channel.id}> übernommen.`);
     return;
   }
@@ -4086,6 +4306,8 @@ function customerProfileEmbed(data, user) {
   const reviews = Object.values(data.reviews || {}).filter(review => review.userId === user.id);
   const spent = orders.filter(order => order.paidAt).reduce((sum, order) => sum + Number(order.finalPrice ?? order.basePrice ?? 0), 0);
   const loyalty = loyaltyForUser(data, user.id);
+  const supports = Object.values(data.supportTickets || {}).filter(ticket => ticket.userId === user.id);
+  const notes = Object.entries(data.ticketNotes || {}).flatMap(([key, list]) => Array.isArray(list) ? list.filter(n => n.userId === user.id).map(n => ({...n,key})) : []);
   return shopEmbed(`👤 Kundenprofil • ${user.username}`, [
     `**Discord:** <@${user.id}> • \`${user.id}\``,
     `**Bestellungen:** ${orders.length} • geliefert: ${orders.filter(o=>o.deliveredAt).length}`,
@@ -4093,6 +4315,8 @@ function customerProfileEmbed(data, user) {
     `**Lizenzen:** ${licenses.length}`,
     `**Bewertungen:** ${reviews.length}`,
     `**Status:** ${loyalty.level ? `${loyalty.level.label} (${loyalty.discount}% Rabatt)` : 'Standardkunde'}`,
+    `**Support-Tickets:** ${supports.length} • offen: ${supports.filter(t => t.status !== 'closed').length}`,
+    `**Interne Notizen:** ${notes.length}`,
     `**Blacklist:** ${data.blacklist[user.id] ? `Ja • ${data.blacklist[user.id].reason || 'ohne Grund'}` : 'Nein'}`,
     '',
     orders.slice(0,8).map(o => `• ${o.id} • ${orderStatusLabel(o.status)} • ${orderProductLabel(o)}`).join('\n') || '*Noch keine Bestellungen.*',
@@ -4126,7 +4350,7 @@ async function submitPriceModal(interaction, orderId) {
   if (revisionsRaw) order.revisionsRemaining = Math.max(0, Math.min(99, Number.parseInt(revisionsRaw,10) || 0));
   order.updatedAt = Date.now(); saveSellingStore(store);
   const paypal = data.config.paypalEmail ? `\n**PayPal:** \`${data.config.paypalEmail}\`` : '\n**PayPal:** wird im Ticket bestätigt';
-  await interaction.reply({ embeds: [shopEmbed(`💶 Preis bestätigt • ${orderId}`, `Grundpreis: **${formatEuro(order.basePrice)}**\nEndpreis nach Rabatt: **${formatEuro(order.finalPrice)}**${paypal}\nRevisionen: **${order.revisionsRemaining}**`)] });
+  await interaction.reply({ embeds: [shopEmbed(`💶 Preis bestätigt • ${orderId}`, `Grundpreis: **${formatEuro(order.basePrice)}**\nExpress: **${order.expressApproved ? `${order.expressSurchargePercent || 0} % (${formatEuro(expressFeeForOrder(order))})` : 'Nein'}**\nZusatzkosten: **${formatEuro(acceptedExtraChargesTotal(order))}**\nEndpreis: **${formatEuro(order.finalPrice)}**${paypal}\nRevisionen: **${order.revisionsRemaining}**`)] });
   await refreshStaffDashboard(interaction.guild, data).catch(()=>{}); saveSellingStore(store);
 }
 
@@ -4136,7 +4360,10 @@ async function beginDirectDelivery(interaction, orderId) {
   if (!canHandleOrder(interaction.member, order)) return interaction.reply({ content: '❌ Du bist für diese Produktart nicht zuständig.', ephemeral: true });
   if (order.closedAt || !isOrderTicketContext(interaction, order)) return interaction.reply({ content: '❌ Die Lieferung muss im aktiven zugehörigen Bestell-Ticket gestartet werden.', ephemeral: true });
   if (order.acceptedAt) return interaction.reply({ content: '❌ Diese Bestellung wurde vom Kunden bereits akzeptiert.', ephemeral: true });
-  if (isSellingActionLocked(`delivery:${interaction.guildId}:${orderId}`) || isSellingActionLocked(`order-status:${interaction.guildId}:${orderId}`)) return interaction.reply({ content: '⏳ Für diese Bestellung läuft gerade bereits eine Lieferung oder Statusänderung.', ephemeral: true });
+  const deliveryLockKey = `delivery:${interaction.guildId}:${orderId}`;
+  const statusLockKey = `order-status:${interaction.guildId}:${orderId}`;
+  if (isSellingActionLocked(deliveryLockKey)) return interaction.reply({ content: '⏳ Für diese Bestellung läuft gerade bereits eine Lieferung. Bitte warte kurz und versuche es erneut.', ephemeral: true });
+  if (isSellingActionLocked(statusLockKey)) return interaction.reply({ content: '⏳ Der Bestellstatus wird gerade noch synchronisiert. Der Lock löst sich automatisch; versuche es in wenigen Sekunden erneut.', ephemeral: true });
   if (!order.paidAt) return interaction.reply({ content: '❌ Markiere die Bestellung zuerst als **Bezahlt**.', ephemeral: true });
   if (!Number.isFinite(Number(order.finalPrice ?? order.basePrice))) return interaction.reply({ content: '❌ Setze zuerst den Preis.', ephemeral: true });
   const now = Date.now();
@@ -4271,16 +4498,22 @@ async function handleSellingTicketActivityMessage(message) {
 
   if (topic.includes('selling-kind:support')) {
     const ownerId = topic.match(/selling-owner:(\d+)/)?.[1];
+    const supportId = topic.match(/selling-support-id:([^|]+)/)?.[1]?.toUpperCase() || null;
     if (!ownerId) return;
     const customer = await message.guild.members.fetch(ownerId).catch(() => null);
     const suffix = sanitizeName(customer?.user?.username || 'kunde');
+    const { store, data } = getGuildShopData(message.guild.id);
+    const record = supportId ? data.supportTickets?.[supportId] : null;
     if (message.author.id === ownerId) {
-      const name = `support-wait-staff-${suffix}`.slice(0,95);
+      const name = `${supportId ? supportId.toLowerCase()+'-' : 'support-'}wait-staff-${suffix}`.slice(0,95);
       if (message.channel.name !== name) await message.channel.setName(name, 'Support Auto-Rename: wartet auf Team').catch(() => {});
+      if (record) { record.waitingOn = 'staff'; record.lastCustomerAt = Date.now(); record.lastActivityAt = Date.now(); }
     } else if (message.member && canHandleSupportTicket(message.member)) {
-      const name = `support-wait-customer-${suffix}`.slice(0,95);
+      const name = `${supportId ? supportId.toLowerCase()+'-' : 'support-'}wait-customer-${suffix}`.slice(0,95);
       if (message.channel.name !== name) await message.channel.setName(name, 'Support Auto-Rename: wartet auf Kunde').catch(() => {});
+      if (record) { record.waitingOn = 'customer'; record.lastStaffAt = Date.now(); record.lastActivityAt = Date.now(); }
     }
+    if (record) saveSellingStore(store);
   }
 }
 
@@ -4575,6 +4808,16 @@ async function runSellingAutomationForGuild(guild){
     await logAutomation(guild,'📈 Tagesbericht',`Offene Bestellungen: **${open}**\nQueue: **${queue.length}**\nHeute geliefert: **${delivered}**\nShop: **${availabilityLabel(data.config.availability)}**`);
   }
 
+  const viennaWeekday = Number(new Intl.DateTimeFormat('en-US',{timeZone:'Europe/Vienna',weekday:'short'}).format(new Date()) === 'Fri' ? 5 : new Date(new Date().toLocaleString('en-US',{timeZone:'Europe/Vienna'})).getDay());
+  const weeklyDay = Number(data.automation.weeklyReportWeekday ?? 5);
+  const weeklyHour = Number(data.automation.weeklyReportHour ?? 19);
+  const isoWeekKey = (() => { const d=new Date(new Date().toLocaleString('en-US',{timeZone:'Europe/Vienna'})); const t=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate())); const day=t.getUTCDay()||7; t.setUTCDate(t.getUTCDate()+4-day); const y=new Date(Date.UTC(t.getUTCFullYear(),0,1)); const w=Math.ceil((((t-y)/86400000)+1)/7); return `${t.getUTCFullYear()}-W${String(w).padStart(2,'0')}`; })();
+  if (viennaWeekday === weeklyDay && hour >= weeklyHour && data.automation.lastWeeklyReportKey !== isoWeekKey) {
+    data.automation.lastWeeklyReportKey = isoWeekKey;
+    const channel = findSellingTextChannel(guild,'🤖・automation-log') || findSellingTextChannel(guild,'📊・shop-dashboard');
+    if (channel) await channel.send({embeds:[weeklyShopReportEmbed(data)],allowedMentions:{parse:[]}}).catch(()=>{});
+  }
+
   saveSellingStore(store);
   if (now - sellingAutomationLastBackupAt > 24 * 3600000) {
     await backupSellingStore().catch(() => {});
@@ -4790,7 +5033,7 @@ async function submitGiftOrder(interaction) {
     discountPercent: discount.coupon ? Number(discount.coupon.percent || 0) : 0,
     loyaltyDiscountPercent: loyalty.discount, loyaltyLabel: loyalty.level?.label || null,
     basePrice: null, finalPrice: null, status: 'pending', revisionsRemaining: Number(PRODUCT_TYPES[productKey].revisions || 0),
-    initialRevisions: Number(PRODUCT_TYPES[productKey].revisions || 0), assignedTo: null,
+    initialRevisions: Number(PRODUCT_TYPES[productKey].revisions || 0), assignedTo: null, extraCharges: [], expressRequested: false, expressApproved: false,
     priority: 'normal', waitingOn: 'staff', createdAt: Date.now(), lastActivityAt: Date.now(), lastCustomerAt: Date.now(),
     paidAt: null, deliveredAt: null, closedAt: null, channelId: null, deliveryChannelId: null,
     licenseId: null, reviewSubmitted: false, couponRedeemedAt: null, voucherRedeemedAt: null, testMode: Boolean(data.config.testMode),
@@ -4887,8 +5130,109 @@ async function rotatePartnerSpotlight(guild,data){
   if(!msg){msg=await channel.send(payload);data.config.partnerSpotlightMessageId=msg.id;}
 }
 
+function sellingTicketContext(channel) {
+  const topic = String(channel?.topic || '');
+  const orderId = topic.match(/selling-order:([^|]+)/)?.[1]?.toUpperCase() || null;
+  const supportId = topic.match(/selling-support-id:([^|]+)/)?.[1]?.toUpperCase() || null;
+  const ownerId = topic.match(/selling-owner:(\d+)/)?.[1] || null;
+  return { topic, orderId, supportId, ownerId, key: orderId || supportId || null };
+}
+
+function ticketNotesFor(data, key) {
+  if (!key) return [];
+  data.ticketNotes ||= {};
+  data.ticketNotes[key] = Array.isArray(data.ticketNotes[key]) ? data.ticketNotes[key] : [];
+  return data.ticketNotes[key];
+}
+
+function workloadEmbed(guild, data) {
+  const open = Object.values(data.orders || {}).filter(order => !order.closedAt && !order.deliveredAt);
+  const counts = new Map();
+  for (const order of open) if (order.assignedTo) counts.set(order.assignedTo, (counts.get(order.assignedTo) || 0) + 1);
+  const staffRoleKeys = ['owner','management','support','designer','sound','developer'];
+  const ids = new Set();
+  for (const key of staffRoleKeys) {
+    const role = findSellingRole(guild, key);
+    if (role) for (const member of role.members.values()) if (!member.user.bot) ids.add(member.id);
+  }
+  const lines = [...ids].map(id => ({ id, count: counts.get(id) || 0 }))
+    .sort((a,b) => a.count - b.count || a.id.localeCompare(b.id))
+    .map(item => `• <@${item.id}> • **${item.count}** offene Aufträge`);
+  return shopEmbed('⚖️ Team-Auslastung', lines.join('\n') || 'Keine Teammitglieder gefunden.');
+}
+
+function weeklyShopReportEmbed(data, now = Date.now()) {
+  const start = now - 7 * 24 * 3600000;
+  const orders = Object.values(data.orders || {}).filter(order => Number(order.createdAt || 0) >= start && !order.testMode);
+  const paid = orders.filter(order => order.paidAt);
+  const delivered = orders.filter(order => order.deliveredAt);
+  const revenue = paid.reduce((sum, order) => sum + Number(order.finalPrice ?? order.basePrice ?? 0), 0);
+  const supports = Object.values(data.supportTickets || {}).filter(ticket => Number(ticket.createdAt || 0) >= start);
+  const closedSupports = supports.filter(ticket => ticket.status === 'closed');
+  const reviews = Object.values(data.reviews || {}).filter(review => Number(review.createdAt || review.at || 0) >= start);
+  const productCounts = {};
+  for (const order of orders) for (const key of orderProductKeys(order)) productCounts[key] = (productCounts[key] || 0) + 1;
+  const top = Object.entries(productCounts).sort((a,b)=>b[1]-a[1])[0];
+  return shopEmbed('📈 Wochenbericht • Turbo Designs', [
+    `**Neue Bestellungen:** ${orders.length}`,
+    `**Bezahlt:** ${paid.length}`,
+    `**Geliefert:** ${delivered.length}`,
+    `**Umsatz:** ${formatEuro(revenue)}`,
+    `**Support-Tickets:** ${supports.length} • geschlossen: ${closedSupports.length}`,
+    `**Neue Bewertungen:** ${reviews.length}`,
+    `**Top-Produkt:** ${top ? `${PRODUCT_TYPES[top[0]]?.emoji || '📦'} ${PRODUCT_TYPES[top[0]]?.label || top[0]} (${top[1]})` : '—'}`,
+    `**Offene Aufträge aktuell:** ${Object.values(data.orders || {}).filter(order => !order.closedAt).length}`,
+  ].join('\n'));
+}
+
+async function handleExpressRequest(interaction, orderId) {
+  const { store, data } = getGuildShopData(interaction.guildId);
+  const order = data.orders?.[orderId];
+  if (!order || !isOrderCustomer(interaction, order) || !isOrderTicketContext(interaction, order)) return interaction.reply({ content:'❌ Express kann nur vom Käufer im zugehörigen Bestell-Ticket angefragt werden.', ephemeral:true });
+  if (order.paidAt || order.closedAt || order.acceptedAt) return interaction.reply({ content:'❌ Express kann nach Zahlung oder Abschluss nicht mehr aktiviert werden.', ephemeral:true });
+  if (order.expressRequested) return interaction.reply({ content:'⚡ Express wurde für diese Bestellung bereits angefragt.', ephemeral:true });
+  const percent = Math.max(0, Number(data.config.expressSurchargePercent || 20));
+  order.expressRequested = true;
+  order.expressApproved = true;
+  order.expressSurchargePercent = percent;
+  order.priority = 'urgent';
+  order.updatedAt = Date.now();
+  order.finalPrice = calculateOrderFinalPrice(order);
+  saveSellingStore(store);
+  await syncOrderWorkflow(interaction.guild, data, order).catch(()=>{});
+  await refreshStaffDashboard(interaction.guild, data).catch(()=>{});
+  saveSellingStore(store);
+  await interaction.reply({ embeds:[shopEmbed(`⚡ Express angefragt • ${order.id}`, `Express wurde aktiviert. **Aufschlag: ${percent} % auf den Grundpreis.**\n${Number.isFinite(Number(order.basePrice)) ? `Aktueller Endpreis: **${formatEuro(order.finalPrice)}**` : 'Der genaue Endpreis wird berechnet, sobald das Team den Grundpreis bestätigt.'}\n\nDie konkrete Lieferzeit wird weiterhin im Ticket vom Team bestätigt.`)] });
+}
+
+async function handleExtraChargeButton(interaction, action, orderId, chargeId) {
+  const { store, data } = getGuildShopData(interaction.guildId);
+  const order = data.orders?.[orderId];
+  if (!order || !isOrderCustomer(interaction, order) || !isOrderTicketContext(interaction, order)) return interaction.reply({content:'❌ Diese Zusatzkosten gehören nicht zu deiner Bestellung.',ephemeral:true});
+  const charge = (order.extraCharges || []).find(item => item.id === chargeId);
+  if (!charge || charge.status !== 'pending') return interaction.reply({content:'ℹ️ Diese Zusatzkosten wurden bereits bearbeitet.',ephemeral:true});
+  charge.status = action === 'accept' ? 'accepted' : 'declined';
+  charge.decidedAt = Date.now(); charge.decidedBy = interaction.user.id;
+  order.finalPrice = calculateOrderFinalPrice(order); order.updatedAt = Date.now();
+  saveSellingStore(store);
+  await interaction.update({ embeds:[shopEmbed(`${charge.status === 'accepted' ? '✅' : '❌'} Zusatzkosten ${charge.status === 'accepted' ? 'akzeptiert' : 'abgelehnt'} • ${order.id}`, `**${charge.reason}**\nBetrag: **${formatEuro(charge.amount)}**${charge.status === 'accepted' ? `\nNeuer Endpreis: **${formatEuro(order.finalPrice)}**` : ''}`)], components:[] });
+  await syncOrderWorkflow(interaction.guild, data, order).catch(()=>{});
+  await refreshStaffDashboard(interaction.guild, data).catch(()=>{}); saveSellingStore(store);
+}
+
 async function handleAdvancedToolsCommand(interaction, sub, data, store) {
   const manage = canManageSellingShop(interaction.member);
+  if (sub === 'note') {
+    if (!canHandleSupportTicket(interaction.member) && !canManageSellingShop(interaction.member)) return interaction.reply({content:'❌ Nur Teammitglieder können interne Notizen verwenden.',ephemeral:true});
+    const ctx = sellingTicketContext(interaction.channel);
+    if (!ctx.key) return interaction.reply({content:'❌ Nutze diesen Befehl in einem Bestell- oder Support-Ticket.',ephemeral:true});
+    const action = interaction.options.getString('action'); const notes = ticketNotesFor(data, ctx.key);
+    if (action === 'add') { const text = String(interaction.options.getString('text') || '').trim(); if (!text) return interaction.reply({content:'❌ `text` fehlt.',ephemeral:true}); notes.push({id:`N-${Date.now().toString(36).toUpperCase()}`,text,by:interaction.user.id,at:Date.now(),userId:ctx.ownerId}); saveSellingStore(store); return interaction.reply({content:`✅ Interne Notiz zu **${ctx.key}** gespeichert.`,ephemeral:true}); }
+    if (action === 'clear') { if (!manage) return interaction.reply({content:'❌ Nur Management/Inhaber können alle Notizen löschen.',ephemeral:true}); data.ticketNotes[ctx.key]=[]; saveSellingStore(store); return interaction.reply({content:`🗑️ Interne Notizen zu **${ctx.key}** gelöscht.`,ephemeral:true}); }
+    const text = notes.length ? notes.slice(-20).map(n=>`• <t:${Math.floor(n.at/1000)}:d> • <@${n.by}> • ${n.text}`).join('\n') : 'Keine internen Notizen.'; return interaction.reply({embeds:[shopEmbed(`📝 Interne Notizen • ${ctx.key}`,text.slice(0,3900))],ephemeral:true,allowedMentions:{parse:[]}});
+  }
+  if (sub === 'workload') return interaction.reply({embeds:[workloadEmbed(interaction.guild,data)],ephemeral:true,allowedMentions:{parse:[]}});
+  if (sub === 'weeklyreport') return interaction.reply({embeds:[weeklyShopReportEmbed(data)],ephemeral:true,allowedMentions:{parse:[]}});
   if (sub === 'calendar') return interaction.reply({ embeds:[calendarEmbed(data)], ephemeral:true, allowedMentions:{parse:[]} });
   if (sub === 'staffstats') return interaction.reply({ embeds:[staffStatsEmbed(data)], ephemeral:true, allowedMentions:{parse:[]} });
   if (sub === 'teamlist') { await refreshTeamList(interaction.guild, data); saveSellingStore(store); return interaction.reply({ content:'✅ Teamliste wurde aktualisiert.', ephemeral:true }); }
@@ -4909,6 +5253,25 @@ async function handleAdvancedToolsCommand(interaction, sub, data, store) {
     const id=String(interaction.options.getString('order')).trim().toUpperCase();const order=data.orders?.[id];if(!order)return interaction.reply({content:'❌ Bestellung nicht gefunden.',ephemeral:true});
     order.priority=interaction.options.getString('level');order.updatedAt=Date.now();saveSellingStore(store);await syncOrderWorkflow(interaction.guild,data,order).catch(()=>{});await refreshCalendarPanel(interaction.guild,data).catch(()=>{});
     return interaction.reply({content:`✅ ${id}: ${orderPriorityInfo(order).emoji} **${orderPriorityInfo(order).label}**`,ephemeral:true});
+  }
+  if(sub==='pricing'){
+    const express = interaction.options.getNumber('express_prozent'); const revision = interaction.options.getNumber('revision_preis');
+    if (express !== null) data.config.expressSurchargePercent = Math.max(0, Math.round(express*100)/100);
+    if (revision !== null) data.config.revisionExtraPrice = Math.max(0, Math.round(revision*100)/100);
+    saveSellingStore(store);
+    return interaction.reply({embeds:[shopEmbed('💶 Shop-Zusatzpreise',`Express-Aufschlag: **${data.config.expressSurchargePercent} %**\nRichtpreis zusätzliche Revision: **${formatEuro(data.config.revisionExtraPrice)}**`)],ephemeral:true});
+  }
+  if(sub==='extra'){
+    const action=interaction.options.getString('action'); const id=String(interaction.options.getString('order')||'').trim().toUpperCase(); const order=data.orders?.[id];
+    if(!order) return interaction.reply({content:'❌ Bestellung nicht gefunden.',ephemeral:true});
+    order.extraCharges = Array.isArray(order.extraCharges) ? order.extraCharges : [];
+    if(action==='list'){const text=order.extraCharges.length?order.extraCharges.map(x=>`• \`${x.id}\` • ${formatEuro(x.amount)} • **${x.status}** • ${x.reason}`).join('\n'):'Keine Zusatzkosten.';return interaction.reply({embeds:[shopEmbed(`➕ Zusatzkosten • ${id}`,text.slice(0,3900))],ephemeral:true});}
+    if(order.paidAt) return interaction.reply({content:'❌ Nach bestätigter Zahlung können über dieses Tool keine neuen Zusatzkosten mehr hinzugefügt werden.',ephemeral:true});
+    const amount=interaction.options.getNumber('betrag'); const reason=String(interaction.options.getString('text')||'').trim(); if(amount===null||!reason)return interaction.reply({content:'❌ Für Hinzufügen werden `betrag` und `text` benötigt.',ephemeral:true});
+    const charge={id:`XC-${String(order.extraCharges.length+1).padStart(2,'0')}`,amount:Math.round(amount*100)/100,reason,status:'pending',createdAt:Date.now(),createdBy:interaction.user.id}; order.extraCharges.push(charge); saveSellingStore(store);
+    const channel=order.channelId?await interaction.guild.channels.fetch(order.channelId).catch(()=>null):null;
+    if(channel?.isTextBased()) await channel.send({content:`<@${order.userId}>`,embeds:[shopEmbed(`➕ Zusatzleistung • ${order.id}`,`**${charge.reason}**\nZusatzkosten: **${formatEuro(charge.amount)}**\n\nBitte akzeptiere oder lehne diese Zusatzleistung ab.`)],components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`selling_extra_accept:${order.id}:${charge.id}`).setLabel('Akzeptieren').setEmoji('✅').setStyle(ButtonStyle.Success),new ButtonBuilder().setCustomId(`selling_extra_decline:${order.id}:${charge.id}`).setLabel('Ablehnen').setEmoji('❌').setStyle(ButtonStyle.Danger))],allowedMentions:{users:[order.userId]}}).catch(()=>{});
+    return interaction.reply({content:`✅ Zusatzkosten **${formatEuro(charge.amount)}** für **${id}** zur Kundenfreigabe gesendet.`,ephemeral:true});
   }
   if(sub==='finance'){
     const action=interaction.options.getString('action');
@@ -5016,7 +5379,8 @@ async function handleSellCommand(interaction) {
     const orders = Object.values(data.orders || {}).filter(o => o.id.toLowerCase().includes(q) || o.userId.includes(q) || orderProductLabel(o).toLowerCase().includes(q));
     const licenses = Object.values(data.licenses || {}).filter(l => l.id.toLowerCase().includes(q) || l.userId.includes(q) || l.orderId.toLowerCase().includes(q));
     const portfolio = Object.values(data.portfolio || {}).filter(e => e.id.toLowerCase().includes(q) || String(e.title||'').toLowerCase().includes(q));
-    const text = [`**Bestellungen (${orders.length})**`, ...(orders.slice(0,10).map(o=>`• ${o.id} • <@${o.userId}> • ${orderStatusLabel(o.status)}`)), '', `**Lizenzen (${licenses.length})**`, ...(licenses.slice(0,10).map(l=>`• \`${l.id}\` • ${l.orderId} • <@${l.userId}>`)), '', `**Portfolio (${portfolio.length})**`, ...(portfolio.slice(0,10).map(e=>`• \`${e.id}\` • ${e.title}`))].join('\n');
+    const supports = Object.values(data.supportTickets || {}).filter(t => String(t.id||'').toLowerCase().includes(q) || String(t.userId||'').includes(q) || String(t.supportKey||'').toLowerCase().includes(q));
+    const text = [`**Bestellungen (${orders.length})**`, ...(orders.slice(0,10).map(o=>`• ${o.id} • <@${o.userId}> • ${orderStatusLabel(o.status)}`)), '', `**Support (${supports.length})**`, ...(supports.slice(0,10).map(t=>`• ${t.id} • <@${t.userId}> • ${t.status}`)), '', `**Lizenzen (${licenses.length})**`, ...(licenses.slice(0,10).map(l=>`• \`${l.id}\` • ${l.orderId} • <@${l.userId}>`)), '', `**Portfolio (${portfolio.length})**`, ...(portfolio.slice(0,10).map(e=>`• \`${e.id}\` • ${e.title}`))].join('\n');
     await interaction.reply({ embeds: [shopEmbed(`🔍 Suche • ${interaction.options.getString('query')}`, text.slice(0,3900))], ephemeral: true, allowedMentions:{parse:[]} });
     return;
   }
@@ -5514,6 +5878,11 @@ async function handleSellingInteraction(interaction) {
     return true;
   }
 
+  if (interaction.isChatInputCommand?.() && interaction.commandName === 'paypal') {
+    await handlePaypalSendCommand(interaction);
+    return true;
+  }
+
   if (interaction.isButton?.() && interaction.customId === 'selling_verify_start') {
     await handleVerifyStart(interaction);
     return true;
@@ -5594,6 +5963,16 @@ async function handleSellingInteraction(interaction) {
     await cycleOrderPriority(interaction, String(interaction.customId).split(':')[1]); return true;
   }
 
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_express:')) {
+    await handleExpressRequest(interaction, String(interaction.customId).split(':')[1]); return true;
+  }
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_extra_accept:')) {
+    const parts=String(interaction.customId).split(':'); await handleExtraChargeButton(interaction,'accept',parts[1],parts[2]); return true;
+  }
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_extra_decline:')) {
+    const parts=String(interaction.customId).split(':'); await handleExtraChargeButton(interaction,'decline',parts[1],parts[2]); return true;
+  }
+
   if (interaction.isButton?.() && String(interaction.customId || '').startsWith('selling_price:')) {
     await openPriceModal(interaction, String(interaction.customId).split(':')[1]); return true;
   }
@@ -5657,7 +6036,7 @@ Client.prototype.login = function patchedLogin(...args) {
       try {
         await handleSellingInteraction(interaction);
       } catch (error) {
-        console.error('❌ Selling Setup Fehler:', error);
+        console.error('❌ Selling Setup Fehler [v5.10]:', error);
         const payload = { content: '❌ Beim Selling-System ist ein Fehler aufgetreten. Prüfe die Bot-Rechte und Railway-Logs.', ephemeral: true };
         if (interaction.deferred || interaction.replied) await interaction.followUp(payload).catch(() => {});
         else await interaction.reply(payload).catch(() => {});

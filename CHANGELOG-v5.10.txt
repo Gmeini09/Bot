@@ -1,0 +1,21 @@
+v5.10 – SERVICE & OPERATIONS
+
++ SUP-IDs für neue Support-Tickets
++ Auto-Rename für Support mit stabiler SUP-ID
++ Persistente Support-Ticket-Daten
++ Interne Ticket-Notizen
++ Kundenprofil um Support und Notizanzahl erweitert
++ Express-Aufträge mit konfigurierbarem Aufschlag
++ Zusatzkosten mit Accept/Decline durch den Käufer
++ Konfigurierbarer Richtpreis für weitere Revisionen
++ Team-Workload-Ansicht
++ Live-Dashboard erweitert
++ Automatischer Wochenbericht Freitag 19:00 (Europe/Vienna)
++ Manuell abrufbarer Wochenbericht
++ Suche nach Support-Ticket-IDs
+
+Sicherheits-/Workflow-Regeln:
+- Express kann vom Käufer nur vor Zahlung/Abschluss aktiviert werden.
+- Zusatzkosten können nicht nach bestätigter Zahlung neu hinzugefügt werden.
+- Interne Notizen werden nur ephemeral an das Shop-Team ausgegeben.
+- Support-Ticket-Daten werden beim Schließen als geschlossen markiert.
