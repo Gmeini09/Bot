@@ -1,7 +1,7 @@
 {
   "name": "community-allround-bot",
-  "version": "5.11.0",
-  "description": "Turbo Designs selling bot v5.11 with PostgreSQL persistence, error IDs, permission audit, self-healing diagnostics and order timelines",
+  "version": "5.12.0",
+  "description": "Turbo Designs selling bot v5.12 with unified visual theme, product cards, ticket headers, delivery cards, review cards, portfolio gallery and team cards",
   "main": "index.js",
   "scripts": {
     "start": "node selling-entry.js",

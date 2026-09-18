@@ -2136,15 +2136,138 @@ async function seedIfEmpty(channel, payload) {
   return channel.send(payload).catch(() => null);
 }
 
-function shopEmbed(title, description, fields = []) {
+const DESIGN_THEME = Object.freeze({
+  brand: 0x7c3aed,
+  info: 0x5865f2,
+  success: 0x2ecc71,
+  warning: 0xf1c40f,
+  danger: 0xe74c3c,
+  premium: 0xd4af37,
+  team: 0x8b5cf6,
+  support: 0x3498db,
+  neutral: 0x2b2d31,
+});
+
+const PRODUCT_THEME = Object.freeze({
+  thumbnail: 0x7289da,
+  nve: 0x1abc9c,
+  soundpack: 0x57f287,
+  grafik: 0xeb459e,
+  fivem: 0xfee75c,
+  bot: 0x5865f2,
+  bundle: 0xe67e22,
+});
+
+function designThemeForTitle(title = '') {
+  const text = String(title).toLowerCase();
+  if (text.includes('fehler') || text.includes('streit') || text.includes('refund') || text.includes('warn')) return DESIGN_THEME.danger;
+  if (text.includes('bezahlt') || text.includes('geliefert') || text.includes('erfolg') || text.includes('akzeptiert')) return DESIGN_THEME.success;
+  if (text.includes('paypal') || text.includes('zahlung')) return DESIGN_THEME.info;
+  if (text.includes('support') || text.includes('ticket')) return DESIGN_THEME.support;
+  if (text.includes('vip') || text.includes('premium')) return DESIGN_THEME.premium;
+  if (text.includes('team') || text.includes('dashboard') || text.includes('staff')) return DESIGN_THEME.team;
+  return DESIGN_THEME.brand;
+}
+
+function designDivider(label = '') {
+  const clean = String(label || '').trim();
+  return clean ? `\n\n**━━ ${clean} ━━**\n` : '\n\n━━━━━━━━━━━━━━━━━━━━\n';
+}
+
+function shopEmbed(title, description, fields = [], options = {}) {
+  const color = Number(options.color ?? designThemeForTitle(title) ?? SELLING.color);
   const embed = new EmbedBuilder()
-    .setColor(SELLING.color)
+    .setColor(color)
     .setTitle(title)
     .setDescription(description)
-    .setFooter({ text: 'Unfugstifter Shop • Digitale Produkte' })
+    .setFooter({ text: options.footer || 'Turbo Designs • FiveM • Discord • Design' })
     .setTimestamp();
+  if (options.author) embed.setAuthor(options.author);
+  if (options.thumbnail) embed.setThumbnail(options.thumbnail);
+  if (options.image) embed.setImage(options.image);
   if (fields.length) embed.addFields(fields);
   return embed;
+}
+
+function productCardEmbed(key, data = null) {
+  const product = PRODUCT_TYPES[key];
+  if (!product) return shopEmbed('📦 Produkt', 'Produkt nicht gefunden.');
+  const cfg = data ? productConfig(data, key) : { enabled: true, price: null, etaDays: product.etaDays };
+  const price = cfg?.price !== null && cfg?.price !== undefined && cfg?.price !== '' && Number.isFinite(Number(cfg.price))
+    ? formatEuro(cfg.price)
+    : 'Preis im Ticket';
+  const enabled = cfg?.enabled !== false;
+  return shopEmbed(`${product.emoji} ${product.label}`, [
+    `${enabled ? '🟢 **VERFÜGBAR**' : '🔴 **AKTUELL NICHT VERFÜGBAR**'}`,
+    '',
+    `**Preis:** ${price}`,
+    `**Lieferzeit:** ca. ${Number(cfg?.etaDays || product.etaDays || 2)} Tag(e)`,
+    `**Revisionen:** ${Number(product.revisions || 0)} inklusive`,
+    `**Bestellung:** über 🛒・bestellen`,
+    designDivider('TURBO DESIGNS'),
+    'Individuell nach deinen Vorstellungen • private Abstimmung • klarer Bestellstatus • Lizenz nach Lieferung',
+  ].join('\n'), [], { color: PRODUCT_THEME[key] || DESIGN_THEME.brand, footer: `Turbo Designs • ${product.label}` });
+}
+
+function deliveryCardEmbed(order) {
+  const productKeys = orderProductKeys(order);
+  const primary = productKeys[0] || order.productKey || 'bundle';
+  const color = PRODUCT_THEME[primary] || DESIGN_THEME.success;
+  return shopEmbed(`✅ Lieferung bereit • ${order.id}`, [
+    `**${orderProductEmoji(order)} ${orderProductLabel(order)}**`,
+    '',
+    `🟢 **STATUS:** GELIEFERT`,
+    `🔐 **Lizenz:** ${order.licenseId ? `\`${order.licenseId}\`` : 'wird erstellt'}`,
+    `👤 **Kunde:** <@${orderRecipientId(order)}>`,
+    `🔄 **Revisionen übrig:** ${Math.max(0, Number(order.revisionsRemaining || 0))}`,
+    designDivider('DEINE NÄCHSTEN SCHRITTE'),
+    'Prüfe die gelieferten Dateien. Wenn alles passt, nutze **Produkt akzeptieren**. Falls eine inkludierte Änderung nötig ist, nutze **Änderung anfordern**.',
+  ].join('\n'), [], { color, footer: 'Turbo Designs • Delivery Center' });
+}
+
+function reviewCardEmbed(review, order, user) {
+  const stars = Math.max(1, Math.min(5, Number(review.stars || 0)));
+  const color = stars >= 5 ? DESIGN_THEME.premium : stars >= 4 ? DESIGN_THEME.success : stars >= 3 ? DESIGN_THEME.warning : DESIGN_THEME.danger;
+  const embed = shopEmbed(`${'⭐'.repeat(stars)} Verifizierte Bewertung`, String(review.text || '').slice(0, 3900), [
+    { name: 'Produkt', value: `${orderProductEmoji(order)} ${orderProductLabel(order)}`, inline: true },
+    { name: 'Bestellung', value: `\`${order.id}\``, inline: true },
+    { name: 'Bewertung', value: `**${stars}/5**`, inline: true },
+  ], { color, footer: 'Turbo Designs • Verifizierter Kauf' });
+  if (user) embed.setAuthor({ name: user.username, iconURL: user.displayAvatarURL({ size: 128 }) });
+  return embed;
+}
+
+function portfolioCardEmbed(entry, order = null) {
+  const key = order ? (orderProductKeys(order)[0] || order.productKey) : null;
+  const embed = shopEmbed(`🖼️ ${entry.title}`, [
+    `**Kategorie:** ${entry.category || (order ? orderProductLabel(order) : 'Design')}`,
+    entry.description ? `**Projekt:** ${entry.description}` : null,
+    entry.orderId ? `**Projekt-ID:** \`${entry.orderId}\`` : null,
+    '',
+    '✨ **Made by Turbo Designs**',
+  ].filter(Boolean).join('\n'), [], { color: PRODUCT_THEME[key] || DESIGN_THEME.brand, footer: `Turbo Designs Portfolio • ${entry.id}` });
+  if (entry.url && (/^https?:\/\/.+\.(png|jpe?g|webp|gif)(\?.*)?$/i.test(entry.url) || String(entry.url).includes('cdn.discordapp'))) embed.setImage(entry.url);
+  return embed;
+}
+
+function supportTicketHeaderEmbed(user, supportId, supportType) {
+  return shopEmbed(`${supportType.emoji} ${supportId} • ${supportType.label}`, [
+    `🔵 **STATUS:** OFFEN`,
+    `👤 **Kunde:** <@${user.id}>`,
+    `🎫 **Bereich:** ${supportType.label}`,
+    `🙋 **Bearbeiter:** noch nicht übernommen`,
+    designDivider('BITTE SENDE'),
+    '• genaue Beschreibung deines Anliegens\n• Produkt / Bestellnummer, falls vorhanden\n• Screenshots oder Logs, wenn hilfreich\n• bereits getestete Schritte',
+    '',
+    '🔐 **Sicherheit:** Keine Passwörter, PayPal-Login-Codes oder 2FA-Codes senden.',
+  ].join('\n'), [
+    { name: 'Ticket-ID', value: `\`${supportId}\``, inline: true },
+    { name: 'Antwortstatus', value: 'Wartet auf Staff', inline: true },
+  ], {
+    color: DESIGN_THEME.support,
+    author: { name: user.username, iconURL: user.displayAvatarURL({ size: 128 }) },
+    footer: 'Turbo Designs • Support Center',
+  });
 }
 
 async function sellingResetPreflight(guild) {
@@ -2422,8 +2545,9 @@ function teamRoleLabel(key) {
 async function buildTeamListEmbeds(guild) {
   await guild.members.fetch().catch(() => {});
   const embeds = [];
-  const overview = shopEmbed('👥 Turbo Designs • Teamliste', 'Hier siehst du das aktuell eingetragene **Turbo Designs Team**. Die Liste wird automatisch aus den Teamrollen aktualisiert.');
   let total = 0;
+  const roleCards = [];
+
   for (const key of PUBLIC_TEAM_ROLE_KEYS) {
     const role = findSellingRole(guild, key);
     if (!role) continue;
@@ -2431,24 +2555,45 @@ async function buildTeamListEmbeds(guild) {
       .filter(member => !member.user.bot)
       .sort((a, b) => (a.displayName || a.user.username).localeCompare(b.displayName || b.user.username, 'de'));
     total += members.length;
+
     let value = members.length
-      ? members.map(member => `• <@${member.id}>`).join('\n')
+      ? members.map(member => `• <@${member.id}>  —  **${member.displayName || member.user.username}**`).join('\n')
       : '*Aktuell niemand eingetragen.*';
-    if (value.length > 1000) {
+    if (value.length > 930) {
       const lines = value.split('\n');
-      let kept = [];
+      const kept = [];
       let used = 0;
       for (const line of lines) {
-        if (used + line.length + 1 > 930) break;
-        kept.push(line); used += line.length + 1;
+        if (used + line.length + 1 > 860) break;
+        kept.push(line);
+        used += line.length + 1;
       }
       value = `${kept.join('\n')}\n… und **${Math.max(0, members.length - kept.length)}** weitere`;
     }
-    overview.addFields({ name: `${teamRoleLabel(key)} • ${members.length}`, value, inline: false });
+
+    const first = members[0];
+    const card = shopEmbed(`${teamRoleLabel(key)} • ${members.length}`, value, [
+      { name: 'Bereich', value: key === 'owner' ? 'Leitung' : key === 'management' ? 'Management' : key === 'support' ? 'Kundensupport' : key === 'designer' ? 'Design & NVE' : key === 'sound' ? 'Soundpacks' : 'Development', inline: true },
+      { name: 'Status', value: members.length ? '🟢 Besetzt' : '⚪ Offen', inline: true },
+    ], {
+      color: role.color || DESIGN_THEME.team,
+      footer: 'Turbo Designs • Team',
+      thumbnail: first?.user?.displayAvatarURL?.({ size: 256 }) || null,
+    });
+    roleCards.push(card);
   }
-  overview.setFooter({ text: `Teammitglieder nach Rollen: ${total} • automatisch aktualisiert` }).setTimestamp();
-  embeds.push(overview);
-  return embeds;
+
+  const overview = shopEmbed('👥 Turbo Designs • Team', [
+    'Das aktuelle Team wird **automatisch aus den Discord-Rollen** aufgebaut.',
+    '',
+    `👥 **Teammitglieder:** ${total}`,
+    `🧩 **Bereiche:** ${roleCards.length}`,
+    designDivider('TEAM BEREICHE'),
+    roleCards.map(card => `• ${card.data.title}`).join('\n') || 'Noch keine Teamrollen gefunden.',
+  ].join('\n'), [], { color: DESIGN_THEME.team, footer: 'Turbo Designs • automatisch aktualisiert' });
+
+  embeds.push(overview, ...roleCards.slice(0, 9));
+  return embeds.slice(0, 10);
 }
 
 async function refreshTeamList(guild, data = null) {
@@ -2512,17 +2657,24 @@ async function seedSellingServer(structure) {
 
   await refreshTeamList(channels.teamList.guild, getGuildShopData(channels.teamList.guild.id).data).catch(() => {});
 
+  const designData = getGuildShopData(channels.welcome.guild.id).data;
   const productSeeds = [
-    [channels.thumbnails, '🖼️ Thumbnails', 'Individuelle Thumbnails für FiveM, YouTube, Twitch und Social Media.\n\nHier können Beispiele, Pakete und Preise eingetragen werden.'],
-    [channels.nve, '🌆 NVE Presets / Grafik-Setups', 'Eigene oder lizenzierte Presets, Grafik-Setups und Anpassungen für dein GTA/FiveM-Setup.\n\nKeine unerlaubte Weitergabe fremder Premium-Dateien.'],
-    [channels.soundpacks, '🔊 Soundpacks', 'Eigene Soundpacks für Waffen-, Reload-, UI- oder Fahrzeug-Sounds.\n\nHier können Vorschauen und Produktvarianten gepostet werden.'],
-    [channels.graphics, '🎨 Grafik & Designs', 'Logos, Banner, Discord-Grafiken, Stream-Assets und individuelle Designs.'],
-    [channels.fivem, '🚗 FiveM Assets', 'Eigene oder lizenzierte FiveM-Ressourcen, Setups und weitere digitale Assets.'],
-    [channels.bots, '🤖 Custom Discord Bots', 'Individuelle Discord Bots mit Commands, Tickets, Panels, Automationen und auf Wunsch Railway-/Hosting-Setup.'],
-    [channels.bundles, '📦 Bundles', 'Mehrere Produkte als Paket – ideal für komplette FiveM-, Stream- oder Community-Setups.'],
+    [channels.thumbnails, 'thumbnail'],
+    [channels.nve, 'nve'],
+    [channels.soundpacks, 'soundpack'],
+    [channels.graphics, 'grafik'],
+    [channels.fivem, 'fivem'],
+    [channels.bots, 'bot'],
+    [channels.bundles, 'bundle'],
   ];
-  for (const [channel, title, description] of productSeeds) {
-    await seedIfEmpty(channel, { embeds: [shopEmbed(title, description)] });
+  for (const [channel, key] of productSeeds) {
+    await seedIfEmpty(channel, {
+      embeds: [productCardEmbed(key, designData)],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`selling_cart_add:${key}`).setLabel(`${PRODUCT_TYPES[key].label} bestellen`).setEmoji(PRODUCT_TYPES[key].emoji).setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('selling_cart_view').setLabel('Warenkorb').setEmoji('🛒').setStyle(ButtonStyle.Secondary),
+      )],
+    });
   }
 
   await seedIfEmpty(channels.customerStatus, {
@@ -2610,6 +2762,7 @@ async function seedSellingServer(structure) {
   // Existing installations are branded too; no /setup reset is required.
   await cleanupDuplicateSellingPanels(channels).catch(() => {});
   await ensureTurboBrandingOnExistingPanels(channels);
+  await refreshDesignShowcasePanels(channels.welcome.guild, seedData).catch(() => {});
 }
 
 
@@ -2637,6 +2790,8 @@ async function ensureTurboBrandingOnExistingPanels(channels) {
     const alreadyBranded = message.attachments?.some?.(attachment => attachment.name === TURBO_DESIGN_BANNER_NAME);
     const embed = EmbedBuilder.from(message.embeds[0]);
     if (target.newTitle) embed.setTitle(target.newTitle);
+    embed.setColor(designThemeForTitle(embed.data.title || target.newTitle || 'Turbo Designs'));
+    embed.setFooter({ text: 'Turbo Designs • FiveM • Discord • Design' });
     embed.setImage(`attachment://${TURBO_DESIGN_BANNER_NAME}`);
     if (alreadyBranded) {
       await message.edit({ embeds: [embed], components: message.components }).catch(() => {});
@@ -2644,6 +2799,41 @@ async function ensureTurboBrandingOnExistingPanels(channels) {
       await message.edit({ embeds: [embed], files: [turboBannerAttachment()], components: message.components }).catch(() => {});
     }
   }
+}
+
+async function refreshCoreDesignPanels(guild) {
+  const channelNames = [
+    '👋・willkommen',
+    '📜・regelwerk',
+    '❓・faq',
+    '✅・verifizierung',
+    '🛒・bestellen',
+    '💳・zahlung',
+    '🎫・support-ticket',
+    '📋・ticket-info',
+    '💠・kundenstatus',
+    '🖼️・portfolio',
+    '🤝・partner',
+  ];
+  let updated = 0;
+  for (const channelName of channelNames) {
+    const channel = findSellingTextChannel(guild, channelName);
+    if (!channel?.isTextBased?.()) continue;
+    const messages = await channel.messages.fetch({ limit: 100 }).catch(() => null);
+    if (!messages) continue;
+    for (const message of messages.values()) {
+      if (message.author.id !== guild.members.me?.id || !message.embeds?.length) continue;
+      const embeds = message.embeds.map(raw => {
+        const embed = EmbedBuilder.from(raw);
+        embed.setColor(designThemeForTitle(embed.data.title || 'Turbo Designs'));
+        embed.setFooter({ text: 'Turbo Designs • FiveM • Discord • Design' });
+        return embed;
+      });
+      const ok = await message.edit({ embeds, components: message.components }).then(() => true).catch(() => false);
+      if (ok) updated += 1;
+    }
+  }
+  return updated;
 }
 
 function sanitizeName(value) {
@@ -2895,32 +3085,36 @@ function orderInfoEmbed(order, data = null) {
   const license = order.licenseId ? `\`${order.licenseId}\`` : 'Noch nicht ausgestellt';
   const queue = data ? queueInfoForOrder(data, order) : null;
   const queueText = queue?.position
-    ? `**Queue:** #${queue.position} von ${queue.total}\n**ETA Start:** <t:${Math.floor(queue.etaStart / 1000)}:R>\n**ETA Lieferung:** ca. <t:${Math.floor(queue.etaFinish / 1000)}:d>`
-    : '**Queue:** nicht aktiv';
+    ? `#${queue.position} von ${queue.total} • Start <t:${Math.floor(queue.etaStart / 1000)}:R> • Lieferung ca. <t:${Math.floor(queue.etaFinish / 1000)}:d>`
+    : 'Nicht aktiv';
+  const primaryKey = orderProductKeys(order)[0] || order.productKey || 'bundle';
+  const color = order.status === 'disputed'
+    ? DESIGN_THEME.danger
+    : order.deliveredAt
+      ? DESIGN_THEME.success
+      : PRODUCT_THEME[primaryKey] || DESIGN_THEME.brand;
 
-  return shopEmbed(`${emoji} Bestellung ${order.id} • ${productLabel}`.slice(0, 256), [
-    `**Status:** ${orderStatusLabel(order.status)}`,
-    `**Priorität:** ${orderPriorityInfo(order).emoji} ${orderPriorityInfo(order).label}`,
-    `**Wartet auf:** ${waitingOnLabel(order)}`,
-    `**Käufer:** <@${order.userId}>`,
-    order.giftRecipientId ? `**Geschenk-Empfänger:** <@${order.giftRecipientId}>` : null,
-    `**Zuständig:** ${assigned}`,
-    `**Preis:** ${basePrice}${(effectiveDiscount || expressFeeForOrder(order) || acceptedExtraChargesTotal(order)) ? ` → **${finalPrice}**` : ''}`,
-    `**Express:** ${order.expressRequested ? `⚡ Ja${order.expressApproved ? ` (+${Number(order.expressSurchargePercent || 0)} %)` : ' • wartet auf Bestätigung'}` : 'Nein'}`,
-    `**Zusatzkosten:** ${formatEuro(acceptedExtraChargesTotal(order))}${(order.extraCharges || []).some(item => item?.status === 'pending') ? ' • offene Freigabe vorhanden' : ''}`,
-    `**Rabatt:** ${discountParts.length ? discountParts.join(' • ') : 'Keiner'}`,
-    `**Revisionen:** ${Math.max(0, Number(order.revisionsRemaining || 0))}`,
-    `**Richtwert Lieferung:** ${orderEtaDays(order)} Tag(e) / nach Umfang`,
-    `**Lizenz:** ${license}`,
-    queueText,
-  ].join('\n'), [
-    { name: 'Auftrag', value: String(order.details || 'Keine Angaben').slice(0, 1024) },
-    { name: 'Produkte', value: orderProductKeys(order).map(key => `${PRODUCT_TYPES[key].emoji} ${PRODUCT_TYPES[key].label}`).join('\n').slice(0, 1024) || productLabel },
-    { name: 'Stil', value: String(order.style || '—').slice(0, 1024), inline: true },
-    { name: 'Referenzen', value: orderReferenceText(order) },
-    { name: 'Wunschtermin', value: order.dueAt ? `<t:${Math.floor(order.dueAt / 1000)}:F>` : String(order.deadline || '—').slice(0, 1024), inline: true },
-    { name: 'Zusatz', value: String(order.notes || '—').slice(0, 1024), inline: true },
-  ]);
+  return shopEmbed(`${emoji} ${order.id} • ${productLabel}`, [
+    `${orderStatusLabel(order.status)}  •  ${orderPriorityInfo(order).emoji} **${orderPriorityInfo(order).label}**`,
+    `👀 **Wartet auf:** ${waitingOnLabel(order)}`,
+    designDivider('AUFTRAG'),
+    `👤 **Käufer:** <@${order.userId}>`,
+    order.giftRecipientId ? `🎁 **Geschenk-Empfänger:** <@${order.giftRecipientId}>` : null,
+    `🙋 **Zuständig:** ${assigned}`,
+    `💶 **Preis:** ${basePrice}${(effectiveDiscount || expressFeeForOrder(order) || acceptedExtraChargesTotal(order)) ? ` → **${finalPrice}**` : ''}`,
+    `⚡ **Express:** ${order.expressRequested ? `Ja${order.expressApproved ? ` (+${Number(order.expressSurchargePercent || 0)} %)` : ' • wartet auf Bestätigung'}` : 'Nein'}`,
+    `🔄 **Revisionen:** ${Math.max(0, Number(order.revisionsRemaining || 0))}`,
+    `🔐 **Lizenz:** ${license}`,
+    `⏱️ **Queue:** ${queueText}`,
+  ].filter(Boolean).join('\n'), [
+    { name: '📋 Auftrag', value: String(order.details || 'Keine Angaben').slice(0, 1024) },
+    { name: '📦 Produkte', value: orderProductKeys(order).map(key => `${PRODUCT_TYPES[key].emoji} ${PRODUCT_TYPES[key].label}`).join('\n').slice(0, 1024) || productLabel, inline: true },
+    { name: '🎨 Stil', value: String(order.style || '—').slice(0, 1024), inline: true },
+    { name: '📅 Wunschtermin', value: order.dueAt ? `<t:${Math.floor(order.dueAt / 1000)}:F>` : String(order.deadline || '—').slice(0, 1024), inline: true },
+    { name: '🖼️ Referenzen', value: orderReferenceText(order) },
+    { name: '📝 Zusatz', value: String(order.notes || '—').slice(0, 1024), inline: false },
+    { name: '💸 Rabatt / Extras', value: `${discountParts.length ? discountParts.join(' • ') : 'Kein Rabatt'}\nZusatzkosten: ${formatEuro(acceptedExtraChargesTotal(order))}`, inline: false },
+  ], { color, footer: `Turbo Designs • Order Center • ${order.id}` });
 }
 
 function dashboardEmbed(guild, data) {
@@ -3453,14 +3647,10 @@ async function openSupportTicket(interaction, supportKey = 'general') {
   data.supportTickets[supportId] = { id: supportId, userId: interaction.user.id, supportKey, channelId: channel.id, status: 'open', assignedTo: null, createdAt: Date.now(), lastActivityAt: Date.now(), waitingOn: 'staff' };
   saveSellingStore(store);
 
+  const supportHeader = supportTicketHeaderEmbed(interaction.user, supportId, supportType);
   await channel.send({
     content: `<@${interaction.user.id}>`,
-    embeds: [shopEmbed(`${supportType.emoji} Support ${supportId} • ${supportType.label}`, `Hallo <@${interaction.user.id}>!\n\nBitte beschreibe dein Anliegen strukturiert und vollständig. Hilfreich sind:\n• betroffenes Produkt / Bestellung\n• ungefähres Kaufdatum oder Bestellnummer\n• genaue Fehlerbeschreibung oder Frage\n• Screenshots / Logs, falls vorhanden\n• bereits getestete Schritte\n\n**Keine Passwörter, PayPal-Login-Codes, 2FA-Codes oder sonstige Zugangsdaten senden.**`, [
-      { name: 'Ticket-ID', value: `\`${supportId}\``, inline: true },
-      { name: 'Kunde', value: `<@${interaction.user.id}>`, inline: true },
-      { name: 'Bereich', value: supportType.label, inline: true },
-      { name: 'Status', value: 'Offen', inline: true },
-    ])],
+    embeds: [supportHeader],
     components: supportActionRows(),
     allowedMentions: { users: [interaction.user.id] },
   });
@@ -3539,7 +3729,7 @@ async function grantBuyerRoles(guild, order) {
 
 function licenseText(guild, order, license) {
   return [
-    'UNFUGSTIFTER SHOP • DIGITALE LIZENZ',
+    'TURBO DESIGNS • DIGITALE LIZENZ',
     '=====================================',
     `Lizenz-ID: ${license.id}`,
     `Bestellung: ${order.id}`,
@@ -3607,9 +3797,16 @@ async function deliverOrder(guild, orderId, actorId = null) {
   const customerRows = customerDeliveryRows(order, true);
 
   if (!order.deliveryPostedAt) {
+    const deliveryEmbed = deliveryCardEmbed(order)
+      .addFields(
+        { name: '📦 Produkt', value: product.label, inline: true },
+        { name: '🧷 Käuferkennung', value: `\`${license.buyerMarker}\``, inline: true },
+        { name: '📄 Dokumente', value: 'Lizenzdatei + PDF-Bestellbeleg', inline: true },
+      );
+    if (order.giftRecipientId) deliveryEmbed.setDescription(`🎁 Geschenk von <@${order.userId}>\n\n${deliveryEmbed.data.description || ''}`);
     await deliveryChannel.send({
       content: `<@${orderRecipientId(order)}>`,
-      embeds: [shopEmbed(`${product.emoji} Lieferung • ${order.id}`, `${order.giftRecipientId ? `🎁 Diese Bestellung wurde dir von <@${order.userId}> geschenkt.\n\n` : ''}Deine Bestellung wurde als **geliefert** markiert.\n\n**Produkt:** ${product.label}\n**Lizenz:** \`${order.licenseId}\`\n**Käuferkennzeichnung:** \`${license.buyerMarker}\`\n\nDie eigentlichen Produktdateien werden hier vom Shop-Team bereitgestellt. Bewahre deine Lizenz-ID für Support und Updates auf.`)],
+      embeds: [deliveryEmbed],
       files: [attachment, receiptAttachment],
       components: customerRows,
       allowedMentions: { users: [orderRecipientId(order)] },
@@ -3890,13 +4087,8 @@ async function submitReview(interaction, orderId) {
 
   const reviewsChannel = findSellingTextChannel(interaction.guild, '⭐・bewertungen');
   if (reviewsChannel) {
-    const product = { label: orderProductLabel(order), emoji: orderProductEmoji(order) };
     await reviewsChannel.send({
-      embeds: [shopEmbed(`${'⭐'.repeat(stars)} Bewertung • ${product.label}`, text, [
-        { name: 'Kunde', value: `<@${interaction.user.id}>`, inline: true },
-        { name: 'Bestellung', value: `\`${order.id}\``, inline: true },
-        { name: 'Bewertung', value: `**${stars}/5**`, inline: true },
-      ])],
+      embeds: [reviewCardEmbed(review, order, interaction.user)],
       allowedMentions: { parse: [] },
     }).catch(() => {});
   }
@@ -4487,16 +4679,68 @@ function catalogRows() {
 async function refreshShopCatalog(guild, data) {
   const channel = findSellingTextChannel(guild, '🛒・bestellen');
   if (!channel) return null;
+  const enabledCount = Object.keys(PRODUCT_TYPES).filter(key => productConfig(data, key).enabled).length;
   const lines = Object.entries(PRODUCT_TYPES).map(([key, item]) => {
     const cfg = productConfig(data, key);
-    return `${cfg.enabled ? '🟢' : '🔴'} ${item.emoji} **${item.label}** • ${cfg.price !== null && cfg.price !== undefined && cfg.price !== '' && Number.isFinite(Number(cfg.price)) ? formatEuro(cfg.price) : 'Preis im Ticket'} • ETA ca. ${cfg.etaDays || item.etaDays} Tag(e)`;
-  }).join('\n');
-  const payload = { embeds: [shopEmbed('🛒 Shop-Katalog', `${lines}\n\nProdukte mit 🟢 können direkt in den Warenkorb gelegt werden. Wenn ein Standardpreis gesetzt ist, übernimmt der Bot ihn automatisch in die Bestellung.`)], components: catalogRows() };
+    const status = cfg.enabled ? '🟢' : '🔴';
+    const price = cfg.price !== null && cfg.price !== undefined && cfg.price !== '' && Number.isFinite(Number(cfg.price)) ? formatEuro(cfg.price) : 'Preis im Ticket';
+    return `${status} ${item.emoji} **${item.label}**\n> ${price} • ETA ca. ${cfg.etaDays || item.etaDays} Tag(e)`;
+  }).join('\n\n');
+  const payload = {
+    embeds: [shopEmbed('🛍️ Turbo Designs • Shop', [
+      `🟢 **${enabledCount}/${Object.keys(PRODUCT_TYPES).length} Produktbereiche verfügbar**`,
+      designDivider('KATALOG'),
+      lines,
+      designDivider('BESTELLEN'),
+      'Nutze die Buttons unten, lege deine Produkte in den Warenkorb und schließe danach den Checkout ab. Preis, Lieferumfang und Deadline werden im privaten Ticket bestätigt.',
+    ].join('\n'), [], { color: DESIGN_THEME.brand, footer: 'Turbo Designs • Shop Katalog' })],
+    components: catalogRows(),
+  };
   let message = data.config.catalogMessageId ? await channel.messages.fetch(data.config.catalogMessageId).catch(() => null) : null;
   if (message) await message.edit(payload).catch(() => { message = null; });
   if (!message) { message = await channel.send(payload); data.config.catalogMessageId = message.id; }
   return message;
 }
+
+async function refreshDesignShowcasePanels(guild, data) {
+  const specs = [
+    ['🖼️・thumbnails', 'thumbnail'],
+    ['🌆・nve-presets', 'nve'],
+    ['🔊・soundpacks', 'soundpack'],
+    ['🎨・grafik-designs', 'grafik'],
+    ['🚗・fivem-assets', 'fivem'],
+    ['🤖・discord-bots', 'bot'],
+    ['📦・bundles', 'bundle'],
+  ];
+  data.config.designProductMessageIds ||= {};
+  for (const [channelName, key] of specs) {
+    const channel = findSellingTextChannel(guild, channelName);
+    if (!channel?.isTextBased?.()) continue;
+    let message = data.config.designProductMessageIds[key]
+      ? await channel.messages.fetch(data.config.designProductMessageIds[key]).catch(() => null)
+      : null;
+    if (!message) {
+      const recent = await channel.messages.fetch({ limit: 30 }).catch(() => null);
+      message = recent?.find(msg => {
+        if (msg.author.id !== guild.members.me?.id) return false;
+        const title = String(msg.embeds?.[0]?.title || '').toLowerCase();
+        return title.includes(PRODUCT_TYPES[key].label.toLowerCase().split(' / ')[0]) || title.includes(key);
+      }) || null;
+    }
+    const payload = {
+      embeds: [productCardEmbed(key, data)],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`selling_cart_add:${key}`).setLabel('In den Warenkorb').setEmoji(PRODUCT_TYPES[key].emoji).setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('selling_cart_view').setLabel('Warenkorb').setEmoji('🛒').setStyle(ButtonStyle.Secondary),
+      )],
+      allowedMentions: { parse: [] },
+    };
+    if (message) await message.edit(payload).catch(() => { message = null; });
+    if (!message) message = await channel.send(payload).catch(() => null);
+    if (message) data.config.designProductMessageIds[key] = message.id;
+  }
+}
+
 
 function customerProfileEmbed(data, user) {
   const orders = Object.values(data.orders || {}).filter(order => order.userId === user.id).sort((a,b) => Number(b.createdAt)-Number(a.createdAt));
@@ -4643,7 +4887,10 @@ Originaldatei: ${attachment.url}` }).catch(() => null);
   await finalizeSuccessfulDelivery(message.guild, data, order, message.author.id, deliveryChannel);
   saveSellingStore(store);
   const customerRows = customerDeliveryRows(order, true);
-  await deliveryChannel.send({ content: `<@${orderRecipientId(order)}>`, embeds: [shopEmbed('✅ Lieferung bereit', `Bitte prüfe die Datei. Wenn alles passt, bestätige **Produkt akzeptieren**. Falls eine inkludierte Revision nötig ist, nutze **Änderung anfordern**. Mit **Portfolio erlauben** darf das Ergebnis öffentlich als Referenz gezeigt werden.${oneTimeUrls.length ? '\n\n🔐 Einmalige Download-Links werden beim ersten Abruf automatisch als verwendet markiert.' : ''}`)], components: customerRows, allowedMentions:{users:[orderRecipientId(order)]} });
+  const readyCard = deliveryCardEmbed(order);
+  if (oneTimeUrls.length) readyCard.addFields({ name: '🔐 Einmalige Downloads', value: 'Einmalige Download-Links werden beim ersten Abruf automatisch als verwendet markiert.' });
+  readyCard.addFields({ name: '🖼️ Portfolio', value: 'Nach der Abnahme kannst du freiwillig **Portfolio erlauben** auswählen.' });
+  await deliveryChannel.send({ content: `<@${orderRecipientId(order)}>`, embeds: [readyCard], components: customerRows, allowedMentions:{users:[orderRecipientId(order)]} });
   await message.reply(`✅ **${order.id} automatisch geliefert.** Kundenbereich: <#${deliveryChannel.id}>`);
   await refreshStaffDashboard(message.guild, data).catch(()=>{}); saveSellingStore(store);
   } finally {
@@ -4746,7 +4993,16 @@ async function createPortfolioFromOrder(guild, data, order, createdBy) {
   const entry={id,title:`${orderProductLabel(order)} • ${order.id}`,url:order.deliveryFileUrl,category:orderProductLabel(order),description:`Kundenprojekt aus Bestellung ${order.id}`,price:null,createdAt:Date.now(),createdBy,orderId:order.id};
   data.portfolio[id]=entry; order.portfolioId=id;
   const channel=findSellingTextChannel(guild,'🖼️・portfolio');
-  if(channel){ const embed=shopEmbed(`🖼️ ${entry.title}`,`**Kategorie:** ${entry.category}\n${entry.description}\n${Number.isFinite(entry.price)?`**Beispielpreis:** ${formatEuro(entry.price)}\n`:''}Portfolio-ID: \`${id}\``); if(/^https?:\/\/.+\.(png|jpe?g|webp|gif)(\?.*)?$/i.test(entry.url)||String(entry.url).includes('cdn.discordapp')) embed.setImage(entry.url); await channel.send({embeds:[embed],components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`selling_portfolio_order:${orderProductKeys(order)[0]||'bundle'}`).setLabel('So etwas bestellen').setEmoji('🛒').setStyle(ButtonStyle.Primary))]}); }
+  if(channel){
+    const embed=portfolioCardEmbed(entry, order);
+    await channel.send({
+      embeds:[embed],
+      components:[new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`selling_portfolio_order:${orderProductKeys(order)[0]||'bundle'}`).setLabel('So etwas bestellen').setEmoji('🛒').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('selling_cart_view').setLabel('Shop öffnen').setEmoji('🛍️').setStyle(ButtonStyle.Secondary)
+      )]
+    });
+  }
   return entry;
 }
 
@@ -6511,6 +6767,9 @@ Client.prototype.login = function patchedLogin(...args) {
             await sellingHealthCheck(guild, data, false);
           }
           await refreshTeamList(guild, data).catch(() => {});
+          await refreshShopCatalog(guild, data).catch(() => {});
+          await refreshDesignShowcasePanels(guild, data).catch(() => {});
+          await refreshCoreDesignPanels(guild).catch(() => {});
           saveSellingStore(store);
           if (startupAudit.issues.length) await logAutomation(guild, '🛡️ Startup Permission Audit', `Vor Startup-Heal erkannt: **${startupAudit.issues.length}** Problem(e), **${startupAudit.warnings.length}** Warnung(en).`).catch(()=>{});
         } catch (error) {

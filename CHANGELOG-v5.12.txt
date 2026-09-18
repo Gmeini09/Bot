@@ -1,0 +1,19 @@
+# v5.12 – Visual Design System
+
+Neu:
+- Einheitliches Turbo-Designs Theme-System für Embeds
+- neue Akzentfarben für Shop, Support, Team, Erfolg, Warnungen und Premium/VIP
+- eigene Produktfarben für Thumbnail, NVE, Soundpack, Grafik, FiveM, Discord Bot und Bundles
+- moderne Produkt-Cards mit Verfügbarkeit, Preis, ETA und Revisionen
+- Produkt-Cards werden auf bestehenden Servern beim Neustart aktualisiert
+- neues Ticket-Header-Design für Bestellungen
+- neues Support-Ticket-Header-Design mit Avatar und klarer Statusanzeige
+- neue Delivery-Card mit Lizenz, Status und nächsten Schritten
+- neue Review-Cards mit Nutzeravatar, Sterne-Farblogik und Verifiziert-Kauf-Hinweis
+- neues Portfolio-Card/Galerie-Layout mit großem Projektbild und Bestellbutton
+- Teamliste als Karten pro Teamrolle, inklusive Avatar, Zuständigkeit und Besetzungsstatus
+- Shop-Katalog im kompakteren Mobile-Layout
+- Turbo-Designs Footer statt altem Unfugstifter-Footer
+- bestehende Hauptpanels erhalten beim Sync automatisch das neue Theme
+
+Alle v5.11 Stability-/Database-Funktionen bleiben erhalten.
