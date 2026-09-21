@@ -1,10 +1,10 @@
 {
   "name": "community-allround-bot",
-  "version": "5.12.0",
-  "description": "Turbo Designs selling bot v5.12 with unified visual theme, product cards, ticket headers, delivery cards, review cards, portfolio gallery and team cards",
+  "version": "5.12.1",
+  "description": "Turbo Designs selling bot v5.12.1 with delivery button hotfix",
   "main": "index.js",
   "scripts": {
-    "start": "node selling-entry.js",
+    "start": "node start-fixed.js",
     "start:core": "node index.js",
     "deploy": "node deploy-commands.js"
   },
