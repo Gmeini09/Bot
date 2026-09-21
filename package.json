@@ -4,7 +4,7 @@
   "description": "Turbo Designs selling bot v5.12.1 with delivery button hotfix",
   "main": "index.js",
   "scripts": {
-    "start": "node start-fixed.js",
+    "start": "node selling-entry.js",
     "start:core": "node index.js",
     "deploy": "node deploy-commands.js"
   },
