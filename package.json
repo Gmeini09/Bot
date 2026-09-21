@@ -1,10 +1,10 @@
 {
   "name": "community-allround-bot",
-  "version": "5.12.1",
-  "description": "Turbo Designs selling bot v5.12.1 with delivery button hotfix",
+  "version": "5.12.3",
+  "description": "Turbo Designs bot - interaction, accept and review hotfix",
   "main": "index.js",
   "scripts": {
-    "start": "node selling-entry.js",
+    "start": "node start-fixed.js",
     "start:core": "node index.js",
     "deploy": "node deploy-commands.js"
   },
