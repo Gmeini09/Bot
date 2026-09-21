@@ -1,0 +1,49 @@
+TURBO DESIGNS BOT v5.13.1 – GO LIVE
+
+BEREITS VON CHATGPT IN RAILWAY KONFIGURIERT
+- Start command: npm start
+- Healthcheck: /health
+- Healthcheck timeout: 30 Sekunden
+- Restart policy: ON_FAILURE, max. 10 Versuche
+- Sleeping deaktiviert
+- Pre-deploy syntax check:
+  node --check index.js && node --check selling-entry.js && node --check start-fixed.js
+- PORT=8080
+- NODE_ENV=production
+- PUBLIC_BASE_URL=https://bot-production-d58c.up.railway.app
+- Persistentes Volume /data ist vorhanden
+
+REPO-CHECK
+- index.js: Syntax OK
+- selling-entry.js: Syntax OK
+- start-fixed.js: Syntax OK
+- advanced-features.js: Syntax OK
+- turbo-tools.js: Syntax OK
+- compat-fix.js: Syntax OK
+- changelog-enhancer.js: Syntax OK
+- Stream/Twitch Dateien: Syntax OK
+- Keine fehlenden externen npm-Abhängigkeiten gefunden
+- Produkt akzeptieren -> Jetzt bewerten ist im bestehenden Selling-Flow vorhanden
+
+NOCH VON DIR NÖTIG
+1. Railway-Plan aktivieren. Die Railway-Testphase ist abgelaufen; deshalb ist aktuell kein Deployment möglich.
+2. Diese ZIP-Dateien ins Root von Gmeini09/Bot hochladen:
+   - start-fixed.js ersetzen
+   - package.json ersetzen
+   - .env.example ersetzen (optional, nur Dokumentation)
+   - Ordner .github/workflows/bot-check.yml hinzufügen
+3. Danach einen Commit/Push machen. Railway sollte automatisch deployen.
+4. In Discord ausführen:
+   /diagnose
+   /sell diagnose action:Prüfen
+   /sell audit
+5. Testmodus:
+   /sell tools testmode status:An
+6. Einen kompletten Testkauf durchführen.
+7. Wenn alles funktioniert:
+   /sell tools testmode status:Aus
+
+OPTIONAL, ABER EMPFOHLEN
+- In Railway PostgreSQL hinzufügen.
+- Beim Bot DATABASE_URL als Referenz auf die PostgreSQL DATABASE_URL setzen.
+- Neu deployen und /sell diagnose erneut ausführen.

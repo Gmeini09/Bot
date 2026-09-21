@@ -9,7 +9,7 @@ const {
 } = require('discord.js');
 const { Pool } = require('pg');
 
-const TURBO_GUARD_VERSION = '5.13.0';
+const TURBO_GUARD_VERSION = '5.13.1';
 const startedAt = Date.now();
 const recentErrors = [];
 const MAX_ERRORS = 30;
@@ -106,10 +106,6 @@ process.on('unhandledRejection', (reason, promise) => {
   logGuardError('unhandledRejection', reason, {
     promise: String(promise).slice(0, 180),
   });
-});
-
-process.on('uncaughtExceptionMonitor', (error, origin) => {
-  logGuardError('uncaughtExceptionMonitor', error, { origin });
 });
 
 process.on('uncaughtException', (error, origin) => {
@@ -342,6 +338,26 @@ function storageDiagnostic() {
   }
 }
 
+function environmentDiagnostic() {
+  return {
+    discordToken: Boolean(process.env.DISCORD_TOKEN),
+    githubWebhook: Boolean(process.env.GITHUB_WEBHOOK_SECRET),
+    twitchConfigured: Boolean(
+      process.env.TWITCH_CLIENT_ID
+      && process.env.TWITCH_CLIENT_SECRET
+      && String(process.env.STREAM_ENABLED || '').toLowerCase() !== 'false'
+    ),
+    publicBaseUrl: Boolean(
+      process.env.PUBLIC_BASE_URL
+      || process.env.RAILWAY_PUBLIC_DOMAIN
+    ),
+    volume: Boolean(
+      process.env.RAILWAY_VOLUME_MOUNT_PATH
+      || process.env.DATA_DIR
+    ),
+  };
+}
+
 async function handleDiagnose(interaction) {
   if (!interaction.inGuild?.()) {
     await interaction.reply({
@@ -365,6 +381,7 @@ async function handleDiagnose(interaction) {
   const me = guild.members.me || await guild.members.fetchMe().catch(() => null);
   const db = await databaseDiagnostic();
   const storage = storageDiagnostic();
+  const env = environmentDiagnostic();
 
   const guildPerms = me?.permissions;
   const channelPerms = interaction.channel?.permissionsFor?.(me);
@@ -437,6 +454,17 @@ async function handleDiagnose(interaction) {
       inline: true,
     },
     {
+      name: '⚙️ Umgebung',
+      value: [
+        `${yesNo(env.discordToken)} Discord Token`,
+        `${yesNo(env.publicBaseUrl)} Öffentliche Download-URL`,
+        `${yesNo(env.volume)} Persistenter Datenspeicher`,
+        `${env.githubWebhook ? '✅' : '⚪'} GitHub Webhook`,
+        `${env.twitchConfigured ? '✅' : '⚪'} Twitch Integration`,
+      ].join('\n'),
+      inline: false,
+    },
+    {
       name: '⚡ Action-Watchdog',
       value: [
         `Actions gesehen: **${actionStats.seen}**`,
@@ -462,6 +490,8 @@ async function handleDiagnose(interaction) {
 
   const criticalOk =
     Boolean(activeClient?.isReady?.())
+    && env.discordToken
+    && env.publicBaseUrl
     && db.ok
     && storage.ok
     && Boolean(guildPerms?.has?.(PermissionFlagsBits.ManageChannels))

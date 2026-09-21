@@ -1,12 +1,12 @@
 {
   "name": "community-allround-bot",
-  "version": "5.13.0",
-  "description": "Turbo Designs bot v5.13.0 with crash guard, action watchdog and diagnose command",
+  "version": "5.13.1",
+  "description": "Turbo Designs bot v5.13.1 with crash guard, action watchdog, diagnostics and production checks",
   "main": "index.js",
   "scripts": {
     "start": "node start-fixed.js",
     "start:core": "node index.js",
-    "deploy": "node deploy-commands.js"
+    "check": "node --check index.js && node --check selling-entry.js && node --check start-fixed.js"
   },
   "engines": {
     "node": ">=18.17.0"
