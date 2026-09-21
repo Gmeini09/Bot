@@ -1,7 +1,7 @@
 {
   "name": "community-allround-bot",
-  "version": "5.12.4",
-  "description": "Turbo Designs bot v5.12.4 - stable Discord interaction timeout hotfix",
+  "version": "5.13.0",
+  "description": "Turbo Designs bot v5.13.0 with crash guard, action watchdog and diagnose command",
   "main": "index.js",
   "scripts": {
     "start": "node start-fixed.js",

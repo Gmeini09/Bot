@@ -1,0 +1,20 @@
+Turbo Designs Bot v5.13.0
+
+NEU:
+- Crash-Guard für uncaughtException und unhandledRejection
+- Fehler-ID + Discord-Log in 📋・logs / 🤖・automation-log
+- Action-Watchdog gegen DiscordAPIError[10062] / Unknown interaction
+- Alle Selling-Modal-Submits werden sofort bestätigt
+- Zusätzlicher Schutz für Priorität, Express, Portfolio und Staff-Actions
+- /diagnose Command für Bot, DB, Speicher und Discord-Permissions
+- Railway startet bei einem echten fatalen Node-Fehler sauber neu
+
+UPLOAD:
+1. start-fixed.js ins Hauptverzeichnis von Gmeini09/Bot hochladen/ersetzen
+2. package.json ersetzen
+3. selling-entry.js NICHT löschen
+4. Railway deployt automatisch
+
+Nach dem Deploy:
+- /diagnose ausführen
+- Danach Railway Logs kontrollieren
