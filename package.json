@@ -1,7 +1,7 @@
 {
   "name": "community-allround-bot",
-  "version": "5.13.1",
-  "description": "Turbo Designs bot v5.13.1 with crash guard, action watchdog, diagnostics and production checks",
+  "version": "5.13.2",
+  "description": "Turbo Designs bot v5.13.2 - command limit guard, global interaction compatibility and timeout protection",
   "main": "index.js",
   "scripts": {
     "start": "node start-fixed.js",
@@ -9,7 +9,7 @@
     "check": "node --check index.js && node --check selling-entry.js && node --check start-fixed.js"
   },
   "engines": {
-    "node": ">=18.17.0"
+    "node": "22.x"
   },
   "dependencies": {
     "discord.js": "14.27.0",

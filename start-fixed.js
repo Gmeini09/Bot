@@ -6,10 +6,11 @@ const {
   Events,
   REST,
   PermissionFlagsBits,
+  MessageFlags,
 } = require('discord.js');
 const { Pool } = require('pg');
 
-const TURBO_GUARD_VERSION = '5.13.1';
+const TURBO_GUARD_VERSION = '5.13.2';
 const startedAt = Date.now();
 const recentErrors = [];
 const MAX_ERRORS = 30;
@@ -117,7 +118,7 @@ process.on('uncaughtException', (error, origin) => {
   }, 1500).unref?.();
 });
 
-// /DIAGNOSE REGISTRATION
+// /DIAGNOSE + COMMAND LIMIT GUARD
 const diagnoseCommand = {
   name: 'diagnose',
   description: 'Prüft Bot, Datenbank, Speicher und Discord-Berechtigungen.',
@@ -133,11 +134,30 @@ REST.prototype.put = function turboGuardRestPut(route, options = {}) {
       ['setup', 'sell', 'paypal', 'help', 'command'].includes(command?.name),
     );
 
-    if (looksLikeCommandList && !options.body.some(command => command?.name === 'diagnose')) {
-      options = {
-        ...options,
-        body: [...options.body, diagnoseCommand],
-      };
+    if (looksLikeCommandList) {
+      const seen = new Set();
+      let body = options.body.filter(command => {
+        const name = String(command?.name || '');
+        if (!name || seen.has(name)) return false;
+        seen.add(name);
+        return true;
+      });
+
+      // Discord allows a maximum of 100 guild application commands.
+      // The current bot already uses all 100 slots without the standalone
+      // /diagnose command. /sell diagnose provides the same shop diagnosis.
+      if (!body.some(command => command?.name === 'diagnose') && body.length < 100) {
+        body = [...body, diagnoseCommand];
+      } else if (!body.some(command => command?.name === 'diagnose') && body.length >= 100) {
+        console.log(`ℹ️ Command-Limit: ${body.length}/100 – separates /diagnose wird nicht registriert. Nutze /sell diagnose.`);
+      }
+
+      if (body.length > 100) {
+        throw new Error(`Discord Command-Limit überschritten: ${body.length}/100. Keine Commands wurden registriert.`);
+      }
+
+      console.log(`✅ Discord Commands vorbereitet: ${body.length}/100`);
+      options = { ...options, body };
     }
   }
 
@@ -157,12 +177,44 @@ Client.prototype.on = function turboGuardClientOn(eventName, listener) {
   return realClientOn.call(this, eventName, listener);
 };
 
+// INTERACTION RESPONSE COMPATIBILITY
+function normalizeInteractionPayload(options) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) return options;
+  if (!Object.prototype.hasOwnProperty.call(options, 'ephemeral')) return options;
+
+  const payload = { ...options };
+  if (payload.ephemeral === true && payload.flags == null) {
+    payload.flags = MessageFlags.Ephemeral;
+  }
+  delete payload.ephemeral;
+  return payload;
+}
+
+function installInteractionResponseNormalizer(interaction) {
+  if (interaction.__turboResponseNormalizer) return;
+  interaction.__turboResponseNormalizer = true;
+
+  for (const method of ['reply', 'deferReply', 'followUp']) {
+    if (typeof interaction[method] !== 'function') continue;
+    const original = interaction[method].bind(interaction);
+    interaction[method] = function turboNormalizedInteractionResponse(options, ...args) {
+      return original(normalizeInteractionPayload(options), ...args);
+    };
+  }
+}
+
 // ACTION WATCHDOG
 function shouldAutoDefer(interaction) {
   const id = String(interaction?.customId || '');
 
-  // Modal submits are safe to acknowledge immediately and are the main source
-  // of DiscordAPIError[10062] when channel/database work takes too long.
+  // Known slash commands that can perform Discord API work before their first
+  // reply. Their confirmation replies are intentionally ephemeral.
+  if (interaction.isChatInputCommand?.()) {
+    const command = String(interaction.commandName || '');
+    if (['giveaway', 'announce', 'poll', 'suggest'].includes(command)) return true;
+  }
+
+  // Modal submits cannot open another modal and are safe to acknowledge early.
   if (interaction.isModalSubmit?.() && id.startsWith('selling_')) return true;
 
   if (!interaction.isButton?.()) return false;
@@ -185,7 +237,10 @@ function installDeferredReplyBridge(interaction) {
   interaction.__turboGuardDeferred = true;
   actionStats.autoDeferred += 1;
 
-  const deferPromise = interaction.deferReply({ ephemeral: true });
+  const originalReply = interaction.reply.bind(interaction);
+  const originalDeferReply = interaction.deferReply.bind(interaction);
+
+  const deferPromise = originalDeferReply({ flags: MessageFlags.Ephemeral });
 
   deferPromise.catch(error => {
     actionStats.failures += 1;
@@ -197,7 +252,15 @@ function installDeferredReplyBridge(interaction) {
     });
   });
 
-  const originalReply = interaction.reply.bind(interaction);
+  interaction.deferReply = async function turboGuardDeferAgain(options) {
+    try {
+      await deferPromise;
+      if (interaction.deferred) return;
+    } catch {
+      // Retry the handler's own defer below if the watchdog defer failed.
+    }
+    return originalDeferReply(normalizeInteractionPayload(options));
+  };
 
   interaction.reply = async function turboGuardReply(options) {
     try {
@@ -216,17 +279,18 @@ function installDeferredReplyBridge(interaction) {
         : { content: String(options ?? '') };
 
       delete payload.ephemeral;
+      delete payload.flags;
       return interaction.editReply(payload);
     }
 
     if (interaction.replied) {
       if (typeof options === 'string') {
-        return interaction.followUp({ content: options, ephemeral: true });
+        return interaction.followUp({ content: options, flags: MessageFlags.Ephemeral });
       }
-      return interaction.followUp(options || {});
+      return interaction.followUp(normalizeInteractionPayload(options || {}));
     }
 
-    return originalReply(options);
+    return originalReply(normalizeInteractionPayload(options));
   };
 }
 
@@ -362,7 +426,7 @@ async function handleDiagnose(interaction) {
   if (!interaction.inGuild?.()) {
     await interaction.reply({
       content: '❌ `/diagnose` kann nur auf einem Server verwendet werden.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(() => {});
     return;
   }
@@ -370,12 +434,12 @@ async function handleDiagnose(interaction) {
   if (!canRunDiagnose(interaction)) {
     await interaction.reply({
       content: '❌ `/diagnose` ist nur für Management/Administratoren verfügbar.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(() => {});
     return;
   }
 
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const guild = interaction.guild;
   const me = guild.members.me || await guild.members.fetchMe().catch(() => null);
@@ -523,6 +587,8 @@ Client.prototype.login = function turboGuardLogin(...args) {
     this.__turboGuardInstalled = true;
 
     this.prependListener(Events.InteractionCreate, async interaction => {
+      installInteractionResponseNormalizer(interaction);
+
       const actionName =
         interaction.commandName
         || interaction.customId
@@ -546,7 +612,7 @@ Client.prototype.login = function turboGuardLogin(...args) {
 
           const payload = {
             content: `❌ Diagnose fehlgeschlagen. Fehler-ID: \`${entry.id}\``,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           };
 
           if (interaction.deferred || interaction.replied) {

@@ -1,20 +1,25 @@
-Turbo Designs Bot v5.13.0
+Turbo Designs v5.13.2
 
-NEU:
-- Crash-Guard für uncaughtException und unhandledRejection
-- Fehler-ID + Discord-Log in 📋・logs / 🤖・automation-log
-- Action-Watchdog gegen DiscordAPIError[10062] / Unknown interaction
-- Alle Selling-Modal-Submits werden sofort bestätigt
-- Zusätzlicher Schutz für Priorität, Express, Portfolio und Staff-Actions
-- /diagnose Command für Bot, DB, Speicher und Discord-Permissions
-- Railway startet bei einem echten fatalen Node-Fehler sauber neu
+GEÄNDERT
+- Discord 100-Command-Limit abgesichert.
+- Standalone /diagnose wird bei 100 belegten Slots automatisch ausgelassen.
+  Nutze in diesem Fall /sell diagnose.
+- Giveaway, Announce, Poll und Suggest werden vor langsamen API-Aktionen automatisch bestätigt.
+- Selling-Modals und bekannte langsame Selling-Buttons bleiben durch den Watchdog geschützt.
+- Doppeltes deferReply wird sauber abgefangen.
+- Alte ephemeral:true-Antworten werden zentral in MessageFlags.Ephemeral übersetzt.
+- Node.js Runtime auf 22.x angehoben.
+- GitHub Syntax-Check auf Node 22.
 
-UPLOAD:
-1. start-fixed.js ins Hauptverzeichnis von Gmeini09/Bot hochladen/ersetzen
-2. package.json ersetzen
-3. selling-entry.js NICHT löschen
-4. Railway deployt automatisch
+UPLOAD
+1. start-fixed.js im Repo ersetzen.
+2. package.json im Repo ersetzen.
+3. Optional .github/workflows/bot-check.yml übernehmen.
+4. Commit/Push.
+5. Railway baut automatisch neu.
 
-Nach dem Deploy:
-- /diagnose ausführen
-- Danach Railway Logs kontrollieren
+NACH DEM DEPLOY
+- In Railway muss SUCCESS stehen.
+- In den Logs sollte stehen: Discord Commands vorbereitet: 100/100
+- Es darf kein DiscordAPIError[30032] mehr geben.
+- /sell diagnose action:Prüfen ausführen.
