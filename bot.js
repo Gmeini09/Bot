@@ -63,7 +63,10 @@ const ready = !ENABLED ? Promise.resolve() : (async () => {
   state.dataDir = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || path.join(__dirname, 'data');
   fs.mkdirSync(state.dataDir, { recursive: true });
 
-  const privatePem = process.env.SPTOOL_LICENSE_PRIVATE_KEY
+  // Railway-friendly: the key may be given as PEM, as PEM with literal \n, or base64 of the PEM (one line).
+  const envKey = String(process.env.SPTOOL_LICENSE_PRIVATE_KEY || '').trim();
+  const fromEnv = !envKey ? '' : envKey.includes('BEGIN') ? envKey.replace(/\\n/g, '\n') : Buffer.from(envKey, 'base64').toString('utf8');
+  const privatePem = fromEnv
     || readOrCreate(path.join(state.dataDir, 'sptool-license-ed25519.pem'), () => sec.newSigningKey().privatePem);
   const salt = process.env.SPTOOL_HWID_SALT
     || readOrCreate(path.join(state.dataDir, 'sptool-hwid-salt.txt'), () => crypto.randomBytes(32).toString('hex'));
