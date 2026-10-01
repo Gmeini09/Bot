@@ -15,7 +15,7 @@
 import { createServer } from 'node:http';
 import { audit, ensureUser, getUser, tx } from './db.mjs';
 import { authorizeUrl } from './discord.mjs';
-import { randomToken, rateLimiter, serverHwidHash, sha256, signTicket } from './security.mjs';
+import { publicRawFromPrivate, randomToken, rateLimiter, serverHwidHash, sha256, signTicket } from './security.mjs';
 import { createLicenseService, DAY, isSnowflake, LicenseError } from './service.mjs';
 
 const PENDING_TTL = 10 * 60_000;
@@ -31,6 +31,8 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
   const limitAuth = rateLimiter({ capacity: 60, refillPerSec: 1 });
   const limitRedeem = rateLimiter({ capacity: 8, refillPerSec: 1 / 30 });
   const isAdminId = (id) => cfg.adminIds.has(id);
+  let publicKey = '';
+  try { publicKey = cfg.privateKeyPem ? publicRawFromPrivate(cfg.privateKeyPem) : ''; } catch { /* reported at startup */ }
 
   // ── helpers ────────────────────────────────────────────────────────────────
   function send(res, status, body, headers = {}) {
@@ -164,6 +166,9 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
     if (!limitGeneral(clientIp)) throw new HttpError(429, 'rate_limited', 'Too many requests. Slow down.');
 
     if (path === '/api/v1/health') return send(res, 200, { ok: true, time: now() });
+    // Public key that signs license tickets (not secret). Lets the app recover if its built-in key
+    // does not match this server (e.g. the key on the server was regenerated).
+    if (m === 'GET' && path === '/api/v1/public-key') return send(res, 200, { alg: 'Ed25519', publicKey });
 
     // 1) Desktop/browser starts a login with its own secret state and the device hash.
     if (m === 'GET' && path === '/api/v1/auth/discord/start') {

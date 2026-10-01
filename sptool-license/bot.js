@@ -18,6 +18,8 @@ const crypto = require('crypto');
 const { Client, Events, REST, Routes, MessageFlags } = require('discord.js');
 
 const OWNER_ID = '697402284849627180';
+// Public key built into the current SP Tool app release (shown in /sptool-admin setup to spot a mismatch).
+const APP_PUBKEY = process.env.SPTOOL_APP_PUBKEY || '5iVZDgeKEizromOavt_4watv_TymaL7np_99Lys_gEQ';
 const ENABLED = String(process.env.SPTOOL_LICENSE_ENABLED ?? 'true').toLowerCase() !== 'false';
 const COMMANDS = new Set(['sptool', 'sptool-admin']);
 const PLAN_CHOICES = [
@@ -287,6 +289,7 @@ async function handleAdmin(i) {
         `${cfg.discord.clientSecret ? '✅' : '❌'} \`DISCORD_CLIENT_SECRET\` gesetzt (Discord Developer Portal → OAuth2)`,
         `${state.volume ? '✅' : '⚠️'} Persistentes Volume (${state.dataDir})`,
         `${/^https:/.test(cfg.publicUrl) ? '✅' : '⚠️'} Öffentliche HTTPS-Adresse`,
+        `${state.publicKey === APP_PUBKEY ? '✅ Signaturschlüssel passt zur App' : '⚠️ Signaturschlüssel ≠ App-Schlüssel – Apps ab v1.0.1 übernehmen den Server-Schlüssel automatisch; sonst `SPTOOL_LICENSE_PRIVATE_KEY` in Railway setzen'}`,
       ].join('\n');
       return reply(i, { embeds: [embed('⚙️ SP Tool Einrichtung', checks, COLOR.info, [
         { name: '1 · Redirect in Discord eintragen', value: `Developer Portal → deine App${state.appId ? ` (\`${state.appId}\`)` : ''} → OAuth2 → Redirects:\n\`${cfg.publicUrl}/api/v1/auth/discord/callback\`` },
