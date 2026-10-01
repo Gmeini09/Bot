@@ -15,7 +15,9 @@ const crypto = require('crypto');
 const OWNER_ID = '697402284849627180';
 const CMD_HUB = 'sptool-key';
 const CMD_REMOVE = 'sptool-key-entfernen';
-const COMMANDS = new Set([CMD_HUB, CMD_REMOVE]);
+const CMD_APP = 'sptool-app-datei';
+const COMMANDS = new Set([CMD_HUB, CMD_REMOVE, CMD_APP]);
+const MAX_APP_BYTES = 9.5 * 1024 * 1024; // Discord: 10 MB per file without boosts
 const PREFIX = 'spk';
 const EPHEMERAL = 64;
 const PLANS = { free: 'Free', premium: 'Premium', creator: 'Creator', developer: 'Developer' };
@@ -55,6 +57,39 @@ function openDb() {
 }
 const needDb = () => { const d = openDb(); if (!d) throw new Error(dbError?.message || 'Datenbank nicht verfügbar'); return d; };
 const audit = (d, actor, action, target, detail) => { try { d.prepare('INSERT INTO audit_log (at, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)').run(Date.now(), actor, action, target, detail ? JSON.stringify(detail) : null); } catch { /* optional */ } };
+
+// ── app file (ZIP that is attached to every key DM) ─────────────────────────
+const dataDir = () => process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || path.join(__dirname, 'data');
+const appDir = () => path.join(dataDir(), 'sptool-app');
+function appFile() {
+  try {
+    const meta = JSON.parse(fs.readFileSync(path.join(appDir(), 'meta.json'), 'utf8'));
+    const file = path.join(appDir(), meta.stored);
+    if (!fs.existsSync(file)) return null;
+    return { ...meta, file };
+  } catch { return null; }
+}
+async function storeAppFile(att, actor, version) {
+  const name = String(att.name || 'SPTool.zip');
+  if (!/\.zip$/i.test(name)) throw new Error('Bitte eine .zip-Datei hochladen.');
+  if (att.size > MAX_APP_BYTES) throw new Error(`Datei zu groß (${(att.size / 1048576).toFixed(1)} MB) – Discord erlaubt max. 10 MB pro DM-Anhang.`);
+  const res = await fetch(att.url);
+  if (!res.ok) throw new Error(`Download von Discord fehlgeschlagen (${res.status})`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length > MAX_APP_BYTES) throw new Error('Datei zu groß.');
+  if (buf.readUInt32LE(0) !== 0x04034b50) throw new Error('Das ist keine gültige ZIP-Datei.');
+  fs.mkdirSync(appDir(), { recursive: true });
+  const safe = name.replace(/[^\w.\- ]+/g, '').trim() || 'SPTool.zip';
+  const stored = `app-${Date.now()}.zip`;
+  fs.writeFileSync(path.join(appDir(), stored), buf);
+  const old = appFile();
+  const meta = { name: safe, stored, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), version: version || null, uploadedAt: Date.now(), uploadedBy: actor };
+  fs.writeFileSync(path.join(appDir(), 'meta.json'), JSON.stringify(meta, null, 2));
+  if (old && old.stored !== stored) { try { fs.unlinkSync(old.file); } catch { /* ignore */ } }
+  try { const d = openDb(); if (d) audit(d, actor, 'app.uploaded', null, { name: safe, size: buf.length, version: version || null }); } catch { /* ignore */ }
+  return meta;
+}
+const appLine = (a) => (a ? `📦 \`${a.name}\`${a.version ? ` · v${a.version}` : ''} · ${(a.size / 1048576).toFixed(1)} MB · hochgeladen ${ts(a.uploadedAt)}` : '⚠️ Keine App-Datei hinterlegt – mit `/sptool-app-datei` hochladen, dann hängt der Bot sie an jede Key-DM.');
 
 const KEY_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function newKey() {
@@ -158,6 +193,7 @@ function hubView(note) {
         { name: '🟦 Offen', value: `**${s.open}**`, inline: true },
         { name: '✅ Eingelöst', value: `**${s.used}**`, inline: true },
         { name: '⛔ Gesperrt', value: `**${s.revoked}**`, inline: true },
+        { name: 'App-Datei für Key-DMs', value: appLine(appFile()), inline: false },
       ],
       footer: FOOTER,
     }],
@@ -221,8 +257,9 @@ function manageView(userId, filter, page, note) {
     }]));
   }
   comps.push(row([
-    btn(`spk:m:${filter}:${Math.max(0, page - 1)}`, '◀', 2, { disabled: page === 0 }),
-    btn(`spk:m:${filter}:${page + 1}`, '▶', 2, { disabled: !more }),
+    // ":prev"/":next" suffix keeps these ids unique (Discord rejects duplicate custom_ids, e.g. ◀ on page 0 == filter button)
+    btn(`spk:m:${filter}:${Math.max(0, page - 1)}:prev`, '◀', 2, { disabled: page === 0 }),
+    btn(`spk:m:${filter}:${page + 1}:next`, '▶', 2, { disabled: !more }),
     btn(`spk:mdel:${filter}:${page}`, sel.length ? `${sel.length} entfernen` : 'Entfernen', 4, { emoji: { name: '🗑️' }, disabled: !sel.length }),
     btn('spk:hub', 'Übersicht', 2, { emoji: { name: '🏠' } }),
   ]));
@@ -271,6 +308,15 @@ async function handle(i) {
   if (i.isChatInputCommand?.()) {
     if (!openDb()) return i.reply({ content: `❌ Key-Verwaltung nicht verfügbar: ${dbError?.message}`, flags: EPHEMERAL });
     if (i.commandName === CMD_HUB) return i.reply({ ...hubView(), flags: EPHEMERAL });
+    if (i.commandName === CMD_APP) {
+      await i.deferReply({ flags: EPHEMERAL });
+      try {
+        const meta = await storeAppFile(i.options.getAttachment('datei', true), i.user.id, i.options.getString('version'));
+        return i.editReply({ embeds: [{ color: C.green, title: '✅ App-Datei gespeichert', description: `${appLine({ ...meta })}\n\nAb jetzt hängt der Bot diese Datei an jede Key-DM an.`, fields: [{ name: 'SHA-256', value: `\`${meta.sha256.slice(0, 32)}…\`` }], footer: FOOTER }] });
+      } catch (e) {
+        return i.editReply({ content: `❌ ${e?.message || e}` });
+      }
+    }
     const key = String(i.options.getString('key', true)).trim().toUpperCase();
     if (!isKey(key)) return i.reply({ content: '❌ Das ist kein gültiger Key (`SPT-XXXX-XXXX-XXXX-XXXX`).', flags: EPHEMERAL });
     if (!db.prepare('SELECT 1 FROM license_keys WHERE key = ?').get(key)) return i.reply({ content: `❌ Key \`${key}\` gibt es nicht.`, flags: EPHEMERAL });
@@ -317,11 +363,12 @@ async function handle(i) {
     if (st.user) {
       try {
         const u = await i.client.users.fetch(st.user);
-        await u.send({ embeds: [{ color: C.blue, title: '🎧 Dein SP Tool Lizenz-Key', description: `\`\`\`\n${keys.join('\n')}\n\`\`\``, fields: [
+        const app = appFile();
+        await u.send({ ...(app ? { files: [{ attachment: app.file, name: app.name }] } : {}), embeds: [{ color: C.blue, title: '🎧 Dein SP Tool Lizenz-Key', description: `\`\`\`\n${keys.join('\n')}\n\`\`\``, fields: [
           { name: 'Plan', value: PLANS[st.plan], inline: true }, { name: 'Laufzeit', value: durLabel(st.days), inline: true }, { name: 'PCs', value: st.devices, inline: true },
-          { name: 'So aktivierst du', value: 'SP Tool öffnen → **Continue with Discord** → Key eingeben. Die Lizenz wird an deine Discord-ID und deinen PC gebunden.' },
+          { name: 'So aktivierst du', value: `${app ? `1. Angehängte **${app.name}** herunterladen und entpacken\n2. **SPTool.exe** starten (Windows-Warnung: „Weitere Informationen“ → „Trotzdem ausführen“)\n3.` : '1.'} **Continue with Discord** → Key eingeben. Die Lizenz wird an deine Discord-ID und deinen PC gebunden – Weitergeben funktioniert nicht.` },
         ], footer: { text: 'SP Tool by Turbo Design' } }] });
-        dm = `\n📨 Per DM an <@${st.user}> gesendet.`;
+        dm = `\n📨 Per DM an <@${st.user}> gesendet${app ? ` – mit ${app.name}` : ' (ohne App-Datei – `/sptool-app-datei` hochladen)'}.`;
       } catch { dm = `\n⚠️ DM an <@${st.user}> nicht möglich (DMs geschlossen) – bitte selbst schicken.`; }
     }
     return i.update({
@@ -343,6 +390,13 @@ const commandBodies = [
   {
     name: CMD_REMOVE, type: 1, description: 'SP Tool – einen Lizenz-Key entfernen (eingelöst: Lizenz wird entzogen)', default_member_permissions: '8', dm_permission: true,
     options: [{ type: 3, name: 'key', description: 'SPT-XXXX-XXXX-XXXX-XXXX (tippen für Vorschläge)', required: true, autocomplete: true, min_length: 3, max_length: 30 }],
+  },
+  {
+    name: CMD_APP, type: 1, description: 'SP Tool – App-ZIP hochladen, die an jede Key-DM angehängt wird (nur Admins)', default_member_permissions: '8', dm_permission: true,
+    options: [
+      { type: 11, name: 'datei', description: 'SPTool_vX.X.X_Windows.zip (max. 10 MB)', required: true },
+      { type: 3, name: 'version', description: 'Versionsnummer, z. B. 1.1.0', max_length: 20 },
+    ],
   },
 ];
 
@@ -384,7 +438,7 @@ function install() {
         const appId = (c.application || client.application).id;
         for (const body of commandBodies) await rest.post(Routes.applicationCommands(appId), { body });
         openDb();
-        console.log(`✅ SP Tool Key-Verwaltung bereit: /${CMD_HUB}, /${CMD_REMOVE}${dbError ? ` (Datenbank: ${dbError.message})` : ''}`);
+        console.log(`✅ SP Tool Key-Verwaltung bereit: /${CMD_HUB}, /${CMD_REMOVE}, /${CMD_APP}${dbError ? ` (Datenbank: ${dbError.message})` : ''} · v1.1.1`);
       } catch (e) { client.__spkRegistered = false; console.error('❌ SP Tool Key-Panel: Commands konnten nicht registriert werden:', e?.message || e); }
     };
     // discord.js 14.22+ emits "clientReady", older versions "ready" – register once on whichever comes.
@@ -407,4 +461,4 @@ function install() {
 
 try { install(); } catch (e) { console.error('❌ SP Tool Key-Panel nicht geladen:', e?.message || e); }
 
-module.exports = { handle, hubView, createView, manageView, removeKeys, createKeys, decode, encode, isOurs, commandBodies };
+module.exports = { appFile, storeAppFile, handle, hubView, createView, manageView, removeKeys, createKeys, decode, encode, isOurs, commandBodies };
