@@ -635,5 +635,13 @@ Client.prototype.login = function turboGuardLogin(...args) {
 
 console.log(`✅ Turbo Designs Guard v${TURBO_GUARD_VERSION} geladen`);
 
+// SP Tool license system (Discord ID + HWID). Must load before the bot so its
+// HTTP routes (/api/v1) and global /sptool commands hook in. Never crashes the bot.
+try {
+  require('./sptool-license/bot.js');
+} catch (error) {
+  logGuardError('sptool-license', error);
+}
+
 // Load the existing bot without rewriting its source code.
 require('./selling-entry.js');
