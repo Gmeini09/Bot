@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node start-fixed.js",
     "start:core": "node index.js",
-    "check": "node --check index.js && node --check selling-entry.js && node --check start-fixed.js"
+    "check": "node --check index.js && node --check selling-entry.js && node --check start-fixed.js && node --check sptool-license/bot.js",
+    "test:sptool": "node --test sptool-license/sptool-license.test.js"
   },
   "engines": {
     "node": "22.x"
