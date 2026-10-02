@@ -175,8 +175,21 @@ export function createLicenseService({ cfg, db, now = () => Date.now() }) {
       const t = now();
       ensureUser(db, id, t);
       const cur = activeLicense(db, id, t);
-      const base = cur?.expires_at && cur.expires_at > t ? cur.expires_at : t;
-      const expires = row.days == null || (cur && cur.expires_at == null) ? null : base + row.days * DAY;
+      // Rules when a license is already active:
+      //  same plan   → the key's time is added (lifetime stays lifetime)
+      //  higher plan → upgrade for the key's own term; refused if it would end a lifetime license
+      //  lower plan  → refused (it would downgrade); the key stays unused and can be given to someone else
+      const rank = (p) => PLANS.indexOf(p);
+      let expires;
+      if (!cur || cur.plan === row.plan) {
+        const base = cur?.expires_at && cur.expires_at > t ? cur.expires_at : t;
+        expires = row.days == null || (cur && cur.expires_at == null) ? null : base + row.days * DAY;
+      } else if (rank(row.plan) < rank(cur.plan)) {
+        throw new LicenseError(409, 'key_lower_plan', `You already have ${cur.plan} – this ${row.plan} key would downgrade it. The key was not used.`);
+      } else {
+        if (cur.expires_at == null && row.days != null) throw new LicenseError(409, 'key_ends_lifetime', `You have a lifetime ${cur.plan} license – this ${row.days}-day ${row.plan} key would replace it. The key was not used; ask an admin to upgrade you.`);
+        expires = row.days == null ? null : t + row.days * DAY;
+      }
       db.prepare(`INSERT INTO licenses (discord_id, plan, max_devices, expires_at, source, revoked, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?)
         ON CONFLICT(discord_id) DO UPDATE SET plan = excluded.plan, max_devices = MAX(excluded.max_devices, licenses.max_devices), expires_at = excluded.expires_at, source = excluded.source, revoked = 0, updated_at = excluded.updated_at`)
         .run(id, row.plan, row.max_devices, expires, `key:${k}`, t);
