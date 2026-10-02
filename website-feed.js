@@ -20,6 +20,17 @@ function extractImages(messages, guildId, channelId) {
   }
   return items;
 }
+function extractSamples(messages, guildId, channelId) {
+  const samples = [], seen = new Set();
+  for (const message of messages) for (const a of message.attachments?.values?.() || []) {
+    if (a.spoiler || !/\.(wav|mp3|ogg|m4a|aac|flac|mp4|webm)$/i.test(a.name || '')) continue;
+    const url = imageUrl(a.url); if (!url || seen.has(new URL(url).pathname)) continue;
+    seen.add(new URL(url).pathname);
+    samples.push({ id: a.id || `${message.id}-${samples.length}`, url, title: String(a.name || 'Soundpack').replace(/\.[^.]+$/, '').replace(/[_-]+/g,' ').slice(0,100), kind: /\.(mp4|webm)$/i.test(a.name || '') ? 'video' : 'audio', messageUrl: `https://discord.com/channels/${guildId}/${channelId}/${message.id}` });
+    if (samples.length === 12) return samples;
+  }
+  return samples;
+}
 function readCatalog(guildId, directory) {
   const raw = JSON.parse(fs.readFileSync(path.join(directory, 'selling-data.json'), 'utf8'));
   const data = raw.guilds?.[guildId]; if (!data?.products) throw new Error('Catalog unavailable');
@@ -47,7 +58,18 @@ function install() {
       const previews = extractImages([...messages.values()].sort((a,b) => b.createdTimestamp-a.createdTimestamp), guild.id, channel.id);
       const directory = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || __dirname;
       const products = readCatalog(guild.id, directory);
-      const data = { connected: true, updatedAt: new Date().toISOString(), previews, products, previewChannelUrl: `https://discord.com/channels/${guild.id}/${channel.id}`, inviteUrl: 'https://discord.gg/turbodesigns' };
+      const findChannel = name => channels.find(c => c && c.name.replace(/^[^a-z0-9]+/i,'').toLowerCase() === name && c.isTextBased());
+      const channelLink = name => { const c = findChannel(name); return c ? `https://discord.com/channels/${guild.id}/${c.id}` : 'https://discord.gg/turbodesigns'; };
+      const productChannels = { thumbnail:'thumbnails', nve:'nve-presets', soundpack:'soundpacks', grafik:'grafik-designs', fivem:'fivem-assets', bot:'discord-bots', bundle:'bundles' };
+      products.forEach(p => { p.orderUrl = channelLink(productChannels[p.key]); });
+      const soundChannel = findChannel('soundpacks-preview');
+      let samples = [], samplesAvailable = Boolean(soundChannel);
+      if (soundChannel) {
+        try { const sounds = await soundChannel.messages.fetch({limit:100,cache:false}); samples = extractSamples([...sounds.values()].sort((a,b)=>b.createdTimestamp-a.createdTimestamp),guild.id,soundChannel.id); }
+        catch { samplesAvailable = false; }
+      }
+      const extras = { samples, samplesAvailable, soundChannelUrl:channelLink('soundpacks-preview'), orderChannelUrl:channelLink('bestellen') };
+      const data = { ...extras, connected: true, updatedAt: new Date().toISOString(), previews, products, previewChannelUrl: `https://discord.com/channels/${guild.id}/${channel.id}`, inviteUrl: 'https://discord.gg/turbodesigns' };
       cache = { at: Date.now(), data }; return data;
     })().catch(error => { retryAt = Date.now()+30000; console.warn('[website-feed] Refresh unavailable:', error.code || error.message); throw error; }).finally(() => { pending = null; });
     return pending;
@@ -77,4 +99,4 @@ function install() {
     return createServer.apply(this,args);
   };
 }
-module.exports = { imageUrl, extractImages, readCatalog, install };
+module.exports = { imageUrl, extractImages, readCatalog, extractSamples, install };
