@@ -49,7 +49,7 @@ const hwidHash = (clientHash) => {
 const isAdmin = (u) => u.discord_id === OWNER_ID || u.role === 'admin'
   || String(process.env.SPTOOL_ADMIN_IDS || process.env.ADMIN_DISCORD_IDS || '').split(/[,\s;]+/).includes(u.discord_id);
 
-function authenticate(req) {
+function authUser(req) {
   const d = openDb();
   const m = /^Bearer ([A-Za-z0-9_-]{20,})$/.exec(req.headers.authorization || '');
   if (!m) throw new HttpError(403, 'cloud_auth', 'Sign in again to use the cloud.');
@@ -61,6 +61,12 @@ function authenticate(req) {
   if (!hw || hwidHash(hw) !== dev.hwid_hash) throw new HttpError(403, 'cloud_hwid', 'This session belongs to another computer.');
   const u = d.prepare('SELECT * FROM users WHERE discord_id = ?').get(s.discord_id);
   if (!u) throw new HttpError(403, 'cloud_auth', 'Sign in again to use the cloud.');
+  return u;
+}
+
+function authenticate(req) {
+  const d = openDb();
+  const u = authUser(req);
   if (u.banned && !isAdmin(u)) throw new HttpError(403, 'banned', 'This account is banned.');
   if (!isAdmin(u)) {
     const l = d.prepare('SELECT * FROM licenses WHERE discord_id = ?').get(u.discord_id);
@@ -94,10 +100,64 @@ function readBody(req, max) {
   });
 }
 
+// ── App release hand-off ─────────────────────────────────────────────────────
+// An admin's SP Tool uploads its own release ZIP when the bot holds an older version, so every key DM
+// carries the newest app without a manual /sptool-app-datei upload. Same storage as the key panel.
+const APP_PREFIX = '/api/v1/sptool-app/';
+const APP_ZIP_NAME = 'Turbo_Designs_SP_Tool.zip';
+const MAX_APP_BYTES = 9.5 * 1024 * 1024; // Discord: 10 MB per DM attachment without boosts
+const VER_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
+const dataDir = () => process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || path.join(__dirname, 'data');
+const appDir = () => path.join(dataDir(), 'sptool-app');
+function currentApp() {
+  try {
+    const meta = JSON.parse(fs.readFileSync(path.join(appDir(), 'meta.json'), 'utf8'));
+    return fs.existsSync(path.join(appDir(), meta.stored)) ? meta : null;
+  } catch { return null; }
+}
+const verCmp = (a, b) => { const x = String(a || '0.0.0').split('.').map(Number), y = String(b || '0.0.0').split('.').map(Number); for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); } return 0; };
+
+function readRaw(req, max) {
+  return new Promise((resolve, reject) => {
+    const chunks = []; let size = 0;
+    req.on('data', (c) => { size += c.length; if (size <= max) chunks.push(c); else chunks.length = 0; if (size > max * 2) req.destroy(); });
+    req.on('end', () => (size > max ? reject(new HttpError(413, 'too_large', 'The app ZIP is larger than Discord allows (9.5 MB).')) : resolve(Buffer.concat(chunks))));
+    req.on('error', reject);
+  });
+}
+
+async function handleApp(req, res) {
+  if (req.method === 'OPTIONS') return send(res, 204, '');
+  const u = authUser(req);
+  if (!isAdmin(u)) throw new HttpError(403, 'admin_only', 'Only admins can publish the app.');
+  limit(u.discord_id);
+  const rest = new URL(req.url, 'http://x').pathname.slice(APP_PREFIX.length);
+  if (rest !== 'release') throw new HttpError(404, 'not_found', 'Not found.');
+  const cur = currentApp();
+  if (req.method === 'GET') return send(res, 200, { version: cur?.version ?? null, size: cur?.size ?? null, uploadedAt: cur?.uploadedAt ?? null });
+  if (req.method !== 'POST') throw new HttpError(405, 'method', 'Method not allowed.');
+  const version = String(req.headers['x-sptool-version'] || '');
+  if (!VER_RE.test(version)) throw new HttpError(400, 'bad_version', 'Invalid version.');
+  const buf = await readRaw(req, MAX_APP_BYTES);
+  if (cur && verCmp(version, cur.version) <= 0) return send(res, 200, { stored: false, version: cur.version });
+  if (buf.length < 1024 || buf.readUInt32LE(0) !== 0x04034b50) throw new HttpError(400, 'bad_zip', 'That is not a ZIP file.');
+  if (!buf.includes(Buffer.from('SPTool.exe'))) throw new HttpError(400, 'bad_zip', 'The ZIP does not contain SPTool.exe.');
+  fs.mkdirSync(appDir(), { recursive: true });
+  const stored = `app-${Date.now()}.zip`;
+  fs.writeFileSync(path.join(appDir(), stored), buf);
+  const meta = { name: APP_ZIP_NAME, uploadedName: APP_ZIP_NAME, stored, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), version, uploadedAt: Date.now(), uploadedBy: u.discord_id, via: 'app' };
+  fs.writeFileSync(path.join(appDir(), 'meta.json.tmp'), JSON.stringify(meta, null, 2));
+  fs.renameSync(path.join(appDir(), 'meta.json.tmp'), path.join(appDir(), 'meta.json'));
+  if (cur && cur.stored !== stored) { try { fs.unlinkSync(path.join(appDir(), cur.stored)); } catch { /* ignore */ } }
+  try { openDb().prepare('INSERT INTO audit_log (at, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)').run(Date.now(), u.discord_id, 'app.uploaded', null, JSON.stringify({ name: APP_ZIP_NAME, size: buf.length, version, via: 'app-auto' })); } catch { /* optional */ }
+  console.log(`📦 SP Tool App v${version} automatisch übernommen (${(buf.length / 1048576).toFixed(1)} MB) – Key-DMs enthalten jetzt diese Version.`);
+  return send(res, 200, { stored: true, version });
+}
+
 const HEADERS = {
   'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
   'Access-Control-Allow-Origin': process.env.CORS_ORIGINS || '*',
-  'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-SPTool-HWID',
+  'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-SPTool-HWID, X-SPTool-Version',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Max-Age': '600',
 };
 const send = (res, status, body) => { res.writeHead(status, HEADERS); res.end(body === '' ? '' : JSON.stringify(body)); };
@@ -160,8 +220,10 @@ function install() {
     const listener = typeof args[0] === 'function' ? args[0] : (typeof args[1] === 'function' ? args[1] : null);
     if (listener) {
       const wrapped = function sptoolCloudListener(req, res) {
-        if (!String(req.url || '').startsWith(PREFIX)) return listener.call(this, req, res);
-        handle(req, res).catch((e) => {
+        const url = String(req.url || '');
+        const h = url.startsWith(PREFIX) ? handle : url.startsWith(APP_PREFIX) ? handleApp : null;
+        if (!h) return listener.call(this, req, res);
+        h(req, res).catch((e) => {
           if (res.headersSent) return;
           if (e instanceof HttpError) return send(res, e.status, { error: e.code, message: e.message });
           console.error('❌ SP Tool Cloud:', e?.message || e);
@@ -172,8 +234,8 @@ function install() {
     }
     return original.apply(this, args);
   };
-  console.log('ℹ️ SP Tool Cloud geladen · /api/v1/cloud · v1.0.0');
+  console.log('ℹ️ SP Tool Cloud geladen · /api/v1/cloud · /api/v1/sptool-app · v1.1.0');
 }
 
 try { install(); } catch (e) { console.error('❌ SP Tool Cloud nicht geladen:', e?.message || e); }
-module.exports = { handle, authenticate, HttpError };
+module.exports = { handle, handleApp, authenticate, verCmp, HttpError };
