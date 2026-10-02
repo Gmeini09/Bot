@@ -534,7 +534,7 @@ function userAction(actor, id, action, arg) {
   }
 }
 
-// ── DMs ──────────────────────────────────────────────────────────────────────
+// ── DMs ─────────────────────────────────────────────────────────────────────
 const appSteps = (app) => `1. Angehängte **${app.name}** herunterladen und entpacken\n2. **SPTool.exe** starten (Windows-Warnung: „Weitere Informationen“ → „Trotzdem ausführen“)\n3. **Continue with Discord** → anmelden`;
 async function sendApp(client, id, actor) {
   const app = appFile();
@@ -832,11 +832,24 @@ function install() {
     }
     return realOn.call(this, eventName, listener);
   };
+  // prependListener/addListener too: the license bot must not pair before the confirmation.
+  const realPrepend = Client.prototype.prependListener;
+  const realAdd = Client.prototype.addListener;
+  const filtered = (listener) => function spkSkip(interaction, ...args) {
+    if (isOurs(interaction)) return undefined;
+    return listener.call(this, interaction, ...args);
+  };
+  Client.prototype.prependListener = function spkFilteredPrepend(eventName, listener) {
+    return realPrepend.call(this, eventName, eventName === Events.InteractionCreate ? filtered(listener) : listener);
+  };
+  Client.prototype.addListener = function spkFilteredAdd(eventName, listener) {
+    return realAdd.call(this, eventName, eventName === Events.InteractionCreate ? filtered(listener) : listener);
+  };
 
   const attach = (client) => {
     if (!client || client.__spkInstalled) return;
     client.__spkInstalled = true;
-    client.prependListener(Events.InteractionCreate, (i) => {
+    realPrepend.call(client, Events.InteractionCreate, (i) => {
       if (!isOurs(i)) return;
       handle(i).catch((e) => {
         console.error('❌ SP Tool Key-Panel:', e);
@@ -853,7 +866,7 @@ function install() {
         const appId = (c.application || client.application).id;
         for (const body of commandBodies) await rest.post(Routes.applicationCommands(appId), { body });
         openDb();
-        console.log(`✅ SP Tool Key-Verwaltung bereit: /${CMD_HUB}, /${CMD_REMOVE}, /${CMD_APP}, /${CMD_USER}${dbError ? ` (Datenbank: ${dbError.message})` : ''} · v1.3.0`);
+        console.log(`✅ SP Tool Key-Verwaltung bereit: /${CMD_HUB}, /${CMD_REMOVE}, /${CMD_APP}, /${CMD_USER}${dbError ? ` (Datenbank: ${dbError.message})` : ''} · v1.3.1`);
         const tick = () => remindExpiring(client).then((n) => { if (n) console.log(`⏰ SP Tool: ${n} Ablauf-Erinnerung(en) gesendet`); }).catch((e) => console.error('❌ SP Tool Ablauf-Erinnerung:', e?.message || e));
         setTimeout(tick, 60000).unref?.();
         setInterval(tick, 3600000).unref?.();
