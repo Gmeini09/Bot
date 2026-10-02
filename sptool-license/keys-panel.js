@@ -3,6 +3,11 @@
 //
 //   /sptool-key            hub: overview + create keys (menus) + manage/remove keys (list, filter, multi-select)
 //   /sptool-key-entfernen  remove one key directly (with autocomplete) – a redeemed key also revokes that license
+//   /sptool-app-datei      upload the app ZIP that is attached to every key DM
+//   /sptool-user           manage one user: plan, runtime, PCs, hardware-ID reset, revoke, ban, resend app
+//
+// Hub extras: bulk clean-up / delete all keys (typed confirmation), export open keys as .txt, audit log.
+// Background: DM reminder 3 days before a license expires (SPTOOL_EXPIRY_DM=false disables it).
 //
 // Stand-alone add-on: preloaded with `node -r ./sptool-license/keys-panel.js start-fixed.js`. It does not touch
 // the bot's other code and works on the same SQLite license database (license_keys, licenses, users, audit_log)
@@ -16,7 +21,10 @@ const OWNER_ID = '697402284849627180';
 const CMD_HUB = 'sptool-key';
 const CMD_REMOVE = 'sptool-key-entfernen';
 const CMD_APP = 'sptool-app-datei';
-const COMMANDS = new Set([CMD_HUB, CMD_REMOVE, CMD_APP]);
+const CMD_USER = 'sptool-user';
+const COMMANDS = new Set([CMD_HUB, CMD_REMOVE, CMD_APP, CMD_USER]);
+const DAY = 86400000;
+const REMIND_BEFORE = 3 * DAY;
 const MAX_APP_BYTES = 9.5 * 1024 * 1024; // Discord: 10 MB per file without boosts
 const PREFIX = 'spk';
 const EPHEMERAL = 64;
@@ -114,13 +122,22 @@ const btn = (custom_id, label, style = 2, extra = {}) => ({ type: 2, style, labe
 // ── data ─────────────────────────────────────────────────────────────────────
 function stats() {
   const d = needDb();
-  const n = (sql) => d.prepare(sql).get().n;
+  const n = (sql, ...a) => d.prepare(sql).get(...a).n;
+  const opt = (sql, ...a) => { try { return n(sql, ...a); } catch { return null; } }; // tables of the license server
   return {
     open: n('SELECT COUNT(*) AS n FROM license_keys WHERE redeemed_by IS NULL AND revoked = 0'),
     used: n('SELECT COUNT(*) AS n FROM license_keys WHERE redeemed_by IS NOT NULL'),
     revoked: n('SELECT COUNT(*) AS n FROM license_keys WHERE revoked = 1'),
+    total: n('SELECT COUNT(*) AS n FROM license_keys'),
+    users: opt('SELECT COUNT(*) AS n FROM users'),
+    active: opt('SELECT COUNT(*) AS n FROM licenses WHERE revoked = 0 AND (expires_at IS NULL OR expires_at > ?)', Date.now()),
+    expiring: opt('SELECT COUNT(*) AS n FROM licenses WHERE revoked = 0 AND expires_at > ? AND expires_at <= ?', Date.now(), Date.now() + 7 * DAY),
+    devices: opt('SELECT COUNT(*) AS n FROM devices WHERE revoked = 0'),
+    banned: opt('SELECT COUNT(*) AS n FROM users WHERE banned = 1'),
+    logins: opt("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'login' AND at > ?", Date.now() - DAY),
   };
 }
+const num = (v) => (v == null ? '—' : `**${v}**`);
 
 const WHERE = { open: 'redeemed_by IS NULL AND revoked = 0', used: 'redeemed_by IS NOT NULL', revoked: 'revoked = 1', all: '1 = 1' };
 function listKeys(filter, page) {
@@ -193,14 +210,25 @@ function hubView(note) {
         { name: '🟦 Offen', value: `**${s.open}**`, inline: true },
         { name: '✅ Eingelöst', value: `**${s.used}**`, inline: true },
         { name: '⛔ Gesperrt', value: `**${s.revoked}**`, inline: true },
+        { name: '👥 User', value: `${num(s.users)}${s.banned ? ` · ${s.banned} gesperrt` : ''}`, inline: true },
+        { name: '🎫 Aktive Lizenzen', value: `${num(s.active)}${s.expiring ? ` · ${s.expiring} laufen in 7 Tagen ab` : ''}`, inline: true },
+        { name: '🖥️ PCs · Logins 24h', value: `${num(s.devices)} · ${num(s.logins)}`, inline: true },
         { name: 'App-Datei für Key-DMs', value: appLine(appFile()), inline: false },
       ],
       footer: FOOTER,
     }],
-    components: [row([
-      btn('spk:new', 'Keys erstellen', 3, { emoji: { name: '➕' } }),
-      btn('spk:m:open:0', 'Keys verwalten / entfernen', 1, { emoji: { name: '🗂️' } }),
-    ])],
+    components: [
+      row([
+        btn('spk:new', 'Keys erstellen', 3, { emoji: { name: '➕' } }),
+        btn('spk:m:open:0', 'Keys verwalten', 1, { emoji: { name: '🗂️' } }),
+        btn('spk:users', 'User verwalten', 1, { emoji: { name: '👤' } }),
+      ]),
+      row([
+        btn('spk:bulk', 'Aufräumen / Alle löschen', 4, { emoji: { name: '🧹' }, disabled: !s.total }),
+        btn('spk:export', 'Offene Keys als Datei', 2, { emoji: { name: '📤' }, disabled: !s.open }),
+        btn('spk:log:0', 'Verlauf', 2, { emoji: { name: '📜' } }),
+      ]),
+    ],
   };
 }
 
@@ -289,6 +317,252 @@ function confirmView(keys, yesId, noId) {
   };
 }
 
+// ── bulk clean-up / delete all ────────────────────────────────────────────────
+const BULK = {
+  open: { label: 'Alle offenen Keys löschen', confirm: 'LÖSCHEN', info: 'Löscht jeden noch nicht eingelösten Key. Eingelöste Keys und Lizenzen bleiben.' },
+  revoked: { label: 'Gesperrte Keys aufräumen', confirm: 'LÖSCHEN', info: 'Entfernt gesperrte Keys aus der Liste (deren Lizenzen sind bereits entzogen).' },
+  all: { label: 'ALLE Keys entfernen + Lizenzen entziehen', confirm: 'ALLE LÖSCHEN', info: 'Löscht **jeden** Key. Wer einen Key eingelöst hat, verliert seine Lizenz. Nur der Owner.', owner: true },
+};
+function bulkCounts() {
+  const d = needDb();
+  const n = (w) => d.prepare(`SELECT COUNT(*) AS n FROM license_keys WHERE ${w}`).get().n;
+  return { open: n(WHERE.open), revoked: n(WHERE.revoked), all: n(WHERE.all) };
+}
+function bulkView(userId, note) {
+  const c = bulkCounts();
+  const owner = userId === OWNER_ID;
+  return {
+    content: '',
+    embeds: [{
+      color: C.red,
+      title: '🧹 Aufräumen / Alle Keys löschen',
+      description: [note ?? '', ...Object.entries(BULK).map(([k, b]) => `**${b.label}** (${c[k]})\n${b.info}`), '_Zur Sicherheit musst du jede Aktion mit einem Wort bestätigen._'].filter(Boolean).join('\n\n'),
+      footer: FOOTER,
+    }],
+    components: [row([
+      btn('spk:bk:open', `Offene löschen (${c.open})`, 4, { emoji: { name: '🗑️' }, disabled: !c.open }),
+      btn('spk:bk:revoked', `Gesperrte aufräumen (${c.revoked})`, 2, { emoji: { name: '🧽' }, disabled: !c.revoked }),
+      btn('spk:bk:all', `ALLE entfernen (${c.all})`, 4, { emoji: { name: '🧨' }, disabled: !c.all || !owner }),
+      btn('spk:hub', 'Übersicht', 2, { emoji: { name: '🏠' } }),
+    ])],
+  };
+}
+const confirmModal = (customId, title, word) => ({
+  custom_id: customId, title: title.slice(0, 45),
+  components: [row([{ type: 4, custom_id: 'confirm', label: `Zum Bestätigen „${word}“ eingeben`, style: 1, required: true, min_length: 1, max_length: 30, placeholder: word }])],
+});
+function bulkRemove(actor, mode) {
+  const d = needDb();
+  if (mode === 'revoked') {
+    const keys = d.prepare(`SELECT key FROM license_keys WHERE ${WHERE.revoked}`).all().map((r) => r.key);
+    d.prepare(`DELETE FROM license_keys WHERE ${WHERE.revoked}`).run();
+    audit(d, actor, 'keys.cleanup', null, { removed: keys.length });
+    return { removed: keys.length, revokedLicenses: 0 };
+  }
+  const where = mode === 'all' ? 'revoked = 0' : WHERE.open;
+  const before = d.prepare('SELECT COUNT(*) AS n FROM license_keys').get().n;
+  const keys = d.prepare(`SELECT key FROM license_keys WHERE ${where}`).all().map((r) => r.key);
+  const res = keys.length ? removeKeys(actor, keys) : [];
+  if (mode === 'all') d.prepare('DELETE FROM license_keys').run(); // the already blocked ones too
+  const removed = before - d.prepare('SELECT COUNT(*) AS n FROM license_keys').get().n;
+  audit(d, actor, mode === 'all' ? 'keys.deleted_all' : 'keys.deleted_open', null, { count: removed });
+  return { removed, revokedLicenses: res.filter((r) => /entzogen/.test(r.result)).length };
+}
+
+// ── export / audit log ───────────────────────────────────────────────────────
+function exportFile() {
+  const rows = needDb().prepare(`SELECT key, plan, days, max_devices, created_at, note FROM license_keys WHERE ${WHERE.open} ORDER BY created_at DESC`).all();
+  const lines = rows.map((r) => [r.key, PLANS[r.plan] ?? r.plan, durLabel(r.days), `${r.max_devices} PC`, new Date(r.created_at).toISOString().slice(0, 10), r.note ?? ''].join(' | '));
+  const text = [`SP Tool – offene Lizenz-Keys (${rows.length}) · Export ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC`, 'Key | Plan | Laufzeit | PCs | erstellt | Notiz', '', ...lines, ''].join('\n');
+  return { count: rows.length, file: { attachment: Buffer.from(text, 'utf8'), name: `sptool-keys-offen-${new Date().toISOString().slice(0, 10)}.txt` } };
+}
+const ACTION_LABEL = {
+  'keys.created': '➕ Keys erstellt', 'key.deleted': '🗑️ Key gelöscht', 'key.revoked': '⛔ Key gesperrt', 'key.redeemed': '🎫 Key eingelöst',
+  'keys.deleted_open': '🗑️ Offene Keys gelöscht', 'keys.deleted_all': '🧨 Alle Keys entfernt', 'keys.cleanup': '🧽 Aufgeräumt', 'app.uploaded': '📦 App hochgeladen',
+  login: '🔐 Login', 'license.set': '🎫 Lizenz gesetzt', 'license.revoked': '⛔ Lizenz entzogen', 'license.extended': '⏱️ Lizenz verlängert',
+  'devices.reset': '🖥️ Hardware-ID zurückgesetzt', 'device.removed': '🖥️ PC entfernt', 'user.banned': '🚫 Gesperrt', 'user.unbanned': '✅ Entsperrt', 'user.role': '🛡️ Rolle',
+  'app.sent': '📨 App gesendet', 'expiry.reminded': '⏰ Ablauf-Erinnerung',
+};
+const who = (x) => (/^\d{15,21}$/.test(String(x ?? '')) ? `<@${x}>` : x ? `\`${String(x).slice(0, 24)}\`` : '—');
+function logView(page) {
+  const d = needDb();
+  const per = 12;
+  const rows = d.prepare('SELECT at, actor, action, target FROM audit_log ORDER BY at DESC LIMIT ? OFFSET ?').all(per + 1, page * per);
+  const lines = rows.slice(0, per).map((r) => `${ts(r.at)} · ${ACTION_LABEL[r.action] ?? `\`${r.action}\``} · ${who(r.actor)}${r.target ? ` → ${isKey(r.target) ? `\`${r.target}\`` : who(r.target)}` : ''}`);
+  return {
+    content: '',
+    embeds: [{ color: C.blue, title: '📜 Verlauf', description: (lines.join('\n') || '_Noch keine Einträge._').slice(0, 4000), footer: { text: `Seite ${page + 1} · Logins, Keys, Lizenzen und Admin-Aktionen` } }],
+    components: [row([
+      btn(`spk:log:${Math.max(0, page - 1)}:prev`, '◀', 2, { disabled: page === 0 }),
+      btn(`spk:log:${page + 1}:next`, '▶', 2, { disabled: rows.length <= per }),
+      btn('spk:hub', 'Übersicht', 2, { emoji: { name: '🏠' } }),
+    ])],
+  };
+}
+
+// ── user management ──────────────────────────────────────────────────────────
+const isId = (x) => /^\d{15,21}$/.test(String(x ?? ''));
+function ensureUser(d, id, name) {
+  d.prepare("INSERT OR IGNORE INTO users (discord_id, username, created_at) VALUES (?, ?, ?)").run(id, String(name ?? '').slice(0, 64), Date.now());
+}
+function licenseLine(l) {
+  if (!l) return '— keine Lizenz';
+  const plan = `**${PLANS[l.plan] ?? l.plan}**`;
+  if (l.revoked) return `⛔ entzogen (war ${plan})`;
+  if (l.expires_at != null && l.expires_at <= Date.now()) return `⌛ ${plan} · abgelaufen ${ts(l.expires_at)}`;
+  return `✅ ${plan} · ${l.expires_at == null ? 'lebenslang' : `bis ${ts(l.expires_at, 'D')} (${ts(l.expires_at)})`}`;
+}
+function usersPickView(note) {
+  return {
+    content: '',
+    embeds: [{ color: C.blue, title: '👤 User verwalten', description: `${note ? `${note}\n\n` : ''}Wähle einen User – oder nutze \`/${CMD_USER}\`.\nDu kannst Plan und Laufzeit ändern, PCs freigeben (Hardware-ID zurücksetzen), Lizenzen entziehen, sperren und die App erneut schicken.`, footer: FOOTER }],
+    components: [
+      row([{ type: 5, custom_id: 'spk:usel', placeholder: 'User auswählen…', min_values: 1, max_values: 1 }]),
+      row([btn('spk:hub', 'Übersicht', 2, { emoji: { name: '🏠' } })]),
+    ],
+  };
+}
+function userView(id, note) {
+  const d = needDb();
+  const u = d.prepare('SELECT * FROM users WHERE discord_id = ?').get(id);
+  const l = d.prepare('SELECT * FROM licenses WHERE discord_id = ?').get(id);
+  const devs = d.prepare('SELECT name, kind, first_seen, last_seen FROM devices WHERE discord_id = ? AND revoked = 0 ORDER BY last_seen DESC').all(id);
+  const keys = d.prepare('SELECT key, plan, redeemed_at, revoked FROM license_keys WHERE redeemed_by = ? ORDER BY redeemed_at DESC LIMIT 5').all(id);
+  const active = !!l && !l.revoked && (l.expires_at == null || l.expires_at > Date.now());
+  const role = id === OWNER_ID ? '👑 Owner' : u?.role === 'admin' ? '🛡️ Admin' : 'User';
+  const maxDev = l?.max_devices ?? 1;
+  return {
+    content: '',
+    embeds: [{
+      color: u?.banned ? C.red : active ? C.green : C.amber,
+      title: `👤 ${u?.global_name || u?.username || 'User'}${u?.banned ? ' · 🚫 gesperrt' : ''}`,
+      description: [note ?? '', `<@${id}> · \`${id}\``].filter(Boolean).join('\n\n'),
+      fields: [
+        { name: 'Rolle', value: role, inline: true },
+        { name: 'Letzter Login', value: u?.last_login ? ts(u.last_login) : u ? 'noch nie' : 'noch nie in der App', inline: true },
+        { name: 'PCs', value: `**${devs.length}/${maxDev}**`, inline: true },
+        { name: 'Lizenz', value: licenseLine(l), inline: false },
+        ...(u?.banned ? [{ name: 'Sperrgrund', value: String(u.ban_reason || '—').slice(0, 200), inline: false }] : []),
+        { name: 'Gebundene PCs (Hardware-ID)', value: devs.length ? devs.slice(0, 8).map((x) => `🖥️ ${String(x.name).slice(0, 40)} · zuletzt ${ts(x.last_seen)}`).join('\n') : '— keiner', inline: false },
+        { name: 'Eingelöste Keys', value: keys.length ? keys.map((k) => `\`${k.key}\` · ${PLANS[k.plan] ?? k.plan}${k.revoked ? ' · ⛔' : ''} · ${ts(k.redeemed_at)}`).join('\n') : '— keine', inline: false },
+      ],
+      footer: FOOTER,
+    }],
+    components: [
+      row([{ type: 3, custom_id: `spk:uplan:${id}`, placeholder: 'Plan setzen…', min_values: 1, max_values: 1,
+        options: Object.entries(PLANS).map(([v, lb]) => ({ label: `Plan: ${lb}`, value: v, default: active && l.plan === v, description: active ? 'Laufzeit bleibt' : 'Neue Lizenz · 30 Tage' })) }]),
+      row([
+        btn(`spk:uext:${id}:30`, '+30 Tage', 2, { emoji: { name: '⏱️' }, disabled: !l }),
+        btn(`spk:uext:${id}:365`, '+1 Jahr', 2, { emoji: { name: '📅' }, disabled: !l }),
+        btn(`spk:ulife:${id}`, 'Lebenslang', 2, { emoji: { name: '♾️' }, disabled: !l || (active && l.expires_at == null) }),
+        btn(`spk:udev:${id}:1`, '+1 PC', 2, { emoji: { name: '🖥️' }, disabled: !l || maxDev >= 20 }),
+        btn(`spk:udev:${id}:-1`, '−1 PC', 2, { disabled: !l || maxDev <= 1 }),
+      ]),
+      row([
+        btn(`spk:ureset:${id}`, 'Hardware-ID zurücksetzen', 1, { emoji: { name: '🔄' }, disabled: !devs.length }),
+        btn(`spk:urevoke:${id}`, 'Lizenz entziehen', 4, { emoji: { name: '⛔' }, disabled: !active }),
+        btn(`spk:uban:${id}`, u?.banned ? 'Entsperren' : 'Sperren', u?.banned ? 3 : 4, { emoji: { name: u?.banned ? '✅' : '🚫' }, disabled: id === OWNER_ID }),
+        btn(`spk:usend:${id}`, 'App per DM', 2, { emoji: { name: '📨' }, disabled: !appFile() }),
+        btn('spk:users', 'Zurück', 2, { emoji: { name: '↩️' } }),
+      ]),
+    ],
+  };
+}
+function userAction(actor, id, action, arg) {
+  const d = needDb();
+  const t = Date.now();
+  const l = d.prepare('SELECT * FROM licenses WHERE discord_id = ?').get(id);
+  switch (action) {
+    case 'plan': {
+      if (!PLANS[arg]) throw new Error('Unbekannter Plan');
+      ensureUser(d, id);
+      const active = l && !l.revoked && (l.expires_at == null || l.expires_at > t);
+      if (l) d.prepare("UPDATE licenses SET plan = ?, revoked = 0, expires_at = ?, source = 'admin', updated_at = ? WHERE discord_id = ?").run(arg, active ? l.expires_at : t + 30 * DAY, t, id);
+      else d.prepare("INSERT INTO licenses (discord_id, plan, max_devices, expires_at, source, revoked, updated_at) VALUES (?, ?, 1, ?, 'admin', 0, ?)").run(id, arg, t + 30 * DAY, t);
+      audit(d, actor, 'license.set', id, { plan: arg, via: 'discord-panel' });
+      return `✅ Plan auf **${PLANS[arg]}** gesetzt${active ? '' : ' (30 Tage)'}.`;
+    }
+    case 'ext': {
+      if (!l) throw new Error('Keine Lizenz – erst einen Plan wählen.');
+      if (l.expires_at == null && !l.revoked) return 'ℹ️ Lizenz ist bereits lebenslang.';
+      const base = l.expires_at && l.expires_at > t && !l.revoked ? l.expires_at : t;
+      const exp = base + Number(arg) * DAY;
+      d.prepare('UPDATE licenses SET expires_at = ?, revoked = 0, updated_at = ? WHERE discord_id = ?').run(exp, t, id);
+      audit(d, actor, 'license.extended', id, { days: Number(arg), expiresAt: exp });
+      return `✅ Verlängert bis ${ts(exp, 'D')}.`;
+    }
+    case 'life': {
+      if (!l) throw new Error('Keine Lizenz – erst einen Plan wählen.');
+      d.prepare('UPDATE licenses SET expires_at = NULL, revoked = 0, updated_at = ? WHERE discord_id = ?').run(t, id);
+      audit(d, actor, 'license.extended', id, { lifetime: true });
+      return '✅ Lizenz ist jetzt lebenslang.';
+    }
+    case 'dev': {
+      if (!l) throw new Error('Keine Lizenz – erst einen Plan wählen.');
+      const md = Math.max(1, Math.min(20, l.max_devices + Number(arg)));
+      d.prepare('UPDATE licenses SET max_devices = ?, updated_at = ? WHERE discord_id = ?').run(md, t, id);
+      audit(d, actor, 'license.set', id, { maxDevices: md });
+      return `✅ Erlaubte PCs: **${md}**.`;
+    }
+    case 'reset': {
+      d.prepare('UPDATE sessions SET revoked = 1 WHERE discord_id = ?').run(id);
+      const n = d.prepare('DELETE FROM devices WHERE discord_id = ?').run(id).changes;
+      audit(d, actor, 'devices.reset', id, { removed: n, via: 'discord-panel' });
+      return `✅ ${n} PC${n === 1 ? '' : 's'} freigegeben – der User meldet sich auf dem neuen PC einfach neu mit Discord an.`;
+    }
+    case 'revoke': {
+      d.prepare('UPDATE licenses SET revoked = 1, updated_at = ? WHERE discord_id = ?').run(t, id);
+      audit(d, actor, 'license.revoked', id, { via: 'discord-panel' });
+      return '⛔ Lizenz entzogen – die App sperrt sich beim nächsten Lizenz-Check. Rückgängig: Plan wählen.';
+    }
+    case 'ban': {
+      if (id === OWNER_ID) throw new Error('Der Owner kann nicht gesperrt werden.');
+      if (isAdmin(id) && actor !== OWNER_ID) throw new Error('Nur der Owner kann Admins sperren.');
+      ensureUser(d, id);
+      d.prepare('UPDATE users SET banned = 1, ban_reason = ? WHERE discord_id = ?').run(String(arg || '').slice(0, 200) || null, id);
+      d.prepare('UPDATE sessions SET revoked = 1 WHERE discord_id = ?').run(id);
+      audit(d, actor, 'user.banned', id, { reason: arg || null, via: 'discord-panel' });
+      return '🚫 User gesperrt und überall abgemeldet.';
+    }
+    case 'unban': {
+      d.prepare('UPDATE users SET banned = 0, ban_reason = NULL WHERE discord_id = ?').run(id);
+      audit(d, actor, 'user.unbanned', id, { via: 'discord-panel' });
+      return '✅ User entsperrt.';
+    }
+    default: throw new Error('Unbekannte Aktion');
+  }
+}
+
+// ── DMs ──────────────────────────────────────────────────────────────────────
+const appSteps = (app) => `1. Angehängte **${app.name}** herunterladen und entpacken\n2. **SPTool.exe** starten (Windows-Warnung: „Weitere Informationen“ → „Trotzdem ausführen“)\n3. **Continue with Discord** → anmelden`;
+async function sendApp(client, id, actor) {
+  const app = appFile();
+  if (!app) throw new Error('Keine App-Datei hinterlegt – erst `/sptool-app-datei` nutzen.');
+  const u = await client.users.fetch(id);
+  await u.send({ files: [{ attachment: app.file, name: app.name }], embeds: [{ color: C.blue, title: '📦 SP Tool – Download', description: `Hier ist die aktuelle Version${app.version ? ` **v${app.version}**` : ''} von SP Tool.`, fields: [{ name: 'Installation', value: appSteps(app) }], footer: { text: 'SP Tool by Turbo Design' } }] });
+  try { audit(needDb(), actor, 'app.sent', id, { name: app.name }); } catch { /* ignore */ }
+}
+async function remindExpiring(client) {
+  if (String(process.env.SPTOOL_EXPIRY_DM ?? 'true').toLowerCase() === 'false') return 0;
+  const d = openDb();
+  if (!d) return 0;
+  d.exec('CREATE TABLE IF NOT EXISTS sptool_bot_reminders (discord_id TEXT NOT NULL, expires_at INTEGER NOT NULL, sent_at INTEGER NOT NULL, PRIMARY KEY (discord_id, expires_at))');
+  const t = Date.now();
+  const due = d.prepare(`SELECT l.discord_id, l.plan, l.expires_at FROM licenses l WHERE l.revoked = 0 AND l.expires_at > ? AND l.expires_at <= ?
+    AND NOT EXISTS (SELECT 1 FROM sptool_bot_reminders r WHERE r.discord_id = l.discord_id AND r.expires_at = l.expires_at)`).all(t, t + REMIND_BEFORE);
+  let sent = 0;
+  for (const r of due) {
+    d.prepare('INSERT OR IGNORE INTO sptool_bot_reminders (discord_id, expires_at, sent_at) VALUES (?, ?, ?)').run(r.discord_id, r.expires_at, t);
+    try {
+      const u = await client.users.fetch(r.discord_id);
+      await u.send({ embeds: [{ color: C.amber, title: '⏰ Deine SP Tool Lizenz läuft bald ab', description: `Dein **${PLANS[r.plan] ?? r.plan}**-Plan endet ${ts(r.expires_at)} (${ts(r.expires_at, 'f')}).\n\nUm weiterzumachen, löse einfach einen neuen Key in SP Tool ein (**Einstellungen → Account**) – die restliche Zeit wird angerechnet.`, footer: { text: 'SP Tool by Turbo Design' } }] });
+      audit(d, 'system', 'expiry.reminded', r.discord_id, { expiresAt: r.expires_at });
+      sent++;
+    } catch { /* DMs closed */ }
+  }
+  return sent;
+}
+
 const resultText = (res) => res.map((r) => `\`${r.key}\` → ${r.result}`).join('\n');
 
 // ── interaction handling ─────────────────────────────────────────────────────
@@ -308,6 +582,10 @@ async function handle(i) {
   if (i.isChatInputCommand?.()) {
     if (!openDb()) return i.reply({ content: `❌ Key-Verwaltung nicht verfügbar: ${dbError?.message}`, flags: EPHEMERAL });
     if (i.commandName === CMD_HUB) return i.reply({ ...hubView(), flags: EPHEMERAL });
+    if (i.commandName === CMD_USER) {
+      const u = i.options.getUser('user', true);
+      return i.reply({ ...userView(u.id), flags: EPHEMERAL });
+    }
     if (i.commandName === CMD_APP) {
       await i.deferReply({ flags: EPHEMERAL });
       try {
@@ -325,40 +603,95 @@ async function handle(i) {
 
   const parts = String(i.customId).split(':');
   const kind = parts[1];
-  if (kind === 'hub') return i.update(hubView());
-  if (kind === 'new') return i.update(createView({ ...DEFAULT }));
-  if (kind === 'm') return i.update(manageView(i.user.id, FILTERS[parts[2]] ? parts[2] : 'open', Math.max(0, Number(parts[3]) || 0)));
+  const upd = (view) => i.update({ attachments: [], ...view });
+
+  if (i.isModalSubmit?.()) {
+    const typed = String(i.fields.getTextInputValue('confirm') ?? '').trim().toUpperCase();
+    if (kind === 'bkm') {
+      const b = BULK[parts[2]];
+      if (!b || (b.owner && i.user.id !== OWNER_ID)) return upd(bulkView(i.user.id, '❌ Nicht erlaubt.'));
+      if (typed !== b.confirm) return upd(bulkView(i.user.id, `❌ Nicht bestätigt – du musst genau „${b.confirm}“ eingeben. Nichts wurde gelöscht.`));
+      const r = bulkRemove(i.user.id, parts[2]);
+      return upd(bulkView(i.user.id, `✅ **${r.removed}** Key${r.removed === 1 ? '' : 's'} entfernt${r.revokedLicenses ? ` · **${r.revokedLicenses}** Lizenz${r.revokedLicenses === 1 ? '' : 'en'} entzogen` : ''}.`));
+    }
+    if (kind === 'ubanm' && isId(parts[2])) {
+      const reason = String(i.fields.getTextInputValue('confirm') ?? '').trim();
+      return upd(userView(parts[2], userAction(i.user.id, parts[2], 'ban', reason)));
+    }
+    return upd(hubView());
+  }
+
+  if (kind === 'hub') return upd(hubView());
+  if (kind === 'bulk') return upd(bulkView(i.user.id));
+  if (kind === 'bk') {
+    const b = BULK[parts[2]];
+    if (!b) return upd(bulkView(i.user.id));
+    if (b.owner && i.user.id !== OWNER_ID) return upd(bulkView(i.user.id, '❌ Das darf nur der Owner.'));
+    return i.showModal(confirmModal(`spk:bkm:${parts[2]}`, b.label, b.confirm));
+  }
+  if (kind === 'export') {
+    const e = exportFile();
+    if (!e.count) return i.reply({ content: 'Keine offenen Keys vorhanden.', flags: EPHEMERAL });
+    return i.reply({ content: `📤 **${e.count}** offene Key${e.count === 1 ? '' : 's'} als Datei:`, files: [e.file], flags: EPHEMERAL });
+  }
+  if (kind === 'log') return upd(logView(Math.max(0, Number(parts[2]) || 0)));
+  if (kind === 'users') return upd(usersPickView());
+  if (kind === 'usel') {
+    const id = i.values?.[0];
+    return upd(isId(id) ? userView(id) : usersPickView('⚠️ Kein User gewählt.'));
+  }
+  const USER_ACTIONS = { uplan: 'plan', uext: 'ext', ulife: 'life', udev: 'dev', ureset: 'reset', urevoke: 'revoke' };
+  if (USER_ACTIONS[kind] && isId(parts[2])) {
+    const id = parts[2];
+    let note;
+    try { note = userAction(i.user.id, id, USER_ACTIONS[kind], kind === 'uplan' ? i.values?.[0] : parts[3]); } catch (e) { note = `❌ ${e?.message || e}`; }
+    return upd(userView(id, note));
+  }
+  if (kind === 'uban' && isId(parts[2])) {
+    const id = parts[2];
+    const banned = needDb().prepare('SELECT banned FROM users WHERE discord_id = ?').get(id)?.banned;
+    if (banned) return upd(userView(id, userAction(i.user.id, id, 'unban')));
+    if (id === OWNER_ID || (isAdmin(id) && i.user.id !== OWNER_ID)) return upd(userView(id, '❌ Diesen User darfst du nicht sperren.'));
+    return i.showModal({ custom_id: `spk:ubanm:${id}`, title: 'User sperren', components: [row([{ type: 4, custom_id: 'confirm', label: 'Grund (sieht der User in der App)', style: 2, required: true, min_length: 2, max_length: 200, placeholder: 'z. B. Key weitergegeben' }])] });
+  }
+  if (kind === 'usend' && isId(parts[2])) {
+    let note;
+    try { await sendApp(i.client, parts[2], i.user.id); note = `📨 App per DM an <@${parts[2]}> gesendet.`; } catch (e) { note = /Cannot send|50007/.test(String(e?.message || e)) ? '⚠️ DM nicht möglich (DMs geschlossen).' : `❌ ${e?.message || e}`; }
+    return upd(userView(parts[2], note));
+  }
+  if (kind === 'new') return upd(createView({ ...DEFAULT }));
+  if (kind === 'm') return upd(manageView(i.user.id, FILTERS[parts[2]] ? parts[2] : 'open', Math.max(0, Number(parts[3]) || 0)));
   if (kind === 'msel') {
     selections.set(i.user.id, { keys: (i.values ?? []).filter(isKey), at: Date.now() });
-    return i.update(manageView(i.user.id, parts[2], Number(parts[3]) || 0));
+    return upd(manageView(i.user.id, parts[2], Number(parts[3]) || 0));
   }
   if (kind === 'mdel') {
     const keys = selections.get(i.user.id)?.keys ?? [];
-    if (!keys.length) return i.update(manageView(i.user.id, parts[2], Number(parts[3]) || 0, '⚠️ Erst Keys im Menü auswählen.'));
-    return i.update(confirmView(keys, `spk:mdo:${parts[2]}:${parts[3]}`, `spk:m:${parts[2]}:${parts[3]}`));
+    if (!keys.length) return upd(manageView(i.user.id, parts[2], Number(parts[3]) || 0, '⚠️ Erst Keys im Menü auswählen.'));
+    return upd(confirmView(keys, `spk:mdo:${parts[2]}:${parts[3]}`, `spk:m:${parts[2]}:${parts[3]}`));
   }
   if (kind === 'mdo') {
     const keys = selections.get(i.user.id)?.keys ?? [];
     selections.delete(i.user.id);
     const res = keys.length ? removeKeys(i.user.id, keys) : [];
-    return i.update(manageView(i.user.id, parts[2], 0, res.length ? `✅ Erledigt:\n${resultText(res)}` : '⚠️ Nichts ausgewählt.'));
+    return upd(manageView(i.user.id, parts[2], 0, res.length ? `✅ Erledigt:\n${resultText(res)}` : '⚠️ Nichts ausgewählt.'));
   }
   if (kind === 'x1') {
     const res = removeKeys(i.user.id, [parts[2]]);
-    return i.update({ content: '', embeds: [{ color: C.green, title: '✅ Key entfernt', description: resultText(res), footer: FOOTER }], components: [row([btn('spk:m:all:0', 'Alle Keys ansehen', 2, { emoji: { name: '🗂️' } })])] });
+    return upd({ content: '', embeds: [{ color: C.green, title: '✅ Key entfernt', description: resultText(res), footer: FOOTER }], components: [row([btn('spk:m:all:0', 'Alle Keys ansehen', 2, { emoji: { name: '🗂️' } })])] });
   }
-  if (kind === 'x1no') return i.update({ content: 'Abgebrochen – nichts entfernt.', embeds: [], components: [] });
+  if (kind === 'x1no') return upd({ content: 'Abgebrochen – nichts entfernt.', embeds: [], components: [] });
 
-  if (!CREATE_ACTIONS.has(kind)) return i.update(hubView());
+  if (!CREATE_ACTIONS.has(kind)) return upd(hubView());
   const { action, st } = decode(i.customId);
-  if (action === 'plan' || action === 'days' || action === 'devices') { st[action] = i.values?.[0] ?? st[action]; return i.update(createView(st)); }
-  if (action === 'user') { st.user = i.values?.[0] ?? ''; return i.update(createView(st)); }
-  if (action === 'count') { st.count = COUNTS[(COUNTS.indexOf(st.count) + 1) % COUNTS.length]; return i.update(createView(st)); }
-  if (action === 'cancel') return i.update(hubView());
-  if (action === 'again') return i.update(createView(st));
+  if (action === 'plan' || action === 'days' || action === 'devices') { st[action] = i.values?.[0] ?? st[action]; return upd(createView(st)); }
+  if (action === 'user') { st.user = i.values?.[0] ?? ''; return upd(createView(st)); }
+  if (action === 'count') { st.count = COUNTS[(COUNTS.indexOf(st.count) + 1) % COUNTS.length]; return upd(createView(st)); }
+  if (action === 'cancel') return upd(hubView());
+  if (action === 'again') return upd(createView(st));
   if (action === 'create') {
     let keys;
-    try { keys = createKeys(i.user.id, st); } catch (e) { return i.update(createView(st, `❌ Fehler: ${e?.message || e}`)); }
+    try { keys = createKeys(i.user.id, st); } catch (e) { return upd(createView(st, `❌ Fehler: ${e?.message || e}`)); }
     let dm = '';
     if (st.user) {
       try {
@@ -366,13 +699,14 @@ async function handle(i) {
         const app = appFile();
         await u.send({ ...(app ? { files: [{ attachment: app.file, name: app.name }] } : {}), embeds: [{ color: C.blue, title: '🎧 Dein SP Tool Lizenz-Key', description: `\`\`\`\n${keys.join('\n')}\n\`\`\``, fields: [
           { name: 'Plan', value: PLANS[st.plan], inline: true }, { name: 'Laufzeit', value: durLabel(st.days), inline: true }, { name: 'PCs', value: st.devices, inline: true },
-          { name: 'So aktivierst du', value: `${app ? `1. Angehängte **${app.name}** herunterladen und entpacken\n2. **SPTool.exe** starten (Windows-Warnung: „Weitere Informationen“ → „Trotzdem ausführen“)\n3.` : '1.'} **Continue with Discord** → Key eingeben. Die Lizenz wird an deine Discord-ID und deinen PC gebunden – Weitergeben funktioniert nicht.` },
+          { name: 'So aktivierst du', value: `${app ? `${appSteps(app)}\n4.` : '1. **Continue with Discord** → anmelden\n2.'} Key eingeben. Die Lizenz wird an deine Discord-ID und deinen PC gebunden – Weitergeben funktioniert nicht.` },
         ], footer: { text: 'SP Tool by Turbo Design' } }] });
         dm = `\n📨 Per DM an <@${st.user}> gesendet${app ? ` – mit ${app.name}` : ' (ohne App-Datei – `/sptool-app-datei` hochladen)'}.`;
       } catch { dm = `\n⚠️ DM an <@${st.user}> nicht möglich (DMs geschlossen) – bitte selbst schicken.`; }
     }
-    return i.update({
+    return upd({
       content: '',
+      ...(keys.length > 1 ? { files: [{ attachment: Buffer.from(`${keys.join('\n')}\n`, 'utf8'), name: `sptool-keys-${st.plan}-${keys.length}.txt` }] } : {}),
       embeds: [{ color: C.green, title: `✅ ${keys.length} Key${keys.length > 1 ? 's' : ''} erstellt`, description: `\`\`\`\n${keys.join('\n')}\n\`\`\`${dm}`,
         fields: [{ name: 'Plan', value: PLANS[st.plan], inline: true }, { name: 'Laufzeit', value: durLabel(st.days), inline: true }, { name: 'PCs', value: st.devices, inline: true }],
         footer: { text: 'Jeder Key ist nur einmal einlösbar · bindet Discord-ID + Hardware-ID' } }],
@@ -397,6 +731,10 @@ const commandBodies = [
       { type: 11, name: 'datei', description: 'SPTool_vX.X.X_Windows.zip (max. 10 MB)', required: true },
       { type: 3, name: 'version', description: 'Versionsnummer, z. B. 1.1.0', max_length: 20 },
     ],
+  },
+  {
+    name: CMD_USER, type: 1, description: 'SP Tool – User verwalten: Plan, Laufzeit, PCs, Hardware-ID, Sperre (nur Admins)', default_member_permissions: '8', dm_permission: true,
+    options: [{ type: 6, name: 'user', description: 'Discord-User', required: true }],
   },
 ];
 
@@ -438,7 +776,10 @@ function install() {
         const appId = (c.application || client.application).id;
         for (const body of commandBodies) await rest.post(Routes.applicationCommands(appId), { body });
         openDb();
-        console.log(`✅ SP Tool Key-Verwaltung bereit: /${CMD_HUB}, /${CMD_REMOVE}, /${CMD_APP}${dbError ? ` (Datenbank: ${dbError.message})` : ''} · v1.1.1`);
+        console.log(`✅ SP Tool Key-Verwaltung bereit: /${CMD_HUB}, /${CMD_REMOVE}, /${CMD_APP}, /${CMD_USER}${dbError ? ` (Datenbank: ${dbError.message})` : ''} · v1.2.0`);
+        const tick = () => remindExpiring(client).then((n) => { if (n) console.log(`⏰ SP Tool: ${n} Ablauf-Erinnerung(en) gesendet`); }).catch((e) => console.error('❌ SP Tool Ablauf-Erinnerung:', e?.message || e));
+        setTimeout(tick, 60000).unref?.();
+        setInterval(tick, 3600000).unref?.();
       } catch (e) { client.__spkRegistered = false; console.error('❌ SP Tool Key-Panel: Commands konnten nicht registriert werden:', e?.message || e); }
     };
     // discord.js 14.22+ emits "clientReady", older versions "ready" – register once on whichever comes.
@@ -461,4 +802,4 @@ function install() {
 
 try { install(); } catch (e) { console.error('❌ SP Tool Key-Panel nicht geladen:', e?.message || e); }
 
-module.exports = { appFile, storeAppFile, handle, hubView, createView, manageView, removeKeys, createKeys, decode, encode, isOurs, commandBodies };
+module.exports = { userView, userAction, bulkView, bulkRemove, logView, exportFile, remindExpiring, usersPickView, appFile, storeAppFile, handle, hubView, createView, manageView, removeKeys, createKeys, decode, encode, isOurs, commandBodies };
