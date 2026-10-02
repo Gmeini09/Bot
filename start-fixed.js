@@ -643,5 +643,8 @@ try {
   logGuardError('sptool-license', error);
 }
 
+// Read-only public shop and thumbnail feed for turbodesigns.net.
+require('./website-feed.js').install();
+
 // Load the existing bot without rewriting its source code.
 require('./selling-entry.js');
