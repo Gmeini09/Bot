@@ -26,6 +26,7 @@ const COMMANDS = new Set([CMD_HUB, CMD_REMOVE, CMD_APP, CMD_USER]);
 const DAY = 86400000;
 const REMIND_BEFORE = 3 * DAY;
 const MAX_APP_BYTES = 9.5 * 1024 * 1024; // Discord: 10 MB per file without boosts
+const APP_ZIP_NAME = 'Turbo_Designs_SP_Tool.zip'; // name users always receive, for every release and update
 const PREFIX = 'spk';
 const EPHEMERAL = 64;
 const PLANS = { free: 'Free', premium: 'Premium', creator: 'Creator', developer: 'Developer' };
@@ -74,7 +75,7 @@ function appFile() {
     const meta = JSON.parse(fs.readFileSync(path.join(appDir(), 'meta.json'), 'utf8'));
     const file = path.join(appDir(), meta.stored);
     if (!fs.existsSync(file)) return null;
-    return { ...meta, file };
+    return { ...meta, name: APP_ZIP_NAME, uploadedName: meta.uploadedName ?? meta.name, file };
   } catch { return null; }
 }
 async function storeAppFile(att, actor, version) {
@@ -87,11 +88,11 @@ async function storeAppFile(att, actor, version) {
   if (buf.length > MAX_APP_BYTES) throw new Error('Datei zu groß.');
   if (buf.readUInt32LE(0) !== 0x04034b50) throw new Error('Das ist keine gültige ZIP-Datei.');
   fs.mkdirSync(appDir(), { recursive: true });
-  const safe = name.replace(/[^\w.\- ]+/g, '').trim() || 'SPTool.zip';
+  const safe = APP_ZIP_NAME;
   const stored = `app-${Date.now()}.zip`;
   fs.writeFileSync(path.join(appDir(), stored), buf);
   const old = appFile();
-  const meta = { name: safe, stored, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), version: version || null, uploadedAt: Date.now(), uploadedBy: actor };
+  const meta = { name: safe, uploadedName: name.slice(0, 120), stored, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), version: version || null, uploadedAt: Date.now(), uploadedBy: actor };
   fs.writeFileSync(path.join(appDir(), 'meta.json'), JSON.stringify(meta, null, 2));
   if (old && old.stored !== stored) { try { fs.unlinkSync(old.file); } catch { /* ignore */ } }
   try { const d = openDb(); if (d) audit(d, actor, 'app.uploaded', null, { name: safe, size: buf.length, version: version || null }); } catch { /* ignore */ }
@@ -728,7 +729,7 @@ const commandBodies = [
   {
     name: CMD_APP, type: 1, description: 'SP Tool – App-ZIP hochladen, die an jede Key-DM angehängt wird (nur Admins)', default_member_permissions: '8', dm_permission: true,
     options: [
-      { type: 11, name: 'datei', description: 'SPTool_vX.X.X_Windows.zip (max. 10 MB)', required: true },
+      { type: 11, name: 'datei', description: 'App-ZIP (max. 10 MB) – wird immer als Turbo_Designs_SP_Tool.zip verschickt', required: true },
       { type: 3, name: 'version', description: 'Versionsnummer, z. B. 1.1.0', max_length: 20 },
     ],
   },
@@ -776,7 +777,7 @@ function install() {
         const appId = (c.application || client.application).id;
         for (const body of commandBodies) await rest.post(Routes.applicationCommands(appId), { body });
         openDb();
-        console.log(`✅ SP Tool Key-Verwaltung bereit: /${CMD_HUB}, /${CMD_REMOVE}, /${CMD_APP}, /${CMD_USER}${dbError ? ` (Datenbank: ${dbError.message})` : ''} · v1.2.0`);
+        console.log(`✅ SP Tool Key-Verwaltung bereit: /${CMD_HUB}, /${CMD_REMOVE}, /${CMD_APP}, /${CMD_USER}${dbError ? ` (Datenbank: ${dbError.message})` : ''} · v1.2.1`);
         const tick = () => remindExpiring(client).then((n) => { if (n) console.log(`⏰ SP Tool: ${n} Ablauf-Erinnerung(en) gesendet`); }).catch((e) => console.error('❌ SP Tool Ablauf-Erinnerung:', e?.message || e));
         setTimeout(tick, 60000).unref?.();
         setInterval(tick, 3600000).unref?.();
