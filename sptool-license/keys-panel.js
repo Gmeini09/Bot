@@ -93,7 +93,8 @@ async function storeAppFile(att, actor, version) {
   fs.writeFileSync(path.join(appDir(), stored), buf);
   const old = appFile();
   const meta = { name: safe, uploadedName: name.slice(0, 120), stored, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), version: version || null, uploadedAt: Date.now(), uploadedBy: actor };
-  fs.writeFileSync(path.join(appDir(), 'meta.json'), JSON.stringify(meta, null, 2));
+  fs.writeFileSync(path.join(appDir(), 'meta.json.tmp'), JSON.stringify(meta, null, 2));
+  fs.renameSync(path.join(appDir(), 'meta.json.tmp'), path.join(appDir(), 'meta.json')); // never a half-written meta
   if (old && old.stored !== stored) { try { fs.unlinkSync(old.file); } catch { /* ignore */ } }
   try { const d = openDb(); if (d) audit(d, actor, 'app.uploaded', null, { name: safe, size: buf.length, version: version || null }); } catch { /* ignore */ }
   return meta;
@@ -109,9 +110,15 @@ function newKey() {
 }
 const isKey = (k) => /^SPT-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(k);
 
+const configAdmins = () => new Set([OWNER_ID, ...String(process.env.SPTOOL_ADMIN_IDS || process.env.ADMIN_DISCORD_IDS || '').split(/[,\s;]+/).filter(Boolean)]);
+/** Owner / configured admins always; role admins only while not banned. */
 function isAdmin(id) {
-  const ids = new Set([OWNER_ID, ...String(process.env.SPTOOL_ADMIN_IDS || process.env.ADMIN_DISCORD_IDS || '').split(/[,\s;]+/).filter(Boolean)]);
-  if (ids.has(id)) return true;
+  if (configAdmins().has(id)) return true;
+  try { const u = openDb()?.prepare('SELECT role, banned FROM users WHERE discord_id = ?').get(id); return u?.role === 'admin' && !u.banned; } catch { return false; }
+}
+/** Admin accounts (incl. banned ones) can only be changed by the owner. */
+function isAdminAccount(id) {
+  if (configAdmins().has(id)) return true;
   try { return openDb()?.prepare('SELECT role FROM users WHERE discord_id = ?').get(id)?.role === 'admin'; } catch { return false; }
 }
 
@@ -470,6 +477,8 @@ function userView(id, note) {
   };
 }
 function userAction(actor, id, action, arg) {
+  if (actor !== OWNER_ID && id !== actor && isAdminAccount(id)) throw new Error('Nur der Owner kann Admin-Accounts ändern.');
+  if (id === actor && actor !== OWNER_ID && action === 'unban') throw new Error('Du kannst dich nicht selbst entsperren.');
   const d = needDb();
   const t = Date.now();
   const l = d.prepare('SELECT * FROM licenses WHERE discord_id = ?').get(id);
@@ -518,7 +527,7 @@ function userAction(actor, id, action, arg) {
     }
     case 'ban': {
       if (id === OWNER_ID) throw new Error('Der Owner kann nicht gesperrt werden.');
-      if (isAdmin(id) && actor !== OWNER_ID) throw new Error('Nur der Owner kann Admins sperren.');
+      if (isAdminAccount(id) && actor !== OWNER_ID) throw new Error('Nur der Owner kann Admins sperren.');
       ensureUser(d, id);
       d.prepare('UPDATE users SET banned = 1, ban_reason = ? WHERE discord_id = ?').run(String(arg || '').slice(0, 200) || null, id);
       d.prepare('UPDATE sessions SET revoked = 1 WHERE discord_id = ?').run(id);
@@ -693,7 +702,8 @@ async function handle(i) {
     }
     if (kind === 'ubanm' && isId(parts[2])) {
       const reason = String(i.fields.getTextInputValue('confirm') ?? '').trim();
-      return upd(userView(parts[2], userAction(i.user.id, parts[2], 'ban', reason)));
+      let note; try { note = userAction(i.user.id, parts[2], 'ban', reason); } catch (e) { note = `❌ ${e?.message || e}`; }
+      return upd(userView(parts[2], note));
     }
     return upd(hubView());
   }
@@ -727,8 +737,8 @@ async function handle(i) {
   if (kind === 'uban' && isId(parts[2])) {
     const id = parts[2];
     const banned = needDb().prepare('SELECT banned FROM users WHERE discord_id = ?').get(id)?.banned;
-    if (banned) return upd(userView(id, userAction(i.user.id, id, 'unban')));
-    if (id === OWNER_ID || (isAdmin(id) && i.user.id !== OWNER_ID)) return upd(userView(id, '❌ Diesen User darfst du nicht sperren.'));
+    if (banned) { let note; try { note = userAction(i.user.id, id, 'unban'); } catch (e) { note = `❌ ${e?.message || e}`; } return upd(userView(id, note)); }
+    if (id === OWNER_ID || (isAdminAccount(id) && i.user.id !== OWNER_ID)) return upd(userView(id, '❌ Diesen User darfst du nicht sperren.'));
     return i.showModal({ custom_id: `spk:ubanm:${id}`, title: 'User sperren', components: [row([{ type: 4, custom_id: 'confirm', label: 'Grund (sieht der User in der App)', style: 2, required: true, min_length: 2, max_length: 200, placeholder: 'z. B. Key weitergegeben' }])] });
   }
   if (kind === 'usend' && isId(parts[2])) {
@@ -739,16 +749,20 @@ async function handle(i) {
   if (kind === 'new') return upd(createView({ ...DEFAULT }));
   if (kind === 'm') return upd(manageView(i.user.id, FILTERS[parts[2]] ? parts[2] : 'open', Math.max(0, Number(parts[3]) || 0)));
   if (kind === 'msel') {
-    selections.set(i.user.id, { keys: (i.values ?? []).filter(isKey), at: Date.now() });
+    selections.set(i.user.id, { keys: (i.values ?? []).filter(isKey), at: Date.now(), v: crypto.randomBytes(4).toString('hex') });
     return upd(manageView(i.user.id, parts[2], Number(parts[3]) || 0));
   }
   if (kind === 'mdel') {
-    const keys = selections.get(i.user.id)?.keys ?? [];
+    const sel = selections.get(i.user.id);
+    const keys = sel?.keys ?? [];
     if (!keys.length) return upd(manageView(i.user.id, parts[2], Number(parts[3]) || 0, '⚠️ Erst Keys im Menü auswählen.'));
-    return upd(confirmView(keys, `spk:mdo:${parts[2]}:${parts[3]}`, `spk:m:${parts[2]}:${parts[3]}`));
+    // the confirm button names the exact selection it shows – a later selection elsewhere cannot be deleted by it
+    return upd(confirmView(keys, `spk:mdo:${parts[2]}:${parts[3]}:${sel.v}`, `spk:m:${parts[2]}:${parts[3]}`));
   }
   if (kind === 'mdo') {
-    const keys = selections.get(i.user.id)?.keys ?? [];
+    const sel = selections.get(i.user.id);
+    if (!sel || sel.v !== parts[4]) return upd(manageView(i.user.id, parts[2], 0, '⚠️ Die Auswahl hat sich inzwischen geändert – nichts entfernt. Bitte erneut bestätigen.'));
+    const keys = sel.keys;
     selections.delete(i.user.id);
     const res = keys.length ? removeKeys(i.user.id, keys) : [];
     return upd(manageView(i.user.id, parts[2], 0, res.length ? `✅ Erledigt:\n${resultText(res)}` : '⚠️ Nichts ausgewählt.'));
@@ -824,20 +838,18 @@ function install() {
   // Other routers of the bot must not see (and answer) our interactions.
   const realOn = Client.prototype.on;
   Client.prototype.on = function spkFilteredOn(eventName, listener) {
-    if (eventName === Events.InteractionCreate) {
-      return realOn.call(this, eventName, function spkSkip(interaction, ...args) {
-        if (isOurs(interaction)) return undefined;
-        return listener.call(this, interaction, ...args);
-      });
-    }
-    return realOn.call(this, eventName, listener);
+    return realOn.call(this, eventName, eventName === Events.InteractionCreate ? filtered(listener) : listener);
   };
   // prependListener/addListener too: the license bot must not pair before the confirmation.
   const realPrepend = Client.prototype.prependListener;
   const realAdd = Client.prototype.addListener;
-  const filtered = (listener) => function spkSkip(interaction, ...args) {
-    if (isOurs(interaction)) return undefined;
-    return listener.call(this, interaction, ...args);
+  const filtered = (listener) => {
+    const w = function spkSkip(interaction, ...args) {
+      if (isOurs(interaction)) return undefined;
+      return listener.call(this, interaction, ...args);
+    };
+    w.listener = listener; // removeListener/off with the original function still works
+    return w;
   };
   Client.prototype.prependListener = function spkFilteredPrepend(eventName, listener) {
     return realPrepend.call(this, eventName, eventName === Events.InteractionCreate ? filtered(listener) : listener);
@@ -866,7 +878,7 @@ function install() {
         const appId = (c.application || client.application).id;
         for (const body of commandBodies) await rest.post(Routes.applicationCommands(appId), { body });
         openDb();
-        console.log(`✅ SP Tool Key-Verwaltung bereit: /${CMD_HUB}, /${CMD_REMOVE}, /${CMD_APP}, /${CMD_USER}${dbError ? ` (Datenbank: ${dbError.message})` : ''} · v1.3.1`);
+        console.log(`✅ SP Tool Key-Verwaltung bereit: /${CMD_HUB}, /${CMD_REMOVE}, /${CMD_APP}, /${CMD_USER}${dbError ? ` (Datenbank: ${dbError.message})` : ''} · v1.4.0`);
         const tick = () => remindExpiring(client).then((n) => { if (n) console.log(`⏰ SP Tool: ${n} Ablauf-Erinnerung(en) gesendet`); }).catch((e) => console.error('❌ SP Tool Ablauf-Erinnerung:', e?.message || e));
         setTimeout(tick, 60000).unref?.();
         setInterval(tick, 3600000).unref?.();

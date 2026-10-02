@@ -23,6 +23,7 @@ const MAX_TOTAL = 25 * 1024 * 1024;
 const MAX_COUNT = 100;
 const RANK = { free: 0, premium: 1, creator: 2, developer: 3 };
 const ID_RE = /^prj-[a-z0-9-]{3,60}$/;
+const MARKER_DAYS = 60;
 
 let db = null;
 function openDb() {
@@ -46,8 +47,9 @@ const hwidHash = (clientHash) => {
   const salt = process.env.HWID_SERVER_SALT || '';
   return salt ? crypto.createHmac('sha256', salt).update(clientHash).digest('hex') : sha256(clientHash);
 };
-const isAdmin = (u) => u.discord_id === OWNER_ID || u.role === 'admin'
-  || String(process.env.SPTOOL_ADMIN_IDS || process.env.ADMIN_DISCORD_IDS || '').split(/[,\s;]+/).includes(u.discord_id);
+const configAdmin = (id) => id === OWNER_ID || String(process.env.SPTOOL_ADMIN_IDS || process.env.ADMIN_DISCORD_IDS || '').split(/[,\s;]+/).includes(id);
+// role admins lose their rights while banned; owner and configured admins never do
+const isAdmin = (u) => configAdmin(u.discord_id) || (u.role === 'admin' && !u.banned);
 
 function authUser(req) {
   const d = openDb();
@@ -94,7 +96,10 @@ function readBody(req, max) {
     req.on('data', (c) => { size += c.length; if (size <= max) chunks.push(c); else chunks.length = 0; if (size > max * 4) req.destroy(); });
     req.on('end', () => {
       if (size > max) return reject(new HttpError(413, 'too_large', 'Project is too large for the cloud (max 3 MB).'));
-      try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}); } catch { reject(new HttpError(400, 'bad_json', 'Invalid JSON.')); }
+      let v;
+      try { v = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}; } catch { return reject(new HttpError(400, 'bad_json', 'Invalid JSON.')); }
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return reject(new HttpError(400, 'bad_json', 'Invalid JSON.'));
+      resolve(v);
     });
     req.on('error', reject);
   });
@@ -130,6 +135,7 @@ async function handleApp(req, res) {
   if (req.method === 'OPTIONS') return send(res, 204, '');
   const u = authUser(req);
   if (!isAdmin(u)) throw new HttpError(403, 'admin_only', 'Only admins can publish the app.');
+  if (u.banned && !configAdmin(u.discord_id)) throw new HttpError(403, 'banned', 'This account is banned.');
   limit(u.discord_id);
   const rest = new URL(req.url, 'http://x').pathname.slice(APP_PREFIX.length);
   if (rest !== 'release') throw new HttpError(404, 'not_found', 'Not found.');
@@ -139,6 +145,8 @@ async function handleApp(req, res) {
   const version = String(req.headers['x-sptool-version'] || '');
   if (!VER_RE.test(version)) throw new HttpError(400, 'bad_version', 'Invalid version.');
   const buf = await readRaw(req, MAX_APP_BYTES);
+  const latest = currentApp(); // another upload may have finished while this body was arriving
+  if (latest && verCmp(version, latest.version) <= 0) return send(res, 200, { stored: false, version: latest.version });
   if (cur && verCmp(version, cur.version) <= 0) return send(res, 200, { stored: false, version: cur.version });
   if (buf.length < 1024 || buf.readUInt32LE(0) !== 0x04034b50) throw new HttpError(400, 'bad_zip', 'That is not a ZIP file.');
   if (!buf.includes(Buffer.from('SPTool.exe'))) throw new HttpError(400, 'bad_zip', 'The ZIP does not contain SPTool.exe.');
@@ -148,7 +156,7 @@ async function handleApp(req, res) {
   const meta = { name: APP_ZIP_NAME, uploadedName: APP_ZIP_NAME, stored, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), version, uploadedAt: Date.now(), uploadedBy: u.discord_id, via: 'app' };
   fs.writeFileSync(path.join(appDir(), 'meta.json.tmp'), JSON.stringify(meta, null, 2));
   fs.renameSync(path.join(appDir(), 'meta.json.tmp'), path.join(appDir(), 'meta.json'));
-  if (cur && cur.stored !== stored) { try { fs.unlinkSync(path.join(appDir(), cur.stored)); } catch { /* ignore */ } }
+  if (latest && latest.stored !== stored) { try { fs.unlinkSync(path.join(appDir(), latest.stored)); } catch { /* ignore */ } }
   try { openDb().prepare('INSERT INTO audit_log (at, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)').run(Date.now(), u.discord_id, 'app.uploaded', null, JSON.stringify({ name: APP_ZIP_NAME, size: buf.length, version, via: 'app-auto' })); } catch { /* optional */ }
   console.log(`📦 SP Tool App v${version} automatisch übernommen (${(buf.length / 1048576).toFixed(1)} MB) – Key-DMs enthalten jetzt diese Version.`);
   return send(res, 200, { stored: true, version });
@@ -181,13 +189,16 @@ async function handle(req, res) {
   }
   const id = rest[1];
   if (!ID_RE.test(id || '')) throw new HttpError(400, 'bad_id', 'Invalid project id.');
-  const cur = d.prepare('SELECT * FROM sptool_cloud WHERE discord_id = ? AND id = ?').get(uid, id);
+  let cur = d.prepare('SELECT * FROM sptool_cloud WHERE discord_id = ? AND id = ?').get(uid, id);
   if (rest.length === 2 && req.method === 'GET') {
     if (!cur || cur.deleted) throw new HttpError(404, 'not_found', 'This project is not in the cloud.');
     return send(res, 200, { id, name: cur.name, rev: cur.rev, updatedAt: cur.updated_at, data: JSON.parse(cur.data) });
   }
   if (req.method !== 'POST') throw new HttpError(405, 'method', 'Method not allowed.');
   const body = await readBody(req, MAX_PROJECT + 64 * 1024);
+  // read again after the body arrived: another device may have saved meanwhile. From here on everything is
+  // synchronous (node:sqlite), so check and write cannot interleave with another request.
+  cur = d.prepare('SELECT * FROM sptool_cloud WHERE discord_id = ? AND id = ?').get(uid, id);
   const baseRev = Number.isInteger(body.baseRev) ? body.baseRev : 0;
   const curRev = cur ? cur.rev : 0;
   if (baseRev !== curRev) return send(res, 409, { error: 'conflict', message: 'The cloud copy changed on another device.', rev: curRev, updatedAt: cur ? cur.updated_at : null, deleted: cur ? !!cur.deleted : false });
@@ -195,6 +206,8 @@ async function handle(req, res) {
   if (rest.length === 3 && rest[2] === 'delete') {
     if (!cur) return send(res, 200, { rev: 0 });
     d.prepare('UPDATE sptool_cloud SET deleted = 1, data = NULL, size = 0, rev = ?, updated_at = ? WHERE discord_id = ? AND id = ?').run(curRev + 1, t, uid, id);
+    // delete markers only need to live until the other PCs have seen them
+    d.prepare('DELETE FROM sptool_cloud WHERE discord_id = ? AND deleted = 1 AND updated_at < ?').run(uid, t - MARKER_DAYS * 86400000);
     return send(res, 200, { rev: curRev + 1, updatedAt: t });
   }
   if (rest.length !== 2) throw new HttpError(404, 'not_found', 'Not found.');
@@ -234,7 +247,7 @@ function install() {
     }
     return original.apply(this, args);
   };
-  console.log('ℹ️ SP Tool Cloud geladen · /api/v1/cloud · /api/v1/sptool-app · v1.1.0');
+  console.log('ℹ️ SP Tool Cloud geladen · /api/v1/cloud · /api/v1/sptool-app · v1.2.0');
 }
 
 try { install(); } catch (e) { console.error('❌ SP Tool Cloud nicht geladen:', e?.message || e); }
