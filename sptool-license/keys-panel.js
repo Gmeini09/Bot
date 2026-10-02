@@ -567,7 +567,74 @@ async function remindExpiring(client) {
 const resultText = (res) => res.map((r) => `\`${r.key}\` → ${r.result}`).join('\n');
 
 // ── interaction handling ─────────────────────────────────────────────────────
-const isOurs = (i) => ((i?.isChatInputCommand?.() || i?.isAutocomplete?.()) && COMMANDS.has(i.commandName)) || String(i?.customId || '').startsWith(`${PREFIX}:`);
+// /sptool verbinden (pairing from the license bot) gets a confirmation step first – see pairing below.
+const isPairCommand = (i) => !i?.__spkConfirmed && i?.isChatInputCommand?.() && i.commandName === 'sptool' && (() => { try { return i.options.getSubcommand(false) === 'verbinden'; } catch { return false; } })();
+const isOurs = (i) => !i?.__spkConfirmed && (((i?.isChatInputCommand?.() || i?.isAutocomplete?.()) && COMMANDS.has(i.commandName)) || isPairCommand(i) || String(i?.customId || '').startsWith(`${PREFIX}:`));
+
+// ── pairing confirmation: /sptool verbinden code:… ───────────────────────────
+// The license bot links the PC to the account of whoever runs the command. Running somebody else's code
+// therefore logs THEIR PC in with YOUR account (an admin helping a user ended up logging the user in as
+// the owner), and a user tricked into running a stranger's code would hand over their license.
+// So the command first shows which PC gets which account and links only after a click – always with the
+// account of the person who confirms. Nobody can link a PC to another person's account.
+const PAIR_RE = /^[A-F0-9]{10}$/;
+function pendingByCode(code) {
+  try { return needDb().prepare('SELECT device_name, created_at, result FROM pending_logins WHERE UPPER(substr(state_hash, 1, 10)) = ? ORDER BY created_at DESC LIMIT 1').get(code) ?? null; } catch { return null; }
+}
+async function askPair(i) {
+  const code = String(i.options.getString('code', true) || '').trim().toUpperCase();
+  if (!PAIR_RE.test(code)) return i.reply({ content: '❌ Der Verbindungscode ist ungültig (10 Zeichen, 0–9 und A–F).', flags: EPHEMERAL });
+  const p = pendingByCode(code);
+  if (!p) return i.reply({ content: '❌ Der Verbindungscode ist abgelaufen oder unbekannt. Klicke in SP Tool erneut auf **Continue with Discord**.', flags: EPHEMERAL });
+  if (p.result) return i.reply({ content: '❌ Dieser Verbindungscode wurde bereits verwendet.', flags: EPHEMERAL });
+  const admin = isAdmin(i.user.id);
+  const who = i.user.globalName || i.user.username;
+  return i.reply({
+    flags: EPHEMERAL,
+    embeds: [{
+      color: admin ? C.red : C.blue,
+      title: '🔗 SP Tool mit deinem Discord-Account verbinden?',
+      description: [
+        `PC: **${String(p.device_name || 'Unbekannter PC').slice(0, 60)}** · Code \`${code}\` · erstellt ${ts(p.created_at)}`,
+        '',
+        `Dieser PC wird mit **${who}** (\`${i.user.id}\`) angemeldet – mit deiner Lizenz.`,
+        'Nur bestätigen, wenn das **dein eigener PC** ist. Gib nie Codes von anderen Personen ein.',
+        ...(admin ? ['', '⛔ **Du bist Admin/Owner.** Ist das der PC eines Users, **nicht bestätigen** – der User muss `/sptool verbinden` selbst mit seinem Account ausführen, sonst läuft sein PC mit deinem Owner-Account.'] : []),
+      ].join('\n'),
+      footer: FOOTER,
+    }],
+    components: [row([
+      btn(`spk:pairself:${code}`, admin ? 'Ja, das ist MEIN eigener PC' : 'Ja, das ist mein PC – verbinden', admin ? 4 : 3, { emoji: { name: '🔗' } }),
+      btn('spk:paircancel', 'Abbrechen', 2),
+    ])],
+  });
+}
+/** After the click the license bot links the code exactly as before (same user who confirmed); its reply lands here. */
+function confirmPair(i, code) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = async (payload) => {
+      if (done) return; done = true;
+      const content = typeof payload === 'string' ? payload : payload?.content ?? '';
+      const embeds = typeof payload === 'object' && payload?.embeds ? payload.embeds : [];
+      try { await i.editReply({ content: content || ' ', embeds, components: [] }); } catch { /* ignore */ }
+      resolve(content);
+    };
+    const opts = { getSubcommand: () => 'verbinden', getSubcommandGroup: () => null, getString: (n) => (n === 'code' ? code : null), getUser: () => null, getInteger: () => null, getBoolean: () => null, get: (n) => (n === 'code' ? { name: 'code', value: code } : null), data: [] };
+    const cmd = {
+      __spkConfirmed: true, id: i.id, type: 2, commandName: 'sptool', commandType: 1, user: i.user, member: i.member, guild: i.guild, guildId: i.guildId, channel: i.channel, channelId: i.channelId, client: i.client, locale: i.locale, options: opts,
+      deferred: false, replied: false, ephemeral: true, createdTimestamp: Date.now(),
+      isChatInputCommand: () => true, isCommand: () => true, isRepliable: () => true, isAutocomplete: () => false, isButton: () => false, isStringSelectMenu: () => false, isUserSelectMenu: () => false, isModalSubmit: () => false, isMessageComponent: () => false, inGuild: () => !!i.guildId,
+      deferReply: async () => { cmd.deferred = true; },
+      reply: async (p) => { cmd.replied = true; await finish(p); },
+      editReply: async (p) => { await finish(p); },
+      followUp: async (p) => { await finish(p); },
+      fetchReply: async () => null,
+    };
+    setTimeout(() => finish('⚠️ Keine Antwort vom Lizenzsystem – prüfe in SP Tool, ob die Anmeldung geklappt hat.'), 15000);
+    try { i.client.emit('interactionCreate', cmd); } catch (e) { finish(`❌ ${e?.message || e}`); }
+  });
+}
 
 async function autocomplete(i) {
   if (!isAdmin(i.user.id) || !openDb()) return i.respond([]);
@@ -578,6 +645,15 @@ async function autocomplete(i) {
 
 async function handle(i) {
   if (i.isAutocomplete?.()) return autocomplete(i);
+  // pairing confirmation is for everyone, not only admins
+  if (isPairCommand(i)) return askPair(i);
+  { const [, k, c] = String(i.customId || '').split(':');
+    if (k === 'paircancel') return i.update({ content: 'Abgebrochen – nichts wurde verbunden.', embeds: [], components: [] });
+    if (k === 'pairself') {
+      if (!PAIR_RE.test(c || '')) return i.update({ content: '❌ Ungültiger Code.', embeds: [], components: [] });
+      await i.update({ content: '⏳ Verbinde…', embeds: [], components: [] });
+      return confirmPair(i, c);
+    } }
   if (!isAdmin(i.user.id)) return i.reply({ content: '❌ Nur SP Tool Admins können Keys verwalten.', flags: EPHEMERAL });
 
   if (i.isChatInputCommand?.()) {
@@ -777,7 +853,7 @@ function install() {
         const appId = (c.application || client.application).id;
         for (const body of commandBodies) await rest.post(Routes.applicationCommands(appId), { body });
         openDb();
-        console.log(`✅ SP Tool Key-Verwaltung bereit: /${CMD_HUB}, /${CMD_REMOVE}, /${CMD_APP}, /${CMD_USER}${dbError ? ` (Datenbank: ${dbError.message})` : ''} · v1.2.1`);
+        console.log(`✅ SP Tool Key-Verwaltung bereit: /${CMD_HUB}, /${CMD_REMOVE}, /${CMD_APP}, /${CMD_USER}${dbError ? ` (Datenbank: ${dbError.message})` : ''} · v1.3.0`);
         const tick = () => remindExpiring(client).then((n) => { if (n) console.log(`⏰ SP Tool: ${n} Ablauf-Erinnerung(en) gesendet`); }).catch((e) => console.error('❌ SP Tool Ablauf-Erinnerung:', e?.message || e));
         setTimeout(tick, 60000).unref?.();
         setInterval(tick, 3600000).unref?.();
