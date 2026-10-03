@@ -5,6 +5,7 @@
 //   /sptool-key-entfernen  remove one key directly (with autocomplete) – a redeemed key also revokes that license
 //   /sptool-app-datei      upload the app ZIP that is attached to every key DM
 //   /sptool-user           manage one user: plan, runtime, PCs, hardware-ID reset, revoke, ban, resend app
+//   /sptool-update-senden  DM the current app ZIP to everyone with an active license (preview + confirm, test to self)
 //
 // Hub extras: bulk clean-up / delete all keys (typed confirmation), export open keys as .txt, audit log.
 // Background: DM reminder 3 days before a license expires (SPTOOL_EXPIRY_DM=false disables it).
@@ -22,7 +23,9 @@ const CMD_HUB = 'sptool-key';
 const CMD_REMOVE = 'sptool-key-entfernen';
 const CMD_APP = 'sptool-app-datei';
 const CMD_USER = 'sptool-user';
-const COMMANDS = new Set([CMD_HUB, CMD_REMOVE, CMD_APP, CMD_USER]);
+const CMD_UPDATE = 'sptool-update-senden';
+const COMMANDS = new Set([CMD_HUB, CMD_REMOVE, CMD_APP, CMD_USER, CMD_UPDATE]);
+const UPDATE_GAP_MS = 1500; // pause between update DMs (Discord rate limits)
 const DAY = 86400000;
 const REMIND_BEFORE = 3 * DAY;
 const MAX_APP_BYTES = 9.5 * 1024 * 1024; // Discord: 10 MB per file without boosts
@@ -552,6 +555,86 @@ async function sendApp(client, id, actor) {
   await u.send({ files: [{ attachment: app.file, name: app.name }], embeds: [{ color: C.blue, title: '📦 SP Tool – Download', description: `Hier ist die aktuelle Version${app.version ? ` **v${app.version}**` : ''} von SP Tool.`, fields: [{ name: 'Installation', value: appSteps(app) }], footer: { text: 'SP Tool by Turbo Design' } }] });
   try { audit(needDb(), actor, 'app.sent', id, { name: app.name }); } catch { /* ignore */ }
 }
+// ── update broadcast: current app ZIP to everyone with an active license ─────
+const pendingUpdates = new Map(); // adminId → { note, again, sha, at }
+let broadcast = null; // running broadcast (only one at a time)
+const ensureSentTable = (d) => d.exec('CREATE TABLE IF NOT EXISTS sptool_bot_app_sent (discord_id TEXT NOT NULL, sha256 TEXT NOT NULL, sent_at INTEGER NOT NULL, PRIMARY KEY (discord_id, sha256))');
+/** Active, not revoked, not expired licenses of users who are not banned. Already-sent (same ZIP) are skipped unless `again`. */
+function updateTargets(again) {
+  const app = appFile();
+  if (!app) throw new Error('Keine App-Datei hinterlegt – erst `/sptool-app-datei` nutzen (oder die neue Version als Admin in der App öffnen).');
+  const d = needDb();
+  ensureSentTable(d);
+  const all = [...new Set(d.prepare(`SELECT l.discord_id FROM licenses l LEFT JOIN users u ON u.discord_id = l.discord_id
+    WHERE l.revoked = 0 AND (l.expires_at IS NULL OR l.expires_at > ?) AND COALESCE(u.banned, 0) = 0`).all(Date.now()).map((r) => r.discord_id))].filter(isId);
+  const done = new Set(d.prepare('SELECT discord_id FROM sptool_bot_app_sent WHERE sha256 = ?').all(app.sha256 || '').map((r) => r.discord_id));
+  const todo = again ? all : all.filter((id) => !done.has(id));
+  return { app, all, todo, already: all.length - todo.length };
+}
+const cleanNote = (n) => String(n || '').replace(/\\n/g, '\n').trim().slice(0, 1000);
+function updateMessage(app, note) {
+  return {
+    files: [{ attachment: app.file, name: app.name }],
+    embeds: [{
+      color: C.blue,
+      title: `🆕 SP Tool Update${app.version ? ` – v${app.version}` : ''}`,
+      description: `Eine neue Version von SP Tool ist da.${note ? `\n\n**Was ist neu?**\n${note}` : ''}`,
+      fields: [{ name: 'So aktualisierst du (1 Minute)', value: `1. Angehängte **${app.name}** herunterladen und entpacken\n2. **SPTool.exe** starten – die alte Version wird automatisch ersetzt\n   (Windows-Warnung: „Weitere Informationen“ → „Trotzdem ausführen“)\n3. Fertig – deine Soundpacks, Einstellungen und Lizenz bleiben erhalten` }],
+      footer: { text: 'SP Tool by Turbo Design · Du bekommst diese Nachricht, weil du eine aktive SP Tool Lizenz hast.' },
+    }],
+  };
+}
+async function sendUpdateTo(client, id, app, note) {
+  const u = await client.users.fetch(id);
+  await u.send(updateMessage(app, note));
+  try { const d = needDb(); ensureSentTable(d); d.prepare('INSERT OR REPLACE INTO sptool_bot_app_sent (discord_id, sha256, sent_at) VALUES (?, ?, ?)').run(id, app.sha256 || '', Date.now()); } catch { /* bookkeeping only */ }
+}
+const mins = (n) => Math.max(1, Math.ceil((n * UPDATE_GAP_MS) / 60000));
+function updatePreview(adminId, { note, again }) {
+  const { app, all, todo, already } = updateTargets(again);
+  pendingUpdates.set(adminId, { note, again, sha: app.sha256, at: Date.now() });
+  const lines = [
+    appLine(app),
+    '',
+    `👥 **${all.length}** User mit aktiver Lizenz`,
+    already ? `✅ **${already}** haben genau diese Version schon bekommen${again ? ' – bekommen sie trotzdem nochmal' : ' – werden übersprungen'}` : null,
+    `📨 **${todo.length}** bekommen jetzt eine DM${todo.length ? ` (dauert ca. ${mins(todo.length)} Min.)` : ''}`,
+  ].filter((x) => x !== null);
+  return {
+    content: '',
+    embeds: [
+      { color: todo.length ? C.amber : C.green, title: '📢 Update an alle Lizenz-Inhaber senden', description: lines.join('\n'), footer: { text: 'Tipp: Mit der Option „nur-ich“ schickst du dir die DM vorher selbst als Test.' } },
+      { ...updateMessage(app, note).embeds[0], author: { name: 'Vorschau – so sieht die DM aus' } },
+    ],
+    components: todo.length ? [row([btn('spk:updgo', `An ${todo.length} User senden`, 3, { emoji: { name: '📨' } }), btn('spk:updno', 'Abbrechen', 2)])] : [],
+  };
+}
+async function runBroadcast(i, p) {
+  const { app, todo } = updateTargets(p.again);
+  if (app.sha256 !== p.sha) throw new Error('Die App-Datei wurde inzwischen geändert – bitte den Befehl neu ausführen.');
+  broadcast = { by: i.user.id, total: todo.length, sent: 0, failed: [], startedAt: Date.now() };
+  const status = (doneText) => ({
+    content: '', components: [],
+    embeds: [{ color: doneText ? C.green : C.blue, title: doneText ? '✅ Update verschickt' : '⏳ Update wird verschickt…',
+      description: `${appLine(app)}\n\n📨 ${broadcast.sent} / ${broadcast.total} gesendet${broadcast.failed.length ? ` · ⚠️ ${broadcast.failed.length} nicht zustellbar` : ''}${doneText ? `\n\n${doneText}` : '\n\nDu kannst das Fenster schließen – der Bot schickt weiter und dir am Ende eine Zusammenfassung per DM.'}` }],
+  });
+  await i.update(status());
+  void (async () => {
+    for (const [n, id] of todo.entries()) {
+      try { await sendUpdateTo(i.client, id, app, p.note); broadcast.sent++; } catch { broadcast.failed.push(id); }
+      if ((n + 1) % 10 === 0) await i.editReply(status()).catch(() => {});
+      if (n + 1 < todo.length) await new Promise((res) => setTimeout(res, UPDATE_GAP_MS));
+    }
+    const failed = broadcast.failed;
+    const doneText = failed.length ? `Nicht zustellbar (DMs geschlossen oder Bot blockiert): ${failed.slice(0, 25).map((id) => `<@${id}>`).join(' ')}${failed.length > 25 ? ` … +${failed.length - 25}` : ''}\nEinfach später nochmal \`/${CMD_UPDATE}\` – wer die Version schon hat, wird übersprungen.` : 'Alle haben die neue Version bekommen.';
+    try { audit(needDb(), i.user.id, 'app.broadcast', null, { version: app.version, sha256: app.sha256, sent: broadcast.sent, failed: failed.length }); } catch { /* ignore */ }
+    await i.editReply(status(doneText)).catch(() => {});
+    try { const admin = await i.client.users.fetch(i.user.id); await admin.send(status(doneText)); } catch { /* DMs closed */ }
+    console.log(`📢 SP Tool Update v${app.version ?? '?'}: ${broadcast.sent}/${broadcast.total} gesendet, ${failed.length} fehlgeschlagen`);
+    broadcast = null;
+  })().catch((e) => { console.error('❌ SP Tool Update-Versand:', e?.message || e); broadcast = null; });
+}
+
 async function remindExpiring(client) {
   if (String(process.env.SPTOOL_EXPIRY_DM ?? 'true').toLowerCase() === 'false') return 0;
   const d = openDb();
@@ -672,6 +755,19 @@ async function handle(i) {
       const u = i.options.getUser('user', true);
       return i.reply({ ...userView(u.id), flags: EPHEMERAL });
     }
+    if (i.commandName === CMD_UPDATE) {
+      const note = cleanNote(i.options.getString('nachricht'));
+      if (i.options.getBoolean('nur-ich')) {
+        const app = appFile();
+        if (!app) return i.reply({ content: '❌ Keine App-Datei hinterlegt – erst `/sptool-app-datei` nutzen.', flags: EPHEMERAL });
+        await i.deferReply({ flags: EPHEMERAL });
+        try { await sendUpdateTo(i.client, i.user.id, app, note); return i.editReply({ content: '✅ Test-DM an dich geschickt. Passt alles? Dann den Befehl ohne „nur-ich“ ausführen.' }); }
+        catch (e) { return i.editReply({ content: `❌ DM ging nicht: ${e?.message || e} – sind deine DMs für den Server offen?` }); }
+      }
+      if (broadcast) return i.reply({ content: `⏳ Es läuft schon ein Versand (${broadcast.sent}/${broadcast.total}). Bitte warten, bis er fertig ist.`, flags: EPHEMERAL });
+      try { return i.reply({ ...updatePreview(i.user.id, { note, again: !!i.options.getBoolean('erneut') }), flags: EPHEMERAL }); }
+      catch (e) { return i.reply({ content: `❌ ${e?.message || e}`, flags: EPHEMERAL }); }
+    }
     if (i.commandName === CMD_APP) {
       await i.deferReply({ flags: EPHEMERAL });
       try {
@@ -708,6 +804,14 @@ async function handle(i) {
     return upd(hubView());
   }
 
+  if (kind === 'updno') { pendingUpdates.delete(i.user.id); return i.update({ content: 'Abgebrochen – es wurde nichts verschickt.', embeds: [], components: [] }); }
+  if (kind === 'updgo') {
+    const p = pendingUpdates.get(i.user.id);
+    pendingUpdates.delete(i.user.id);
+    if (!p || Date.now() - p.at > 15 * 60000) return i.update({ content: `⌛ Vorschau abgelaufen – bitte \`/${CMD_UPDATE}\` neu ausführen.`, embeds: [], components: [] });
+    if (broadcast) return i.update({ content: `⏳ Es läuft schon ein Versand (${broadcast.sent}/${broadcast.total}).`, embeds: [], components: [] });
+    try { return await runBroadcast(i, p); } catch (e) { broadcast = null; return i.update({ content: `❌ ${e?.message || e}`, embeds: [], components: [] }); }
+  }
   if (kind === 'hub') return upd(hubView());
   if (kind === 'bulk') return upd(bulkView(i.user.id));
   if (kind === 'bk') {
@@ -827,6 +931,14 @@ const commandBodies = [
     name: CMD_USER, type: 1, description: 'SP Tool – User verwalten: Plan, Laufzeit, PCs, Hardware-ID, Sperre (nur Admins)', default_member_permissions: '8', dm_permission: true,
     options: [{ type: 6, name: 'user', description: 'Discord-User', required: true }],
   },
+  {
+    name: CMD_UPDATE, type: 1, description: 'SP Tool – neue App-Version per DM an alle mit aktiver Lizenz schicken (nur Admins)', default_member_permissions: '8', dm_permission: true,
+    options: [
+      { type: 3, name: 'nachricht', description: 'Was ist neu? (optional, \\n = neue Zeile)', max_length: 1000 },
+      { type: 5, name: 'nur-ich', description: 'Nur dir selbst als Test schicken' },
+      { type: 5, name: 'erneut', description: 'Auch an User, die diese Version schon bekommen haben' },
+    ],
+  },
 ];
 
 function install() {
@@ -878,7 +990,7 @@ function install() {
         const appId = (c.application || client.application).id;
         for (const body of commandBodies) await rest.post(Routes.applicationCommands(appId), { body });
         openDb();
-        console.log(`✅ SP Tool Key-Verwaltung bereit: /${CMD_HUB}, /${CMD_REMOVE}, /${CMD_APP}, /${CMD_USER}${dbError ? ` (Datenbank: ${dbError.message})` : ''} · v1.4.0`);
+        console.log(`✅ SP Tool Key-Verwaltung bereit: /${CMD_HUB}, /${CMD_REMOVE}, /${CMD_APP}, /${CMD_USER}, /${CMD_UPDATE}${dbError ? ` (Datenbank: ${dbError.message})` : ''} · v1.5.0`);
         const tick = () => remindExpiring(client).then((n) => { if (n) console.log(`⏰ SP Tool: ${n} Ablauf-Erinnerung(en) gesendet`); }).catch((e) => console.error('❌ SP Tool Ablauf-Erinnerung:', e?.message || e));
         setTimeout(tick, 60000).unref?.();
         setInterval(tick, 3600000).unref?.();
@@ -904,4 +1016,4 @@ function install() {
 
 try { install(); } catch (e) { console.error('❌ SP Tool Key-Panel nicht geladen:', e?.message || e); }
 
-module.exports = { userView, userAction, bulkView, bulkRemove, logView, exportFile, remindExpiring, usersPickView, appFile, storeAppFile, handle, hubView, createView, manageView, removeKeys, createKeys, decode, encode, isOurs, commandBodies };
+module.exports = { updateTargets, updatePreview, updateMessage, userView, userAction, bulkView, bulkRemove, logView, exportFile, remindExpiring, usersPickView, appFile, storeAppFile, handle, hubView, createView, manageView, removeKeys, createKeys, decode, encode, isOurs, commandBodies };
