@@ -547,7 +547,7 @@ function userAction(actor, id, action, arg) {
 }
 
 // ── DMs ─────────────────────────────────────────────────────────────────────
-const appSteps = (app) => `1. Angehängte **${app.name}** herunterladen und entpacken\n2. **SPTool.exe** starten (Windows-Warnung: „Weitere Informationen“ → „Trotzdem ausführen“)\n3. **Continue with Discord** → anmelden`;
+const appSteps = (app) => `1. Angehängte **${app.name}** herunterladen und entpacken\n2. **SPTool.exe** starten (Windows-Warnung: „Weitere Informationen“ → „Trotzdem ausführen“)\n3. **Mit Discord anmelden** klicken`;
 async function sendApp(client, id, actor) {
   const app = appFile();
   if (!app) throw new Error('Keine App-Datei hinterlegt – erst `/sptool-app-datei` nutzen.');
@@ -677,7 +677,7 @@ async function askPair(i) {
   const code = String(i.options.getString('code', true) || '').trim().toUpperCase();
   if (!PAIR_RE.test(code)) return i.reply({ content: '❌ Der Verbindungscode ist ungültig (10 Zeichen, 0–9 und A–F).', flags: EPHEMERAL });
   const p = pendingByCode(code);
-  if (!p) return i.reply({ content: '❌ Der Verbindungscode ist abgelaufen oder unbekannt. Klicke in SP Tool erneut auf **Continue with Discord**.', flags: EPHEMERAL });
+  if (!p) return i.reply({ content: '❌ Der Verbindungscode ist abgelaufen oder unbekannt. Klicke in SP Tool erneut auf **Mit Discord anmelden**.', flags: EPHEMERAL });
   if (p.result) return i.reply({ content: '❌ Dieser Verbindungscode wurde bereits verwendet.', flags: EPHEMERAL });
   const admin = isAdmin(i.user.id);
   const who = i.user.globalName || i.user.username;
@@ -894,7 +894,7 @@ async function handle(i) {
         const app = appFile();
         await u.send({ ...(app ? { files: [{ attachment: app.file, name: app.name }] } : {}), embeds: [{ color: C.blue, title: '🎧 Dein SP Tool Lizenz-Key', description: `\`\`\`\n${keys.join('\n')}\n\`\`\``, fields: [
           { name: 'Plan', value: PLANS[st.plan], inline: true }, { name: 'Laufzeit', value: durLabel(st.days), inline: true }, { name: 'PCs', value: st.devices, inline: true },
-          { name: 'So aktivierst du', value: `${app ? `${appSteps(app)}\n4.` : '1. **Continue with Discord** → anmelden\n2.'} Key eingeben. Die Lizenz wird an deine Discord-ID und deinen PC gebunden – Weitergeben funktioniert nicht.` },
+          { name: 'So aktivierst du', value: `${app ? `${appSteps(app)}\n4.` : '1. **Mit Discord anmelden** klicken\n2.'} Key eingeben. Die Lizenz wird an deine Discord-ID und deinen PC gebunden – Weitergeben funktioniert nicht.` },
         ], footer: { text: 'SP Tool by Turbo Design' } }] });
         dm = `\n📨 Per DM an <@${st.user}> gesendet${app ? ` – mit ${app.name}` : ' (ohne App-Datei – `/sptool-app-datei` hochladen)'}.`;
       } catch { dm = `\n⚠️ DM an <@${st.user}> nicht möglich (DMs geschlossen) – bitte selbst schicken.`; }
