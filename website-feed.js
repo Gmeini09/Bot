@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const TYPES = ['thumbnail','nve','soundpack','grafik','fivem','bot','bundle'];
 function imageUrl(raw) {
   try { const u = new URL(raw); return u.protocol === 'https:' && ['cdn.discordapp.com','media.discordapp.net'].includes(u.hostname) && u.pathname.startsWith('/attachments/') ? u.href : null; } catch { return null; }
@@ -39,10 +40,78 @@ function readCatalog(guildId, directory) {
     return { key, price: Number.isFinite(n) && n >= 0 ? n : null, enabled: c.enabled !== false, etaDays: Number.isFinite(Number(c.etaDays)) ? Number(c.etaDays) : null };
   });
 }
+
+function validateRequest(data) {
+  const text=(key,max,required=false)=>{const value=typeof data?.[key]==='string'?data[key].trim():'';if(value.length>max||(required&&!value)||/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value))throw new Error('INVALID_REQUEST');return value;};
+  const product=text('product',32,true),id=text('requestId',36,true),contact=text('contact',64,true);
+  if(!TYPES.includes(product)||! /^[a-f0-9-]{36}$/i.test(id)||contact.length<2)throw new Error('INVALID_REQUEST');
+  return {requestId:id,product,contact,project:text('project',1500,true),deadline:text('deadline',100),assets:text('assets',300)};
+}
+function verifyRequestSignature(req,raw) {
+  const secret=process.env.WEBSITE_REQUEST_SECRET,stamp=String(req.headers['x-turbo-timestamp']||''),signature=String(req.headers['x-turbo-signature']||'');
+  if(!secret||secret.length<32||!/^\d{13}$/.test(stamp)||Math.abs(Date.now()-Number(stamp))>60000||! /^[a-f0-9]{64}$/.test(signature))return false;
+  const expected=crypto.createHmac('sha256',secret).update(`${stamp}:${req.method}:/turbo-website-requests:${raw}`).digest();
+  return crypto.timingSafeEqual(expected,Buffer.from(signature,'hex'));
+}
+async function requestBody(req) {
+  const chunks=[];let size=0;
+  for await(const chunk of req){size+=chunk.length;if(size>8192)throw new Error('BODY_TOO_LARGE');chunks.push(chunk);}
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 function install() {
   const { Client, Events } = require('discord.js');
   const http = require('node:http');
   let client, cache, pending, retryAt = 0;
+  const requestPending=new Map();
+  async function requestChannel() {
+    if(!client?.isReady())throw new Error('BOT_NOT_READY');
+    const {PermissionFlagsBits}=require('discord.js');
+    const guild=await client.guilds.fetch('1531989453168578650');
+    const channels=await guild.channels.fetch();await guild.roles.fetch();
+    const normalize=name=>name.replace(/^[^a-z0-9]+/i,'').toLowerCase();
+    const channel=channels.find(c=>c&&normalize(c.name)==='bestellungen'&&c.isTextBased()&&typeof c.send==='function');
+    if(!channel||channel.permissionsFor(guild.roles.everyone)?.has(PermissionFlagsBits.ViewChannel))throw new Error('PRIVATE_CHANNEL_UNAVAILABLE');
+    const staff=new Set(['inhaber','management','support','designer','sound designer','developer']);
+    for(const role of guild.roles.cache.values()) {
+      if(role.managed||role.permissions.has(PermissionFlagsBits.Administrator)||staff.has(normalize(role.name)))continue;
+      if(channel.permissionsFor(role)?.has(PermissionFlagsBits.ViewChannel))throw new Error('CHANNEL_NOT_PRIVATE');
+    }
+    const me=guild.members.me || await guild.members.fetchMe();
+    if(!channel.permissionsFor(me)?.has([PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages,PermissionFlagsBits.EmbedLinks]))throw new Error('BOT_PERMISSION_MISSING');
+    return channel;
+  }
+  async function deliverWebsiteRequest(raw) {
+    const data=validateRequest(raw);
+    if(requestPending.has(data.requestId))return requestPending.get(data.requestId);
+    const task=(async()=>{
+      const channel=await requestChannel();
+      const directory=process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || __dirname;
+      const file=path.join(directory,'website-request-receipts.json');
+      const receipts=fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):{};
+      if(receipts[data.requestId])return receipts[data.requestId];
+      const labels={thumbnail:'Thumbnail',nve:'NVE Preset / Grafik-Setup',soundpack:'Soundpack',grafik:'Grafik / Design',fivem:'FiveM Asset',bot:'Custom Discord Bot',bundle:'Bundle / Komplettpaket'};
+      const reference='WEB-'+data.requestId.slice(0,8).toUpperCase();
+      const message=await channel.send({allowedMentions:{parse:[],users:[],roles:[],repliedUser:false},nonce:crypto.createHash('sha256').update(data.requestId).digest('hex').slice(0,24),enforceNonce:true,embeds:[{title:'Neue Website-Anfrage',color:0x80c2ff,description:data.project,fields:[{name:'Produkt',value:labels[data.product],inline:true},{name:'Discord-Name (nicht verifiziert)',value:data.contact,inline:true},{name:'Wunschtermin',value:data.deadline||'Noch offen'},{name:'Vorhandene Materialien',value:data.assets||'Noch zu besprechen'},{name:'Status',value:'Unverbindliche Anfrage. Umfang, Preis, Korrekturen und Liefertermin mit dem Kunden abstimmen.'}],footer:{text:reference+' · turbodesigns.net'},timestamp:new Date().toISOString()}]});
+      const receipt={reference,messageId:message.id};
+      // Serialize receipt writes after the awaited send to avoid losing concurrent entries.
+      const latest=fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):{};latest[data.requestId]=receipt;
+      const trimmed=Object.fromEntries(Object.entries(latest).slice(-1000));const temp=file+'.tmp';fs.writeFileSync(temp,JSON.stringify(trimmed),{mode:0o600});fs.renameSync(temp,file);
+      return receipt;
+    })().finally(()=>requestPending.delete(data.requestId));
+    requestPending.set(data.requestId,task);return task;
+  }
+  async function handleWebsiteRequest(req,res) {
+    const headers={'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'};
+    const reply=(status,data)=>{res.writeHead(status,headers);res.end(JSON.stringify(data));};
+    if(!['GET','POST'].includes(req.method))return reply(405,{ok:false});
+    try{
+      const raw=req.method==='POST'?await requestBody(req):'';
+      if(!verifyRequestSignature(req,raw))return reply(401,{ok:false});
+      if(req.method==='GET'){await requestChannel();return reply(200,{ready:true});}
+      const receipt=await deliverWebsiteRequest(JSON.parse(raw));return reply(200,{ok:true,reference:receipt.reference});
+    }catch(error){const invalid=['INVALID_REQUEST','BODY_TOO_LARGE'].includes(error.message)||error instanceof SyntaxError;console.warn('[website-requests]',invalid?'INVALID_REQUEST':error.code||error.message);return reply(invalid?400:503,{ok:false});}
+  }
   async function refresh() {
     if (cache && Date.now() - cache.at < 60000) return cache.data;
     if (Date.now() < retryAt) throw new Error('Retry later');
@@ -89,7 +158,9 @@ function install() {
     if (index >= 0) {
       const listener = args[index];
       args[index] = async function(req,res) {
-        if ((req.url || '').split('?')[0] !== '/turbo-public-feed') return listener(req,res);
+        const route=(req.url || '').split('?')[0];
+        if(route==='/turbo-website-requests')return handleWebsiteRequest(req,res);
+        if (route !== '/turbo-public-feed') return listener(req,res);
         const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
         if (req.method !== 'GET') { res.writeHead(405, {...headers,allow:'GET'}); return res.end('{}'); }
         try { const data = await refresh(); res.writeHead(200,headers); res.end(JSON.stringify(data)); }
@@ -99,4 +170,4 @@ function install() {
     return createServer.apply(this,args);
   };
 }
-module.exports = { imageUrl, extractImages, readCatalog, extractSamples, install };
+module.exports = { imageUrl, extractImages, readCatalog, extractSamples, validateRequest, verifyRequestSignature, install };
