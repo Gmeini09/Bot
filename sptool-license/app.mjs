@@ -147,7 +147,12 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
     db.prepare('UPDATE pending_logins SET result = ? WHERE state_hash = ?').run(JSON.stringify(result), stateHash);
   }
 
-  const page = (title, msg, ok) => `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
+  // German text for the browser page after Discord sign-in (the app gets the code and translates itself)
+  const refusedText = (r) => r.code === 'banned' ? `Dieses Konto ist gesperrt${/: (.+)$/s.exec(r.message ?? '')?.[1] ? `: ${/: (.+)$/s.exec(r.message)[1]}` : '.'}`
+    : r.code === 'device_revoked' ? 'Dieser PC wurde von einem Admin aus deinem Konto entfernt.'
+    : r.code === 'device_limit' ? 'Deine Lizenz ist schon an die erlaubte Anzahl PCs gebunden. Ein Admin kann deine PCs zurücksetzen.'
+    : (r.message ?? 'Die Anmeldung wurde abgelehnt.');
+  const page = (title, msg, ok) => `<!doctype html><html lang="de"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
 <body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#08090C;color:#F5F7FA;font:16px/1.5 'Segoe UI',system-ui,sans-serif">
 <div style="max-width:440px;padding:32px;border:1px solid #242A34;border-radius:16px;background:#12151B;text-align:center">
 <div style="font-size:42px;margin-bottom:8px;color:${ok ? '#3fb67f' : '#d9534f'}">${ok ? '✓' : '!'}</div>
@@ -188,18 +193,18 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
     if (m === 'GET' && path === '/api/v1/auth/discord/callback') {
       const state = q('state');
       const pending = db.prepare('SELECT * FROM pending_logins WHERE state_hash = ?').get(sha256(state));
-      if (!pending || pending.created_at < now() - PENDING_TTL) return send(res, 400, page('Login expired', 'Start the login again from SP Tool.', false));
-      if (q('error')) { finishPending(pending.state_hash, { status: 'error', code: 'discord_denied', message: 'Discord login was cancelled.' }); return send(res, 200, page('Login cancelled', 'You can close this tab and try again in SP Tool.', false)); }
+      if (!pending || pending.created_at < now() - PENDING_TTL) return send(res, 400, page('Anmeldung abgelaufen', 'Starte die Anmeldung in SP Tool neu.', false));
+      if (q('error')) { finishPending(pending.state_hash, { status: 'error', code: 'discord_denied', message: 'Discord login was cancelled.' }); return send(res, 200, page('Anmeldung abgebrochen', 'Du kannst diesen Tab schließen und es in SP Tool noch einmal versuchen.', false)); }
       try {
         const du = await discordUser(q('code'));
         const r = completeLogin(pending, du);
         finishPending(pending.state_hash, r);
         return r.status === 'ok'
-          ? send(res, 200, page('Signed in', `Welcome, ${esc(du.global_name || du.username)}. Return to SP Tool – you can close this tab.`, true))
-          : send(res, 200, page('Sign-in refused', esc(r.message), false));
+          ? send(res, 200, page('Angemeldet', `Willkommen, ${esc(du.global_name || du.username)}! Geh zurück zu SP Tool – diesen Tab kannst du schließen.`, true))
+          : send(res, 200, page('Anmeldung abgelehnt', esc(refusedText(r)), false));
       } catch {
         finishPending(pending.state_hash, { status: 'error', code: 'discord_failed', message: 'Discord login failed. Try again.' });
-        return send(res, 502, page('Discord login failed', 'Try again in a moment.', false));
+        return send(res, 502, page('Discord-Anmeldung fehlgeschlagen', 'Versuch es gleich noch einmal.', false));
       }
     }
 
