@@ -6,6 +6,12 @@
 //   POST /api/v1/cloud/projects/:id          save {baseRev, name, data} – 409 if the cloud changed meanwhile
 //   POST /api/v1/cloud/projects/:id/delete   delete {baseRev} – 409 if the cloud changed meanwhile
 //
+//   GET  /api/v1/sptool-app/release   (admin) stored app version · POST uploads a newer ZIP
+//   GET  /api/v1/sptool-app/latest    (active license) newest version + size + sha256 → in-app update
+//   GET  /api/v1/sptool-app/download  (active license) the newest app ZIP
+//   GET  /api/v1/sptool-app/mapping   (signed in) the published stream → slot mapping
+//   POST /api/v1/sptool-app/mapping   (admin) publish a mapping for every app
+//
 // Conflict-safe: every write names the revision it is based on; the server never overwrites a newer
 // revision silently. Same login as the license API: session token + hardware ID of the device.
 // Stand-alone preload (node -r ./sptool-license/cloud-sync.js …): it handles only /api/v1/cloud/*
@@ -131,13 +137,69 @@ function readRaw(req, max) {
   });
 }
 
+// ── published mapping (which game stream is which weapon slot) ───────────────
+const MAP_FILE = () => path.join(appDir(), 'mapping.json');
+const MAP_MAX = 2 * 1024 * 1024;
+const FILE_RE = /^F\d{2}$/;
+const SLOT_RE = /^[a-z0-9_]{1,40}$/;
+const WEAPON_RE = /^[a-z0-9_]{1,40}$/;
+function currentMapping() {
+  try { return JSON.parse(fs.readFileSync(MAP_FILE(), 'utf8')); } catch { return null; }
+}
+function cleanMapping(body) {
+  if (!body || body.version !== 1 || !Array.isArray(body.entries)) throw new HttpError(400, 'bad_mapping', 'Not an SP Tool mapping.');
+  if (body.entries.length > 20000) throw new HttpError(413, 'too_large', 'Too many mapping entries.');
+  const seen = new Map();
+  for (const e of body.entries) {
+    if (!e || !FILE_RE.test(String(e.file)) || !Number.isInteger(e.stream) || e.stream < 0 || e.stream >= 2 ** 29 || !WEAPON_RE.test(String(e.weapon)) || !SLOT_RE.test(String(e.slot))) throw new HttpError(400, 'bad_mapping', 'The mapping contains invalid entries.');
+    seen.set(`${e.file}:${e.stream}`, { file: e.file, stream: e.stream, weapon: e.weapon, slot: e.slot });
+  }
+  return { version: 1, updatedAt: Date.now(), entries: [...seen.values()] };
+}
+
+/** Signed-in user who may receive app updates: active license, not banned (admins always). */
+function licensedUser(req) {
+  const u = authUser(req);
+  if (isAdmin(u)) return u;
+  if (u.banned) throw new HttpError(403, 'banned', 'This account is banned.');
+  const l = openDb().prepare('SELECT * FROM licenses WHERE discord_id = ?').get(u.discord_id);
+  if (!l || l.revoked || (l.expires_at != null && l.expires_at <= Date.now())) throw new HttpError(403, 'license_required', 'Updates need an active SP Tool license.');
+  return u;
+}
+
 async function handleApp(req, res) {
   if (req.method === 'OPTIONS') return send(res, 204, '');
+  const rest = new URL(req.url, 'http://x').pathname.slice(APP_PREFIX.length);
+  if (rest === 'latest' || rest === 'download') {
+    if (req.method !== 'GET') throw new HttpError(405, 'method', 'Method not allowed.');
+    const lu = licensedUser(req);
+    limit(lu.discord_id);
+    const cur = currentApp();
+    if (!cur) throw new HttpError(404, 'no_release', 'No app version has been published yet.');
+    if (rest === 'latest') return send(res, 200, { version: cur.version ?? null, size: cur.size, sha256: cur.sha256 ?? null, uploadedAt: cur.uploadedAt ?? null });
+    const file = path.join(appDir(), cur.stored);
+    res.writeHead(200, { ...HEADERS, 'Content-Type': 'application/zip', 'Content-Length': String(fs.statSync(file).size), 'Content-Disposition': `attachment; filename="${APP_ZIP_NAME}"`, 'X-SPTool-Version': String(cur.version ?? ''), 'X-SPTool-SHA256': String(cur.sha256 ?? ''), 'Access-Control-Expose-Headers': 'X-SPTool-Version, X-SPTool-SHA256' });
+    fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
+    return undefined;
+  }
+  if (rest === 'mapping') {
+    const mu = authUser(req);
+    limit(mu.discord_id);
+    if (req.method === 'GET') { const m = currentMapping(); return send(res, 200, m ?? { version: 1, updatedAt: 0, entries: [] }); }
+    if (req.method !== 'POST') throw new HttpError(405, 'method', 'Method not allowed.');
+    if (!isAdmin(mu) || (mu.banned && !configAdmin(mu.discord_id))) throw new HttpError(403, 'admin_only', 'Only admins can publish the mapping.');
+    const m = cleanMapping(await readBody(req, MAP_MAX));
+    fs.mkdirSync(appDir(), { recursive: true });
+    fs.writeFileSync(`${MAP_FILE()}.tmp`, JSON.stringify(m));
+    fs.renameSync(`${MAP_FILE()}.tmp`, MAP_FILE());
+    try { openDb().prepare('INSERT INTO audit_log (at, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)').run(Date.now(), mu.discord_id, 'mapping.published', null, JSON.stringify({ entries: m.entries.length })); } catch { /* optional */ }
+    console.log(`🗺️ SP Tool Zuordnung veröffentlicht: ${m.entries.length} Sounds`);
+    return send(res, 200, { stored: true, entries: m.entries.length, updatedAt: m.updatedAt });
+  }
   const u = authUser(req);
   if (!isAdmin(u)) throw new HttpError(403, 'admin_only', 'Only admins can publish the app.');
   if (u.banned && !configAdmin(u.discord_id)) throw new HttpError(403, 'banned', 'This account is banned.');
   limit(u.discord_id);
-  const rest = new URL(req.url, 'http://x').pathname.slice(APP_PREFIX.length);
   if (rest !== 'release') throw new HttpError(404, 'not_found', 'Not found.');
   const cur = currentApp();
   if (req.method === 'GET') return send(res, 200, { version: cur?.version ?? null, size: cur?.size ?? null, uploadedAt: cur?.uploadedAt ?? null });
@@ -247,8 +309,8 @@ function install() {
     }
     return original.apply(this, args);
   };
-  console.log('ℹ️ SP Tool Cloud geladen · /api/v1/cloud · /api/v1/sptool-app · v1.2.0');
+  console.log('ℹ️ SP Tool Cloud geladen · /api/v1/cloud · /api/v1/sptool-app · v1.3.0');
 }
 
 try { install(); } catch (e) { console.error('❌ SP Tool Cloud nicht geladen:', e?.message || e); }
-module.exports = { handle, handleApp, authenticate, verCmp, HttpError };
+module.exports = { handle, handleApp, authenticate, verCmp, HttpError, cleanMapping };
