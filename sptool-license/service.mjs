@@ -172,6 +172,10 @@ export function createLicenseService({ cfg, db, now = () => Date.now() }) {
       const row = db.prepare('SELECT * FROM license_keys WHERE key = ?').get(k);
       if (!row || row.revoked) throw new LicenseError(404, 'key_invalid', 'This key does not exist or was revoked.');
       if (row.redeemed_by) throw new LicenseError(409, 'key_used', 'This key has already been used.');
+      // Keys an admin sent to one person through the Discord key panel ("Discord-Panel für <id>") only work
+      // for that Discord account – forwarding the DM does not hand over the license.
+      const bound = /^Discord-Panel für (\d{15,21})$/.exec(String(row.note ?? ''))?.[1];
+      if (bound && bound !== id) throw new LicenseError(403, 'key_bound', 'This key was sent to another Discord account and only works there.');
       const t = now();
       ensureUser(db, id, t);
       const cur = activeLicense(db, id, t);
