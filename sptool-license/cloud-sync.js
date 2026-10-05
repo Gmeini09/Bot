@@ -49,8 +49,22 @@ function openDb() {
 
 class HttpError extends Error { constructor(status, code, message) { super(message); this.status = status; this.code = code; } }
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
+// Same salt as the license server (sptool-license/bot.js): SPTOOL_HWID_SALT, else the salt file on the volume.
+// (Before 1.3.1 this read only HWID_SERVER_SALT, which the bot never sets – every cloud/update request was
+// refused with "cloud_hwid", so in-app updates and the admin's app hand-off could never work.)
+let saltCache = null;
+function hwidSalt() {
+  if (saltCache !== null) return saltCache;
+  let salt = process.env.SPTOOL_HWID_SALT || process.env.HWID_SERVER_SALT || '';
+  if (!salt) {
+    const dir = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || path.join(__dirname, 'data');
+    try { salt = fs.readFileSync(path.join(dir, 'sptool-hwid-salt.txt'), 'utf8').trim(); } catch { salt = ''; }
+  }
+  if (salt) saltCache = salt; // the file is created by the license server on its first start – retry until then
+  return salt;
+}
 const hwidHash = (clientHash) => {
-  const salt = process.env.HWID_SERVER_SALT || '';
+  const salt = hwidSalt();
   return salt ? crypto.createHmac('sha256', salt).update(clientHash).digest('hex') : sha256(clientHash);
 };
 const configAdmin = (id) => id === OWNER_ID || String(process.env.SPTOOL_ADMIN_IDS || process.env.ADMIN_DISCORD_IDS || '').split(/[,\s;]+/).includes(id);
@@ -115,7 +129,7 @@ function readBody(req, max) {
 // An admin's SP Tool uploads its own release ZIP when the bot holds an older version, so every key DM
 // carries the newest app without a manual /sptool-app-datei upload. Same storage as the key panel.
 const APP_PREFIX = '/api/v1/sptool-app/';
-const APP_ZIP_NAME = 'Turbo_Designs_SP_Tool.zip';
+const APP_ZIP_NAME = 'Turbo_SP_Tool.zip';
 const MAX_APP_BYTES = 9.5 * 1024 * 1024; // Discord: 10 MB per DM attachment without boosts
 const VER_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
 const dataDir = () => process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -309,7 +323,7 @@ function install() {
     }
     return original.apply(this, args);
   };
-  console.log('ℹ️ SP Tool Cloud geladen · /api/v1/cloud · /api/v1/sptool-app · v1.3.0');
+  console.log('ℹ️ SP Tool Cloud geladen · /api/v1/cloud · /api/v1/sptool-app · v1.3.1');
 }
 
 try { install(); } catch (e) { console.error('❌ SP Tool Cloud nicht geladen:', e?.message || e); }
