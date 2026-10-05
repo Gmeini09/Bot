@@ -98,14 +98,16 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
     if (svc.roleOf(ctx.user) !== 'admin') throw new HttpError(403, 'forbidden', 'Admins only.');
   }
 
-  function ticketFor(ctx) {
-    const lic = svc.licenseView(ctx.user.discord_id);
+  // product = which app asks: 'sptool' (default, SP Tool) or 'skin' (Turbo Skin Tool). The ticket carries the
+  // product (field "prod", missing = SP Tool), so a ticket of one tool never unlocks the other.
+  function ticketFor(ctx, product = 'sptool') {
+    const lic = svc.productView(ctx.user.discord_id, product);
     if (!lic?.active) return null;
     const t = now();
     const offlineUntil = Math.min(t + cfg.offlineGraceHours * 3_600_000, lic.expiresAt ?? Infinity);
     return signTicket({
       v: 1, sub: ctx.user.discord_id, name: ctx.user.global_name || ctx.user.username, role: svc.roleOf(ctx.user),
-      plan: lic.plan, exp: lic.expiresAt, hwid: ctx.clientHwid, iat: t, offlineUntil,
+      plan: lic.plan, exp: lic.expiresAt, hwid: ctx.clientHwid, iat: t, offlineUntil, ...(product === 'sptool' ? {} : { prod: product }),
     }, cfg.privateKeyPem);
   }
 
@@ -253,18 +255,20 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
     if (path.startsWith('/api/v1/me') || path.startsWith('/api/v1/license') || path.startsWith('/api/v1/auth/logout') || path.startsWith('/api/v1/admin')) {
       const ctx = authenticate(req);
       const me = ctx.user.discord_id;
+      const product = q('product') || 'sptool';
+      if (!['sptool', 'skin'].includes(product)) throw new HttpError(400, 'bad_product', 'Unknown product.');
 
       if (m === 'GET' && path === '/api/v1/me') {
-        return send(res, 200, { user: svc.publicUser(ctx.user), license: svc.licenseView(me), devices: svc.devicesOf(me), currentDevice: ctx.device.id, maxDevices: svc.maxDevicesFor(me), ticket: ticketFor(ctx) });
+        return send(res, 200, { user: svc.publicUser(ctx.user), license: svc.productView(me, product), products: svc.productsOf(me), devices: svc.devicesOf(me), currentDevice: ctx.device.id, maxDevices: svc.maxDevicesFor(me), ticket: ticketFor(ctx, product) });
       }
       if (m === 'POST' && path === '/api/v1/license/check') {
-        return send(res, 200, { license: svc.licenseView(me), ticket: ticketFor(ctx) });
+        return send(res, 200, { license: svc.productView(me, product), products: svc.productsOf(me), ticket: ticketFor(ctx, product) });
       }
       if (m === 'POST' && path === '/api/v1/license/redeem') {
         if (!limitRedeem(`r:${clientIp}`)) throw new HttpError(429, 'rate_limited', 'Too many attempts. Wait a few minutes.');
         const { key } = await readJson(req);
-        const license = svc.redeemKey(me, key);
-        return send(res, 200, { ok: true, license, ticket: ticketFor(ctx) });
+        svc.redeemKey(me, key);
+        return send(res, 200, { ok: true, license: svc.productView(me, product), products: svc.productsOf(me), ticket: ticketFor(ctx, product) });
       }
       if (m === 'POST' && path === '/api/v1/auth/logout') {
         db.prepare('UPDATE sessions SET revoked = 1 WHERE token_hash = ?').run(ctx.session.token_hash);
@@ -293,8 +297,9 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
           }
           const body = m === 'POST' ? await readJson(req) : {};
           if (m === 'POST' && seg[2] === 'license') {
-            if (String(body.plan ?? '') === 'none') return send(res, 200, { license: svc.revokeLicense(actor, id) });
-            return send(res, 200, { license: svc.setLicense(actor, id, body) });
+            const p = String(body.product ?? 'sptool');
+            if (String(body.plan ?? '') === 'none') return send(res, 200, { license: svc.revokeProductLicense(actor, id, p) });
+            return send(res, 200, { license: svc.setProductLicense(actor, id, p, body) });
           }
           if (m === 'POST' && seg[2] === 'ban') { svc.ban(actor, id, body.reason); return send(res, 200, { ok: true }); }
           if (m === 'POST' && seg[2] === 'unban') { svc.unban(actor, id); return send(res, 200, { ok: true }); }
@@ -305,7 +310,7 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
         if (m === 'DELETE' && seg[0] === 'devices' && seg[1]) { svc.removeDevice(actor, seg[1]); return send(res, 200, { ok: true }); }
         if (seg[0] === 'keys') {
           if (m === 'GET' && !seg[1]) return send(res, 200, { keys: svc.listKeys() });
-          if (m === 'POST' && !seg[1]) return send(res, 200, { keys: svc.createKeys(actor, await readJson(req)) });
+          if (m === 'POST' && !seg[1]) return send(res, 200, { keys: svc.createProductKeys(actor, await readJson(req)) });
           if (m === 'POST' && seg[1] && seg[2] === 'revoke') { svc.revokeKey(actor, seg[1]); return send(res, 200, { ok: true }); }
         }
         if (m === 'GET' && seg[0] === 'audit') return send(res, 200, { entries: svc.auditLog() });

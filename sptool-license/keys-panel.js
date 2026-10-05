@@ -81,6 +81,24 @@ function appFile() {
     return { ...meta, name: APP_ZIP_NAME, uploadedName: meta.uploadedName ?? meta.name, file };
   } catch { return null; }
 }
+/** Turbo Skin Tool release (stored by an admin's Skin Tool through cloud-sync, ?product=skin). */
+function skinAppFile() {
+  try {
+    const dir = path.join(dataDir(), 'skin-app');
+    const meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8'));
+    const file = path.join(dir, meta.stored);
+    if (!fs.existsSync(file)) return null;
+    return { ...meta, name: 'Turbo_Skin_Tool.zip', exe: 'TurboSkinTool.exe', file };
+  } catch { return null; }
+}
+// Key products: SP Tool (SPT-, license_keys) · Turbo Skin Tool (TSK-) · Multi = both tools (TMK-) in product_keys.
+const PRODUCTS = { sptool: 'SP Tool', skin: 'Turbo Skin Tool', multi: 'Multi (SP Tool + Skin Tool)' };
+const PRODUCT_PREFIX = { skin: 'TSK', multi: 'TMK' };
+const ensureProductKeys = (d) => d.exec(`CREATE TABLE IF NOT EXISTS product_keys (
+    key TEXT PRIMARY KEY, kind TEXT NOT NULL, plan TEXT NOT NULL, days INTEGER, max_devices INTEGER NOT NULL DEFAULT 1, note TEXT,
+    created_by TEXT NOT NULL, created_at INTEGER NOT NULL, redeemed_by TEXT, redeemed_at INTEGER, revoked INTEGER NOT NULL DEFAULT 0)`);
+/** ZIPs that belong to a key DM of this product. */
+const appsFor = (prod) => (prod === 'skin' ? [skinAppFile()] : prod === 'multi' ? [appFile(), skinAppFile()] : [appFile()]).filter(Boolean);
 async function storeAppFile(att, actor, version) {
   const name = String(att.name || 'SPTool.zip');
   if (!/\.zip$/i.test(name)) throw new Error('Bitte eine .zip-Datei hochladen.');
@@ -105,11 +123,11 @@ async function storeAppFile(att, actor, version) {
 const appLine = (a) => (a ? `📦 \`${a.name}\`${a.version ? ` · v${a.version}` : ''} · ${(a.size / 1048576).toFixed(1)} MB · hochgeladen ${ts(a.uploadedAt)}` : '⚠️ Keine App-Datei hinterlegt – mit `/sptool-app-datei` hochladen, dann hängt der Bot sie an jede Key-DM.');
 
 const KEY_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-function newKey() {
+function newKey(prefix = 'SPT') {
   const b = crypto.randomBytes(16);
   let s = '';
   for (let i = 0; i < 16; i++) s += KEY_ALPHABET[b[i] % KEY_ALPHABET.length];
-  return `SPT-${s.slice(0, 4)}-${s.slice(4, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}`;
+  return `${prefix}-${s.slice(0, 4)}-${s.slice(4, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}`;
 }
 const isKey = (k) => /^SPT-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(k);
 
@@ -171,9 +189,15 @@ function createKeys(actor, st) {
   const keys = [];
   d.exec('BEGIN IMMEDIATE');
   try {
-    const ins = d.prepare('INSERT INTO license_keys (key, plan, days, max_devices, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
-    for (let i = 0; i < n; i++) { const k = newKey(); ins.run(k, st.plan, days, dev, note, actor, Date.now()); keys.push(k); }
-    audit(d, actor, 'keys.created', st.user || null, { count: n, plan: st.plan, days, maxDevices: dev, via: 'discord-panel' });
+    if (st.prod === 'skin' || st.prod === 'multi') {
+      ensureProductKeys(d);
+      const ins = d.prepare('INSERT INTO product_keys (key, kind, plan, days, max_devices, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      for (let i = 0; i < n; i++) { const k = newKey(PRODUCT_PREFIX[st.prod]); ins.run(k, st.prod, st.plan, days, dev, note, actor, Date.now()); keys.push(k); }
+    } else {
+      const ins = d.prepare('INSERT INTO license_keys (key, plan, days, max_devices, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+      for (let i = 0; i < n; i++) { const k = newKey(); ins.run(k, st.plan, days, dev, note, actor, Date.now()); keys.push(k); }
+    }
+    audit(d, actor, 'keys.created', st.user || null, { count: n, product: st.prod, plan: st.plan, days, maxDevices: dev, via: 'discord-panel' });
     d.exec('COMMIT');
   } catch (e) { d.exec('ROLLBACK'); throw e; }
   return keys;
@@ -244,13 +268,13 @@ function hubView(note) {
 }
 
 // create flow – state lives in the ids: spk:<action>:<plan>:<days>:<devices>:<count>:<userId|->
-const CREATE_ACTIONS = new Set(['plan', 'days', 'devices', 'user', 'count', 'create', 'cancel', 'again']);
-function encode(action, st) { return [PREFIX, action, st.plan, st.days, st.devices, st.count, st.user || '-'].join(':'); }
+const CREATE_ACTIONS = new Set(['plan', 'days', 'devices', 'user', 'count', 'prod', 'create', 'cancel', 'again']);
+function encode(action, st) { return [PREFIX, action, st.plan, st.days, st.devices, st.count, st.user || '-', st.prod || 'sptool'].join(':'); }
 function decode(id) {
-  const [, action, plan, days, devices, count, user] = String(id).split(':');
-  return { action, st: { plan: PLANS[plan] ? plan : 'premium', days: DURATIONS.some((d) => d[0] === days) ? days : '30', devices: DEVICES.includes(devices) ? devices : '1', count: COUNTS.includes(count) ? count : '1', user: /^\d{15,21}$/.test(user || '') ? user : '' } };
+  const [, action, plan, days, devices, count, user, prod] = String(id).split(':');
+  return { action, st: { plan: PLANS[plan] ? plan : 'premium', days: DURATIONS.some((d) => d[0] === days) ? days : '30', devices: DEVICES.includes(devices) ? devices : '1', count: COUNTS.includes(count) ? count : '1', user: /^\d{15,21}$/.test(user || '') ? user : '', prod: PRODUCTS[prod] ? prod : 'sptool' } };
 }
-const DEFAULT = { plan: 'premium', days: '30', devices: '1', count: '1', user: '' };
+const DEFAULT = { plan: 'premium', days: '30', devices: '1', count: '1', user: '', prod: 'sptool' };
 
 function createView(st, note) {
   const select = (action, placeholder, options) => row([{ type: 3, custom_id: encode(action, st), placeholder, min_values: 1, max_values: 1, options }]);
@@ -261,6 +285,7 @@ function createView(st, note) {
       title: '➕ Lizenz-Keys erstellen',
       description: ['Wähle alles aus und klicke **Erstellen**.', note ? `\n${note}` : ''].join('\n'),
       fields: [
+        { name: 'Produkt', value: `**${PRODUCTS[st.prod || 'sptool']}**`, inline: true },
         { name: 'Plan', value: `**${PLANS[st.plan]}**`, inline: true },
         { name: 'Laufzeit', value: `**${durLabel(st.days)}**`, inline: true },
         { name: 'PCs (Hardware-ID)', value: `**${st.devices}**`, inline: true },
@@ -277,6 +302,7 @@ function createView(st, note) {
       row([
         btn(encode('create', st), `${st.count === '1' ? 'Key' : `${st.count} Keys`} erstellen`, 3, { emoji: { name: '✅' } }),
         btn(encode('count', st), `Anzahl: ${st.count}`, 2, { emoji: { name: '🔢' } }),
+        btn(encode('prod', st), `Produkt: ${st.prod === 'skin' ? 'Skin Tool' : st.prod === 'multi' ? 'Multi' : 'SP Tool'}`, 2, { emoji: { name: st.prod === 'skin' ? '🎨' : st.prod === 'multi' ? '🧩' : '🎧' } }),
         btn(encode('cancel', st), 'Zurück', 2, { emoji: { name: '🏠' } }),
       ]),
     ],
@@ -547,7 +573,7 @@ function userAction(actor, id, action, arg) {
 }
 
 // ── DMs ─────────────────────────────────────────────────────────────────────
-const appSteps = (app) => `1. Angehängte **${app.name}** herunterladen und entpacken\n2. **SPTool.exe** starten (Windows-Warnung: „Weitere Informationen“ → „Trotzdem ausführen“)\n3. **Mit Discord anmelden** klicken`;
+const appSteps = (app) => `1. Angehängte **${app.name}** herunterladen und entpacken\n2. **${app.exe || 'SPTool.exe'}** starten (Windows-Warnung: „Weitere Informationen“ → „Trotzdem ausführen“)\n3. **Mit Discord anmelden** klicken`;
 async function sendApp(client, id, actor) {
   const app = appFile();
   if (!app) throw new Error('Keine App-Datei hinterlegt – erst `/sptool-app-datei` nutzen.');
@@ -882,6 +908,7 @@ async function handle(i) {
   if (action === 'plan' || action === 'days' || action === 'devices') { st[action] = i.values?.[0] ?? st[action]; return upd(createView(st)); }
   if (action === 'user') { st.user = i.values?.[0] ?? ''; return upd(createView(st)); }
   if (action === 'count') { st.count = COUNTS[(COUNTS.indexOf(st.count) + 1) % COUNTS.length]; return upd(createView(st)); }
+  if (action === 'prod') { const order = ['sptool', 'skin', 'multi']; st.prod = order[(order.indexOf(st.prod) + 1) % order.length]; return upd(createView(st)); }
   if (action === 'cancel') return upd(hubView());
   if (action === 'again') return upd(createView(st));
   if (action === 'create') {
@@ -891,18 +918,21 @@ async function handle(i) {
     if (st.user) {
       try {
         const u = await i.client.users.fetch(st.user);
-        const app = appFile();
-        await u.send({ ...(app ? { files: [{ attachment: app.file, name: app.name }] } : {}), embeds: [{ color: C.blue, title: '🎧 Dein SP Tool Lizenz-Key', description: `\`\`\`\n${keys.join('\n')}\n\`\`\``, fields: [
+        const apps = appsFor(st.prod);
+        const app = apps[0];
+        const label = PRODUCTS[st.prod || 'sptool'];
+        const steps = apps.length === 1 ? `${appSteps(app)}\n4.` : apps.length > 1 ? `1. Angehängte ZIPs herunterladen und entpacken\n2. **${apps.map((a) => a.exe || 'SPTool.exe').join('** und **')}** starten\n3. Jeweils **Mit Discord anmelden** klicken\n4.` : '1. **Mit Discord anmelden** klicken\n2.';
+        await u.send({ ...(apps.length ? { files: apps.map((a) => ({ attachment: a.file, name: a.name })) } : {}), embeds: [{ color: C.blue, title: `${st.prod === 'skin' ? '🎨' : st.prod === 'multi' ? '🧩' : '🎧'} Dein ${label} Lizenz-Key`, description: `\`\`\`\n${keys.join('\n')}\n\`\`\``, fields: [
           { name: 'Plan', value: PLANS[st.plan], inline: true }, { name: 'Laufzeit', value: durLabel(st.days), inline: true }, { name: 'PCs', value: st.devices, inline: true },
-          { name: 'So aktivierst du', value: `${app ? `${appSteps(app)}\n4.` : '1. **Mit Discord anmelden** klicken\n2.'} Key eingeben. Die Lizenz wird an deine Discord-ID und deinen PC gebunden – Weitergeben funktioniert nicht.` },
-        ], footer: { text: 'SP Tool by Turbo Design' } }] });
-        dm = `\n📨 Per DM an <@${st.user}> gesendet${app ? ` – mit ${app.name}` : ' (ohne App-Datei – `/sptool-app-datei` hochladen)'}.`;
+          { name: 'So aktivierst du', value: `${steps} Key eingeben${st.prod === 'multi' ? ' (derselbe Key schaltet beide Tools frei)' : ''}. Die Lizenz wird an deine Discord-ID und deinen PC gebunden – Weitergeben funktioniert nicht.` },
+        ], footer: { text: `${label} by Turbo Design` } }] });
+        dm = `\n📨 Per DM an <@${st.user}> gesendet${apps.length ? ` – mit ${apps.map((a) => a.name).join(' + ')}` : ' (ohne App-Datei)'}.`;
       } catch { dm = `\n⚠️ DM an <@${st.user}> nicht möglich (DMs geschlossen) – bitte selbst schicken.`; }
     }
     return upd({
       content: '',
       ...(keys.length > 1 ? { files: [{ attachment: Buffer.from(`${keys.join('\n')}\n`, 'utf8'), name: `sptool-keys-${st.plan}-${keys.length}.txt` }] } : {}),
-      embeds: [{ color: C.green, title: `✅ ${keys.length} Key${keys.length > 1 ? 's' : ''} erstellt`, description: `\`\`\`\n${keys.join('\n')}\n\`\`\`${dm}`,
+      embeds: [{ color: C.green, title: `✅ ${keys.length} ${PRODUCTS[st.prod || 'sptool']}-Key${keys.length > 1 ? 's' : ''} erstellt`, description: `\`\`\`\n${keys.join('\n')}\n\`\`\`${dm}`,
         fields: [{ name: 'Plan', value: PLANS[st.plan], inline: true }, { name: 'Laufzeit', value: durLabel(st.days), inline: true }, { name: 'PCs', value: st.devices, inline: true }],
         footer: { text: 'Jeder Key ist nur einmal einlösbar · bindet Discord-ID + Hardware-ID' } }],
       components: [row([

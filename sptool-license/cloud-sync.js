@@ -129,15 +129,21 @@ function readBody(req, max) {
 // An admin's SP Tool uploads its own release ZIP when the bot holds an older version, so every key DM
 // carries the newest app without a manual /sptool-app-datei upload. Same storage as the key panel.
 const APP_PREFIX = '/api/v1/sptool-app/';
-const APP_ZIP_NAME = 'Turbo_SP_Tool.zip';
+// One release per product: SP Tool (default) and Turbo Skin Tool (?product=skin).
+const APPS = {
+  sptool: { dir: 'sptool-app', zip: 'Turbo_SP_Tool.zip', exe: 'SPTool.exe', label: 'SP Tool' },
+  skin: { dir: 'skin-app', zip: 'Turbo_Skin_Tool.zip', exe: 'TurboSkinTool.exe', label: 'Turbo Skin Tool' },
+};
+const APP_ZIP_NAME = APPS.sptool.zip;
+const productOf = (req) => (new URL(req.url, 'http://x').searchParams.get('product') === 'skin' ? 'skin' : 'sptool');
 const MAX_APP_BYTES = 9.5 * 1024 * 1024; // Discord: 10 MB per DM attachment without boosts
 const VER_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
 const dataDir = () => process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || path.join(__dirname, 'data');
-const appDir = () => path.join(dataDir(), 'sptool-app');
-function currentApp() {
+const appDir = (product = 'sptool') => path.join(dataDir(), APPS[product].dir);
+function currentApp(product = 'sptool') {
   try {
-    const meta = JSON.parse(fs.readFileSync(path.join(appDir(), 'meta.json'), 'utf8'));
-    return fs.existsSync(path.join(appDir(), meta.stored)) ? meta : null;
+    const meta = JSON.parse(fs.readFileSync(path.join(appDir(product), 'meta.json'), 'utf8'));
+    return fs.existsSync(path.join(appDir(product), meta.stored)) ? meta : null;
   } catch { return null; }
 }
 const verCmp = (a, b) => { const x = String(a || '0.0.0').split('.').map(Number), y = String(b || '0.0.0').split('.').map(Number); for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); } return 0; };
@@ -172,27 +178,30 @@ function cleanMapping(body) {
 }
 
 /** Signed-in user who may receive app updates: active license, not banned (admins always). */
-function licensedUser(req) {
+function licensedUser(req, product = 'sptool') {
   const u = authUser(req);
   if (isAdmin(u)) return u;
   if (u.banned) throw new HttpError(403, 'banned', 'This account is banned.');
-  const l = openDb().prepare('SELECT * FROM licenses WHERE discord_id = ?').get(u.discord_id);
-  if (!l || l.revoked || (l.expires_at != null && l.expires_at <= Date.now())) throw new HttpError(403, 'license_required', 'Updates need an active SP Tool license.');
+  let l = null;
+  if (product === 'sptool') l = openDb().prepare('SELECT * FROM licenses WHERE discord_id = ?').get(u.discord_id);
+  else { try { l = openDb().prepare('SELECT * FROM product_licenses WHERE discord_id = ? AND product = ?').get(u.discord_id, product); } catch { l = null; } }
+  if (!l || l.revoked || (l.expires_at != null && l.expires_at <= Date.now())) throw new HttpError(403, 'license_required', `Updates need an active ${APPS[product].label} license.`);
   return u;
 }
 
 async function handleApp(req, res) {
   if (req.method === 'OPTIONS') return send(res, 204, '');
   const rest = new URL(req.url, 'http://x').pathname.slice(APP_PREFIX.length);
+  const product = productOf(req), app = APPS[product];
   if (rest === 'latest' || rest === 'download') {
     if (req.method !== 'GET') throw new HttpError(405, 'method', 'Method not allowed.');
-    const lu = licensedUser(req);
+    const lu = licensedUser(req, product);
     limit(lu.discord_id);
-    const cur = currentApp();
+    const cur = currentApp(product);
     if (!cur) throw new HttpError(404, 'no_release', 'No app version has been published yet.');
     if (rest === 'latest') return send(res, 200, { version: cur.version ?? null, size: cur.size, sha256: cur.sha256 ?? null, uploadedAt: cur.uploadedAt ?? null });
-    const file = path.join(appDir(), cur.stored);
-    res.writeHead(200, { ...HEADERS, 'Content-Type': 'application/zip', 'Content-Length': String(fs.statSync(file).size), 'Content-Disposition': `attachment; filename="${APP_ZIP_NAME}"`, 'X-SPTool-Version': String(cur.version ?? ''), 'X-SPTool-SHA256': String(cur.sha256 ?? ''), 'Access-Control-Expose-Headers': 'X-SPTool-Version, X-SPTool-SHA256' });
+    const file = path.join(appDir(product), cur.stored);
+    res.writeHead(200, { ...HEADERS, 'Content-Type': 'application/zip', 'Content-Length': String(fs.statSync(file).size), 'Content-Disposition': `attachment; filename="${app.zip}"`, 'X-SPTool-Version': String(cur.version ?? ''), 'X-SPTool-SHA256': String(cur.sha256 ?? ''), 'Access-Control-Expose-Headers': 'X-SPTool-Version, X-SPTool-SHA256' });
     fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
     return undefined;
   }
@@ -215,26 +224,26 @@ async function handleApp(req, res) {
   if (u.banned && !configAdmin(u.discord_id)) throw new HttpError(403, 'banned', 'This account is banned.');
   limit(u.discord_id);
   if (rest !== 'release') throw new HttpError(404, 'not_found', 'Not found.');
-  const cur = currentApp();
+  const cur = currentApp(product);
   if (req.method === 'GET') return send(res, 200, { version: cur?.version ?? null, size: cur?.size ?? null, uploadedAt: cur?.uploadedAt ?? null });
   if (req.method !== 'POST') throw new HttpError(405, 'method', 'Method not allowed.');
   const version = String(req.headers['x-sptool-version'] || '');
   if (!VER_RE.test(version)) throw new HttpError(400, 'bad_version', 'Invalid version.');
   const buf = await readRaw(req, MAX_APP_BYTES);
-  const latest = currentApp(); // another upload may have finished while this body was arriving
+  const latest = currentApp(product); // another upload may have finished while this body was arriving
   if (latest && verCmp(version, latest.version) <= 0) return send(res, 200, { stored: false, version: latest.version });
   if (cur && verCmp(version, cur.version) <= 0) return send(res, 200, { stored: false, version: cur.version });
   if (buf.length < 1024 || buf.readUInt32LE(0) !== 0x04034b50) throw new HttpError(400, 'bad_zip', 'That is not a ZIP file.');
-  if (!buf.includes(Buffer.from('SPTool.exe'))) throw new HttpError(400, 'bad_zip', 'The ZIP does not contain SPTool.exe.');
-  fs.mkdirSync(appDir(), { recursive: true });
+  if (!buf.includes(Buffer.from(app.exe))) throw new HttpError(400, 'bad_zip', `The ZIP does not contain ${app.exe}.`);
+  fs.mkdirSync(appDir(product), { recursive: true });
   const stored = `app-${Date.now()}.zip`;
-  fs.writeFileSync(path.join(appDir(), stored), buf);
-  const meta = { name: APP_ZIP_NAME, uploadedName: APP_ZIP_NAME, stored, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), version, uploadedAt: Date.now(), uploadedBy: u.discord_id, via: 'app' };
-  fs.writeFileSync(path.join(appDir(), 'meta.json.tmp'), JSON.stringify(meta, null, 2));
-  fs.renameSync(path.join(appDir(), 'meta.json.tmp'), path.join(appDir(), 'meta.json'));
-  if (latest && latest.stored !== stored) { try { fs.unlinkSync(path.join(appDir(), latest.stored)); } catch { /* ignore */ } }
-  try { openDb().prepare('INSERT INTO audit_log (at, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)').run(Date.now(), u.discord_id, 'app.uploaded', null, JSON.stringify({ name: APP_ZIP_NAME, size: buf.length, version, via: 'app-auto' })); } catch { /* optional */ }
-  console.log(`📦 SP Tool App v${version} automatisch übernommen (${(buf.length / 1048576).toFixed(1)} MB) – Key-DMs enthalten jetzt diese Version.`);
+  fs.writeFileSync(path.join(appDir(product), stored), buf);
+  const meta = { name: app.zip, uploadedName: app.zip, product, stored, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), version, uploadedAt: Date.now(), uploadedBy: u.discord_id, via: 'app' };
+  fs.writeFileSync(path.join(appDir(product), 'meta.json.tmp'), JSON.stringify(meta, null, 2));
+  fs.renameSync(path.join(appDir(product), 'meta.json.tmp'), path.join(appDir(product), 'meta.json'));
+  if (latest && latest.stored !== stored) { try { fs.unlinkSync(path.join(appDir(product), latest.stored)); } catch { /* ignore */ } }
+  try { openDb().prepare('INSERT INTO audit_log (at, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)').run(Date.now(), u.discord_id, 'app.uploaded', null, JSON.stringify({ name: app.zip, product, size: buf.length, version, via: 'app-auto' })); } catch { /* optional */ }
+  console.log(`📦 ${app.label} App v${version} automatisch übernommen (${(buf.length / 1048576).toFixed(1)} MB) – Key-DMs enthalten jetzt diese Version.`);
   return send(res, 200, { stored: true, version });
 }
 
@@ -323,7 +332,7 @@ function install() {
     }
     return original.apply(this, args);
   };
-  console.log('ℹ️ SP Tool Cloud geladen · /api/v1/cloud · /api/v1/sptool-app · v1.3.1');
+  console.log('ℹ️ SP Tool Cloud geladen · /api/v1/cloud · /api/v1/sptool-app · v1.4.0 (SP Tool + Skin Tool)');
 }
 
 try { install(); } catch (e) { console.error('❌ SP Tool Cloud nicht geladen:', e?.message || e); }
