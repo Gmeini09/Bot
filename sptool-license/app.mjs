@@ -185,6 +185,8 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
     if (!limitGeneral(clientIp)) throw new HttpError(429, 'rate_limited', 'Too many requests. Slow down.');
 
     if (path === '/api/v1/health') return send(res, 200, { ok: true, time: now() });
+    // Which sign-in the app should offer: Discord one-click (OAuth configured) or the /sptool verbinden code.
+    if (m === 'GET' && path === '/api/v1/auth/mode') return send(res, 200, { oneClick: !!(cfg.discord?.clientId && cfg.discord?.clientSecret) });
     // Public key that signs license tickets (not secret). Lets the app recover if its built-in key
     // does not match this server (e.g. the key on the server was regenerated).
     if (m === 'GET' && path === '/api/v1/public-key') return send(res, 200, { alg: 'Ed25519', publicKey });
