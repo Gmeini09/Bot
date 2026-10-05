@@ -34,7 +34,7 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
   let publicKey = '';
   try { publicKey = cfg.privateKeyPem ? publicRawFromPrivate(cfg.privateKeyPem) : ''; } catch { /* reported at startup */ }
 
-  // ── helpers ────────────────────────────────────────────────────────────────
+  // ── helpers
   function send(res, status, body, headers = {}) {
     const isHtml = typeof body === 'string';
     res.writeHead(status, {
@@ -109,7 +109,7 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
     }, cfg.privateKeyPem);
   }
 
-  // ── login completion (shared by Discord callback and dev fake) ─────────────
+  // ── login completion (shared by Discord callback and dev fake)
   function completeLogin(pending, du) {
     return tx(db, () => {
       const t = now();
@@ -157,9 +157,23 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
 <div style="max-width:440px;padding:32px;border:1px solid #242A34;border-radius:16px;background:#12151B;text-align:center">
 <div style="font-size:42px;margin-bottom:8px;color:${ok ? '#3fb67f' : '#d9534f'}">${ok ? '✓' : '!'}</div>
 <h1 style="font-size:20px;margin:0 0 8px">${title}</h1><p style="color:#9098A7;margin:0">${msg}</p></div></body>`;
+  const pairPage = (code) => `<!doctype html><html lang="de"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SP Tool verbinden</title>
+<body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#08090C;color:#F5F7FA;font:16px/1.5 'Segoe UI',system-ui,sans-serif">
+<div style="max-width:480px;padding:32px;border:1px solid #242A34;border-radius:16px;background:#12151B">
+<h1 style="font-size:21px;margin:0 0 6px">Fast geschafft – nur noch ein Befehl</h1>
+<p style="color:#9098A7;margin:0 0 18px">Schick diesen Befehl in Discord an den SP-Tool-Bot (in einem Kanal oder per DM):</p>
+<div style="font:600 18px/1.4 Consolas,monospace;padding:14px 16px;border-radius:12px;background:#08090C;border:1px solid #5865F2;user-select:all;word-break:break-all">/sptool verbinden code:${code}</div>
+<ol style="color:#C9CED8;padding-left:20px;margin:18px 0 0">
+<li>Befehl oben markieren und kopieren (Strg + C)</li>
+<li>In Discord einfügen und abschicken</li>
+<li>Auf <b>„Ja, das ist mein PC“</b> klicken</li>
+<li>Fertig – SP Tool meldet dich automatisch an. Diesen Tab kannst du schließen.</li>
+</ol>
+<p style="color:#636B78;font-size:13px;margin:18px 0 0">Der Code gilt 10 Minuten und nur für diesen PC. Gib ihn niemandem weiter.</p>
+</div></body>`;
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
-  // ── routes ────────────────────────────────────────────────────────────────
+  // ── routes
   async function route(req, res) {
     const url = new URL(req.url ?? '/', 'http://x');
     const path = url.pathname.replace(/\/+$/, '') || '/';
@@ -185,8 +199,11 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
       const name = q('device').replace(/[^\w .\-()]/g, '').slice(0, 40) || 'PC';
       db.prepare('DELETE FROM pending_logins WHERE created_at < ?').run(now() - PENDING_TTL);
       db.prepare('INSERT OR REPLACE INTO pending_logins (state_hash, hwid_hash, device_name, device_kind, created_at) VALUES (?, ?, ?, ?, ?)').run(sha256(state), hw, name, kind, now());
-      const target = cfg.fakeDiscord && !cfg.production ? `/dev/fake-discord?state=${encodeURIComponent(state)}` : authorizeUrl(cfg, state);
-      return send(res, 302, '', { Location: target });
+      if (cfg.fakeDiscord && !cfg.production) return send(res, 302, '', { Location: `/dev/fake-discord?state=${encodeURIComponent(state)}` });
+      // Discord sign-in in one click needs DISCORD_CLIENT_ID + DISCORD_CLIENT_SECRET. Without them the PC is
+      // linked with a short code that the user sends to the bot (/sptool verbinden) – shown here and in the app.
+      if (!cfg.discord?.clientId || !cfg.discord?.clientSecret) return send(res, 200, pairPage(sha256(state).slice(0, 10).toUpperCase()));
+      return send(res, 302, '', { Location: authorizeUrl(cfg, state) });
     }
 
     // 2) Discord redirects back here.
@@ -230,7 +247,7 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
       return send(res, 200, JSON.parse(row.result));
     }
 
-    // ── authenticated user routes ──────────────────────────────────────────
+    // ── authenticated user routes
     if (path.startsWith('/api/v1/me') || path.startsWith('/api/v1/license') || path.startsWith('/api/v1/auth/logout') || path.startsWith('/api/v1/admin')) {
       const ctx = authenticate(req);
       const me = ctx.user.discord_id;
@@ -256,7 +273,7 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
         return send(res, 200, { ok: true });
       }
 
-      // ── admin ──────────────────────────────────────────────────────────────
+      // ── admin
       if (path.startsWith('/api/v1/admin')) {
         requireAdmin(ctx);
         const actor = me;
