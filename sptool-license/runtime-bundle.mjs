@@ -29,8 +29,15 @@ for (const [variable, [file, re]] of Object.entries(files)) {
   const text = src.replace(re, () => inline).replace(/\n+$/, ''); // the variables hold the file without a trailing newline
   writeFileSync(join(out, file), text);
   if (variable === 'SPTOOL_RUNTIME_KEYS_JS') {
+    // split between two non-blank characters, so no part starts or ends with whitespace (values may be trimmed)
     const parts = [];
-    for (let i = 0; i < text.length; i += MAX) parts.push(text.slice(i, i + MAX));
+    let rest = text;
+    while (rest.length > MAX) {
+      let i = MAX;
+      while (i > 1 && (/\s/.test(rest[i - 1]) || /\s/.test(rest[i]))) i--;
+      parts.push(rest.slice(0, i)); rest = rest.slice(i);
+    }
+    parts.push(rest);
     if (parts.length > 3) throw new Error(`keys-panel.js needs ${parts.length} variables, the start command reads 3`);
     ['SPTOOL_RUNTIME_KEYS_JS', 'SPTOOL_RUNTIME_KEYS2_JS', 'SPTOOL_RUNTIME_KEYS3_JS'].forEach((v, i) => { writeFileSync(join(out, `${v}.txt`), parts[i] ?? ''); report[v] = (parts[i] ?? '').length; });
   } else {
