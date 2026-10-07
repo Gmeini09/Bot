@@ -58,6 +58,8 @@ export function createLicenseService({ cfg, db, now = () => Date.now() }) {
   }
   const needId = (id) => { if (!isSnowflake(id)) throw new LicenseError(400, 'bad_id', 'Invalid Discord ID.'); return id; };
   ensureProductTables(db);
+  // 002: the database accepts the levels Admin and Developer (once; keeps every row)
+  if (tiers.migratePlanLevels(db)) console.log('ℹ️ SP Tool Lizenz-Datenbank: Stufe Admin ergänzt (002_plan_levels)');
   const needProduct = (p) => { if (p !== 'sptool' && !PRODUCTS.includes(p)) throw new LicenseError(400, 'bad_product', 'Unknown product.'); return p; };
   const getProductLicense = (id, product) => db.prepare('SELECT * FROM product_licenses WHERE discord_id = ? AND product = ?').get(id, product);
   const isActiveRow = (l, t = now()) => Boolean(l) && !l.revoked && (l.expires_at == null || l.expires_at > t);

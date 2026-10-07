@@ -24,48 +24,7 @@ export function openDb(path) {
       throw e;
     }
   }
-  migratePlanLevels(db);
   return db;
-}
-
-/** Plan values allowed after 002: the licence levels Free < Premium < Creator < Admin < Developer. */
-export const PLAN_VALUES = ['free', 'premium', 'creator', 'admin', 'developer'];
-
-/**
- * 002_plan_levels (in code, because SQLite cannot change a CHECK constraint): rebuilds `licenses` and
- * `license_keys` with the wider plan list. The table definitions are taken from the live database and only the
- * plan CHECK is replaced, all columns and rows are copied 1:1 (also columns added later), indexes are recreated.
- * Runs once, inside one transaction; on any error nothing is changed.
- */
-export function migratePlanLevels(db) {
-  const NAME = '002_plan_levels';
-  if (db.prepare('SELECT 1 FROM schema_migrations WHERE name = ?').get(NAME)) return;
-  const check = `CHECK (plan IN (${PLAN_VALUES.map((p) => `'${p}'`).join(', ')}))`;
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    for (const table of ['licenses', 'license_keys']) {
-      const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
-      if (!row?.sql) continue;
-      const re = /CHECK\s*\(\s*plan\s+IN\s*\([^)]*\)\s*\)/i;
-      if (!re.test(row.sql)) continue; // no plan restriction (or already replaced)
-      const indexes = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL").all(table).map((r) => r.sql);
-      const tmp = `${table}__new`;
-      const createSql = row.sql.replace(re, check).replace(/^CREATE TABLE\s+(IF NOT EXISTS\s+)?("?)\w+\2/i, `CREATE TABLE ${tmp}`);
-      db.exec(createSql);
-      db.exec(`INSERT INTO ${tmp} SELECT * FROM ${table}`);
-      const before = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
-      const after = db.prepare(`SELECT COUNT(*) AS n FROM ${tmp}`).get().n;
-      if (before !== after) throw new Error(`${table}: ${after} of ${before} rows copied`);
-      db.exec(`DROP TABLE ${table}`);
-      db.exec(`ALTER TABLE ${tmp} RENAME TO ${table}`);
-      for (const sql of indexes) db.exec(sql);
-    }
-    db.prepare('INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)').run(NAME, Date.now());
-    db.exec('COMMIT');
-  } catch (e) {
-    db.exec('ROLLBACK');
-    throw e;
-  }
 }
 
 export function audit(db, actor, action, target = null, detail = null) {

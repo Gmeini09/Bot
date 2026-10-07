@@ -55,4 +55,44 @@ function effectiveTier(db, id, isConfigAdmin, now = Date.now(), { ignoreBan = fa
   return maxTier(active ? lic.plan : 'free', user?.role === 'admin' && (!user.banned || ignoreBan) ? 'admin' : 'free');
 }
 
-module.exports = { PLANS, RANK, LABEL, EMOJI, STAFF, PRODUCT_PLANS, tierOfPlan, rankOf, atLeast, maxTier, isStaff, canGrant, canManage, legacyTicketPlan, effectiveTier };
+/** Plan values the database accepts after migration 002 (the licence levels). */
+const PLAN_VALUES = PLANS;
+
+/**
+ * Migration 002_plan_levels (in code, because SQLite cannot change a CHECK constraint, and because the live server
+ * takes db.mjs from another place): rebuilds `licenses` and `license_keys` with the wider plan list. The table
+ * definitions come from the live database and only the plan CHECK is replaced; all columns and rows are copied 1:1
+ * (also columns added later), indexes are recreated. Runs once, in one transaction; on any error nothing changes.
+ */
+function migratePlanLevels(db) {
+  const NAME = '002_plan_levels';
+  db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)');
+  if (db.prepare('SELECT 1 FROM schema_migrations WHERE name = ?').get(NAME)) return false;
+  const check = `CHECK (plan IN (${PLAN_VALUES.map((p) => `'${p}'`).join(', ')}))`;
+  const re = /CHECK\s*\(\s*plan\s+IN\s*\([^)]*\)\s*\)/i;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const table of ['licenses', 'license_keys']) {
+      const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+      if (!row || !row.sql || !re.test(row.sql)) continue;
+      const indexes = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL").all(table).map((r) => r.sql);
+      const tmp = `${table}__new`;
+      db.exec(row.sql.replace(re, check).replace(/^CREATE TABLE\s+(IF NOT EXISTS\s+)?("?)\w+\2/i, `CREATE TABLE ${tmp}`));
+      db.exec(`INSERT INTO ${tmp} SELECT * FROM ${table}`);
+      const before = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
+      const after = db.prepare(`SELECT COUNT(*) AS n FROM ${tmp}`).get().n;
+      if (before !== after) throw new Error(`${table}: ${after} of ${before} rows copied`);
+      db.exec(`DROP TABLE ${table}`);
+      db.exec(`ALTER TABLE ${tmp} RENAME TO ${table}`);
+      for (const sql of indexes) db.exec(sql);
+    }
+    db.prepare('INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)').run(NAME, Date.now());
+    db.exec('COMMIT');
+    return true;
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+module.exports = { PLAN_VALUES, migratePlanLevels, PLANS, RANK, LABEL, EMOJI, STAFF, PRODUCT_PLANS, tierOfPlan, rankOf, atLeast, maxTier, isStaff, canGrant, canManage, legacyTicketPlan, effectiveTier };
