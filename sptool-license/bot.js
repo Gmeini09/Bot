@@ -22,11 +22,10 @@ const OWNER_ID = '697402284849627180';
 const APP_PUBKEY = process.env.SPTOOL_APP_PUBKEY || '5iVZDgeKEizromOavt_4watv_TymaL7np_99Lys_gEQ';
 const ENABLED = String(process.env.SPTOOL_LICENSE_ENABLED ?? 'true').toLowerCase() !== 'false';
 const COMMANDS = new Set(['sptool', 'sptool-admin']);
-const PLAN_CHOICES = [
-  { name: 'Free', value: 'free' }, { name: 'Premium', value: 'premium' },
-  { name: 'Creator', value: 'creator' }, { name: 'Developer', value: 'developer' },
-];
-const PLAN_LABEL = { free: 'Free', premium: 'Premium', creator: 'Creator', developer: 'Developer' };
+// Licence levels Free < Premium < Creator < Admin < Developer (tiers.cjs). Admin/Developer only by a Developer.
+const tiers = require(fs.existsSync(path.join(__dirname, 'tiers.cjs')) ? './tiers.cjs' : '../tiers.cjs');
+const PLAN_CHOICES = tiers.PLANS.map((p) => ({ name: tiers.LABEL[p], value: p }));
+const PLAN_LABEL = tiers.LABEL;
 const COLOR = { ok: 0x57f287, info: 0x5865f2, warn: 0xfee75c, err: 0xed4245 };
 const ERR_DE = {
   bad_id: 'Ungültige Discord-ID.',
@@ -37,6 +36,10 @@ const ERR_DE = {
   banned: 'Dieser Account ist für SP Tool gesperrt.',
   protected: 'Der Owner kann nicht gebannt oder herabgestuft werden.',
   owner_only: 'Das darf nur der Owner.',
+  dev_only: 'Das darf nur ein Developer (Admin- und Developer-Lizenzen, Keys und Accounts).',
+  forbidden: 'Nur SP Tool Admins dürfen das.',
+  self: 'Das geht nicht mit deinem eigenen Account.',
+  key_lower_plan: 'Dieser Key hat einen niedrigeren Plan als die aktive Lizenz – er wurde nicht verbraucht.',
   not_found: 'Nicht gefunden.',
 };
 
@@ -236,7 +239,7 @@ function userEmbed(id, detail, svc) {
     { name: 'Lizenz', value: planText(lic), inline: false },
     { name: `Geräte (${detail ? detail.devices.filter((d) => !d.revoked).length : 0}/${svc.maxDevicesFor(id)})`, value: detail ? deviceLines(detail.devices) : '—', inline: false },
   ];
-  if (u) fields.push({ name: 'Status', value: [`Rolle: **${u.role === 'admin' ? (id === OWNER_ID ? 'Owner' : 'Admin') : 'User'}**`, u.banned ? `⛔ Gebannt${u.banReason ? `: ${u.banReason}` : ''}` : '✅ Nicht gebannt', `Letzter Login: ${ts(u.lastLogin, 'R')}`].join('\n'), inline: false });
+  if (u) fields.push({ name: 'Status', value: [`Stufe: **${id === OWNER_ID ? 'Owner (Developer)' : PLAN_LABEL[u.tier] ?? 'Free'}**`, u.banned ? `⛔ Gebannt${u.banReason ? `: ${u.banReason}` : ''}` : '✅ Nicht gebannt', `Letzter Login: ${ts(u.lastLogin, 'R')}`].join('\n'), inline: false });
   if (lic?.note) fields.push({ name: 'Notiz', value: String(lic.note).slice(0, 200), inline: false });
   return embed(`${name}`, `<@${id}> · \`${id}\``, u?.banned ? COLOR.err : lic?.active ? COLOR.ok : COLOR.warn, fields);
 }
@@ -250,7 +253,7 @@ async function handleUser(i) {
     const lic = svc.licenseView(me);
     return reply(i, { embeds: [embed('🎧 Deine SP Tool Lizenz', planText(lic), lic?.active ? COLOR.ok : COLOR.warn, [
       { name: 'Deine Discord-ID', value: `\`${me}\`\nSchick sie an das Team, wenn du eine Lizenz kaufst.` },
-      { name: 'So geht’s', value: 'SP Tool öffnen → **Continue with Discord**. Dein PC wird dabei an deine Lizenz gebunden.' },
+      { name: 'So geht’s', value: 'SP Tool öffnen → **Mit Discord anmelden**. Dein PC wird dabei an deine Lizenz gebunden.' },
     ])] });
   }
   if (sub === 'geraete') {
@@ -262,7 +265,7 @@ async function handleUser(i) {
     try {
       const lic = svc.redeemKey(me, i.options.getString('key', true));
       rememberName(me, i.user);
-      return reply(i, { embeds: [embed('✅ Key eingelöst', planText(lic), COLOR.ok, [{ name: 'Nächster Schritt', value: 'SP Tool öffnen → **Continue with Discord**.' }])] });
+      return reply(i, { embeds: [embed('✅ Key eingelöst', planText(lic), COLOR.ok, [{ name: 'Nächster Schritt', value: 'SP Tool öffnen → **Mit Discord anmelden**.' }])] });
     } catch (e) {
       return reply(i, { content: `❌ ${errorText(e)}` });
     }
@@ -323,7 +326,7 @@ async function handleAdmin(i) {
       let dm = false;
       try {
         const u = user || await i.client.users.fetch(id);
-        await u.send({ embeds: [embed('🎧 Du hast eine SP Tool Lizenz!', planText(lic), COLOR.ok, [{ name: 'So startest du', value: 'SP Tool öffnen → **Continue with Discord**. Dein PC wird dabei an deine Lizenz gebunden (max. ' + lic.maxDevices + ' PC).' }])] });
+        await u.send({ embeds: [embed('🎧 Du hast eine SP Tool Lizenz!', planText(lic), COLOR.ok, [{ name: 'So startest du', value: 'SP Tool öffnen → **Mit Discord anmelden**. Dein PC wird dabei an deine Lizenz gebunden (max. ' + lic.maxDevices + ' PC).' }])] });
         dm = true;
       } catch { /* DMs closed */ }
       return reply(i, { embeds: [embed('✅ Lizenz gesetzt', `<@${id}>: ${planText(lic)} · ${lic.maxDevices} PC${lic.maxDevices > 1 ? 's' : ''}`, COLOR.ok, [{ name: 'Benachrichtigung', value: dm ? 'Per DM informiert.' : 'DM nicht möglich (DMs geschlossen oder nicht auf einem gemeinsamen Server).' }])] });

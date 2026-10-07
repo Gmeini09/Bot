@@ -17,6 +17,7 @@ import { audit, ensureUser, getUser, tx } from './db.mjs';
 import { authorizeUrl } from './discord.mjs';
 import { publicRawFromPrivate, randomToken, rateLimiter, serverHwidHash, sha256, signTicket } from './security.mjs';
 import { createLicenseService, DAY, isSnowflake, LicenseError } from './service.mjs';
+import tiers from './tiers.cjs';
 
 const PENDING_TTL = 10 * 60_000;
 
@@ -107,7 +108,11 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
     const offlineUntil = Math.min(t + cfg.offlineGraceHours * 3_600_000, lic.expiresAt ?? Infinity);
     return signTicket({
       v: 1, sub: ctx.user.discord_id, name: ctx.user.global_name || ctx.user.username, role: svc.roleOf(ctx.user),
-      plan: lic.plan, exp: lic.expiresAt, hwid: ctx.clientHwid, iat: t, offlineUntil, ...(product === 'sptool' ? {} : { prod: product }),
+      // SP Tool: "tier" is the licence level (Free … Developer); "plan" stays a value that apps up to 1.8.x understand ("admin" → "developer")
+      ...(product === 'sptool'
+        ? (() => { const tier = svc.tierOf(ctx.user.discord_id); return { plan: tiers.legacyTicketPlan(tier), tier }; })()
+        : { plan: lic.plan, prod: product }),
+      exp: lic.expiresAt, hwid: ctx.clientHwid, iat: t, offlineUntil,
     }, cfg.privateKeyPem);
   }
 

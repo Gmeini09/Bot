@@ -32,7 +32,13 @@ const MAX_APP_BYTES = 9.5 * 1024 * 1024; // Discord: 10 MB per file without boos
 const APP_ZIP_NAME = 'Turbo_Designs_SP_Tool.zip'; // name users always receive, for every release and update
 const PREFIX = 'spk';
 const EPHEMERAL = 64;
-const PLANS = { free: 'Free', premium: 'Premium', creator: 'Creator', developer: 'Developer' };
+// Licence levels Free < Premium < Creator < Admin < Developer (tiers.cjs, shared with the licence server).
+// What an account may hand out is checked per actor: Admin up to Creator, Developer everything.
+// Turbo Skin Tool / Multi keys exist up to Developer, but without Admin (the Skin Tool has no admin level).
+const tiers = require(fs.existsSync(path.join(__dirname, 'tiers.cjs')) ? './tiers.cjs' : '../tiers.cjs');
+const PLANS = tiers.LABEL;
+const PLAN_EMOJI = tiers.EMOJI;
+const PRODUCT_KEY_PLANS = tiers.PRODUCT_PLANS;
 const DURATIONS = [
   ['1', '1 Tag'], ['3', '3 Tage'], ['7', '7 Tage'], ['14', '14 Tage'], ['30', '30 Tage'], ['60', '60 Tage'],
   ['90', '90 Tage'], ['180', '180 Tage'], ['365', '1 Jahr'], ['0', 'Lebenslang'],
@@ -132,15 +138,23 @@ function newKey(prefix = 'SPT') {
 const isKey = (k) => /^SPT-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(k);
 
 const configAdmins = () => new Set([OWNER_ID, ...String(process.env.SPTOOL_ADMIN_IDS || process.env.ADMIN_DISCORD_IDS || '').split(/[,\s;]+/).filter(Boolean)]);
-/** Owner / configured admins always; role admins only while not banned. */
-function isAdmin(id) {
-  if (configAdmins().has(id)) return true;
-  try { const u = openDb()?.prepare('SELECT role, banned FROM users WHERE discord_id = ?').get(id); return u?.role === 'admin' && !u.banned; } catch { return false; }
+const isConfigAdmin = (id) => configAdmins().has(id);
+/** Licence level of an account (owner/configured admins = Developer). ignoreBan: its level as if not banned. */
+function tierOf(id, ignoreBan = false) {
+  if (isConfigAdmin(id)) return 'developer';
+  const d = openDb();
+  return d ? tiers.effectiveTier(d, id, isConfigAdmin, Date.now(), { ignoreBan }) : 'free';
 }
-/** Admin accounts (incl. banned ones) can only be changed by the owner. */
-function isAdminAccount(id) {
-  if (configAdmins().has(id)) return true;
-  try { return openDb()?.prepare('SELECT role FROM users WHERE discord_id = ?').get(id)?.role === 'admin'; } catch { return false; }
+/** May use the key panel: Admin and Developer level (not while banned). */
+const isAdmin = (id) => tiers.isStaff(tierOf(id));
+/** Admin/Developer accounts (also banned ones) – only a Developer may change them. */
+const isAdminAccount = (id) => tiers.isStaff(tierOf(id, true));
+/** Plans this actor may hand out for a product. */
+const grantablePlans = (actor, prod = 'sptool') => (prod === 'sptool' ? tiers.PLANS : PRODUCT_KEY_PLANS).filter((p) => tiers.canGrant(tierOf(actor), p));
+function needManage(actor, id) {
+  if (actor === id) return;
+  if (isConfigAdmin(id) && !isConfigAdmin(actor)) throw new Error('Den Owner-Account kann niemand ändern.');
+  if (!tiers.canManage(tierOf(actor), tierOf(id, true))) throw new Error('Admin- und Developer-Accounts kann nur ein Developer ändern.');
 }
 
 const durLabel = (d) => (d == null || d === '0' || d === 0 ? 'Lebenslang' : DURATIONS.find((x) => x[0] === String(d))?.[1] ?? `${d} Tage`);
@@ -183,6 +197,7 @@ function keyState(r) {
 }
 
 function createKeys(actor, st) {
+  if (!grantablePlans(actor, st.prod || 'sptool').includes(st.plan)) throw new Error(`${PLANS[st.plan] ?? st.plan}-Keys darf nur ein Developer erstellen${st.prod && st.prod !== 'sptool' ? ' (Skin-/Multi-Keys gibt es ohne Admin-Stufe)' : ''}.`);
   const d = needDb();
   const n = Number(st.count), days = st.days === '0' ? null : Number(st.days), dev = Number(st.devices);
   const note = st.user ? `Discord-Panel für ${st.user}` : 'Discord-Panel';
@@ -215,6 +230,7 @@ function removeKeys(actor, keys) {
     for (const k of keys) {
       const r = d.prepare('SELECT * FROM license_keys WHERE key = ?').get(k);
       if (!r) { out.push({ key: k, result: 'nicht gefunden' }); continue; }
+      if (!tiers.canGrant(tierOf(actor), r.plan)) { out.push({ key: k, result: `übersprungen – ${PLANS[r.plan] ?? r.plan}-Keys entfernt nur ein Developer` }); continue; }
       if (!r.redeemed_by) {
         d.prepare('DELETE FROM license_keys WHERE key = ?').run(k);
         audit(d, actor, 'key.deleted', k, { plan: r.plan });
@@ -267,16 +283,22 @@ function hubView(note) {
   };
 }
 
+const PLAN_INFO = {
+  free: 'Soundpacks erstellen (eigene Sounds, aus anderen Packs)', premium: 'Mehr als Free: Sounds bearbeiten/erstellen, Presets, Cloud',
+  creator: 'Alles in der App – ohne Key-/User-Verwaltung', admin: 'Alles + Keys, Lizenzen und User verwalten', developer: 'Alle Rechte (auch Admin/Developer vergeben)',
+};
 // create flow – state lives in the ids: spk:<action>:<plan>:<days>:<devices>:<count>:<userId|->
 const CREATE_ACTIONS = new Set(['plan', 'days', 'devices', 'user', 'count', 'prod', 'create', 'cancel', 'again']);
 function encode(action, st) { return [PREFIX, action, st.plan, st.days, st.devices, st.count, st.user || '-', st.prod || 'sptool'].join(':'); }
 function decode(id) {
   const [, action, plan, days, devices, count, user, prod] = String(id).split(':');
-  return { action, st: { plan: PLANS[plan] ? plan : 'premium', days: DURATIONS.some((d) => d[0] === days) ? days : '30', devices: DEVICES.includes(devices) ? devices : '1', count: COUNTS.includes(count) ? count : '1', user: /^\d{15,21}$/.test(user || '') ? user : '', prod: PRODUCTS[prod] ? prod : 'sptool' } };
+  return { action, st: { plan: tiers.PLANS.includes(plan) ? plan : 'premium', days: DURATIONS.some((d) => d[0] === days) ? days : '30', devices: DEVICES.includes(devices) ? devices : '1', count: COUNTS.includes(count) ? count : '1', user: /^\d{15,21}$/.test(user || '') ? user : '', prod: PRODUCTS[prod] ? prod : 'sptool' } };
 }
 const DEFAULT = { plan: 'premium', days: '30', devices: '1', count: '1', user: '', prod: 'sptool' };
 
-function createView(st, note) {
+function createView(st, note, actor) {
+  const allowed = actor ? grantablePlans(actor, st.prod || 'sptool') : tiers.PLANS;
+  if (!allowed.includes(st.plan)) st = { ...st, plan: allowed.includes('premium') ? 'premium' : allowed[0] ?? 'free' };
   const select = (action, placeholder, options) => row([{ type: 3, custom_id: encode(action, st), placeholder, min_values: 1, max_values: 1, options }]);
   return {
     content: '',
@@ -295,7 +317,7 @@ function createView(st, note) {
       footer: FOOTER,
     }],
     components: [
-      select('plan', 'Plan wählen', Object.entries(PLANS).map(([v, l]) => ({ label: l, value: v, default: v === st.plan, emoji: { name: v === 'developer' ? '🛠️' : v === 'creator' ? '🎨' : v === 'premium' ? '⭐' : '🆓' } }))),
+      select('plan', 'Plan wählen', allowed.map((v) => ({ label: PLANS[v], value: v, default: v === st.plan, emoji: { name: PLAN_EMOJI[v] }, description: PLAN_INFO[v] }))),
       select('days', 'Laufzeit wählen', DURATIONS.map(([v, l]) => ({ label: l, value: v, default: v === st.days, emoji: { name: v === '0' ? '♾️' : '⏱️' } }))),
       select('devices', 'Erlaubte PCs', DEVICES.map((v) => ({ label: `${v} PC${v === '1' ? '' : 's'} (Hardware-ID)`, value: v, default: v === st.devices, emoji: { name: '🖥️' } }))),
       row([{ type: 5, custom_id: encode('user', st), placeholder: 'Optional: User wählen (Keys per DM)', min_values: 0, max_values: 1, ...(st.user ? { default_values: [{ id: st.user, type: 'user' }] } : {}) }]),
@@ -459,14 +481,17 @@ function usersPickView(note) {
     ],
   };
 }
-function userView(id, note) {
+function userView(id, note, actor) {
   const d = needDb();
   const u = d.prepare('SELECT * FROM users WHERE discord_id = ?').get(id);
   const l = d.prepare('SELECT * FROM licenses WHERE discord_id = ?').get(id);
   const devs = d.prepare('SELECT name, kind, first_seen, last_seen FROM devices WHERE discord_id = ? AND revoked = 0 ORDER BY last_seen DESC').all(id);
   const keys = d.prepare('SELECT key, plan, redeemed_at, revoked FROM license_keys WHERE redeemed_by = ? ORDER BY redeemed_at DESC LIMIT 5').all(id);
   const active = !!l && !l.revoked && (l.expires_at == null || l.expires_at > Date.now());
-  const role = id === OWNER_ID ? '👑 Owner' : u?.role === 'admin' ? '🛡️ Admin' : 'User';
+  const lvl = tierOf(id, true);
+  const role = id === OWNER_ID ? '👑 Owner (Developer)' : `${PLAN_EMOJI[lvl]} ${PLANS[lvl]}${u?.role === 'admin' && !(active && tiers.isStaff(l.plan)) ? ' (Admin-Rolle)' : ''}`;
+  const mayManage = !actor || actor === id ? true : (() => { try { needManage(actor, id); return true; } catch { return false; } })();
+  const planOpts = (actor ? grantablePlans(actor) : tiers.PLANS);
   const maxDev = l?.max_devices ?? 1;
   return {
     content: '',
@@ -475,7 +500,7 @@ function userView(id, note) {
       title: `👤 ${u?.global_name || u?.username || 'User'}${u?.banned ? ' · 🚫 gesperrt' : ''}`,
       description: [note ?? '', `<@${id}> · \`${id}\``].filter(Boolean).join('\n\n'),
       fields: [
-        { name: 'Rolle', value: role, inline: true },
+        { name: 'Stufe', value: role, inline: true },
         { name: 'Letzter Login', value: u?.last_login ? ts(u.last_login) : u ? 'noch nie' : 'noch nie in der App', inline: true },
         { name: 'PCs', value: `**${devs.length}/${maxDev}**`, inline: true },
         { name: 'Lizenz', value: licenseLine(l), inline: false },
@@ -485,9 +510,9 @@ function userView(id, note) {
       ],
       footer: FOOTER,
     }],
-    components: [
+    components: !mayManage ? [row([btn('spk:users', 'Zurück', 2, { emoji: { name: '↩️' } })])] : [
       row([{ type: 3, custom_id: `spk:uplan:${id}`, placeholder: 'Plan setzen…', min_values: 1, max_values: 1,
-        options: Object.entries(PLANS).map(([v, lb]) => ({ label: `Plan: ${lb}`, value: v, default: active && l.plan === v, description: active ? 'Laufzeit bleibt' : 'Neue Lizenz · 30 Tage' })) }]),
+        options: planOpts.map((v) => ({ label: `Plan: ${PLANS[v]}`, value: v, emoji: { name: PLAN_EMOJI[v] }, default: active && tiers.tierOfPlan(l.plan) === v, description: active ? 'Laufzeit bleibt' : 'Neue Lizenz · 30 Tage' })) }]),
       row([
         btn(`spk:uext:${id}:30`, '+30 Tage', 2, { emoji: { name: '⏱️' }, disabled: !l }),
         btn(`spk:uext:${id}:365`, '+1 Jahr', 2, { emoji: { name: '📅' }, disabled: !l }),
@@ -506,14 +531,16 @@ function userView(id, note) {
   };
 }
 function userAction(actor, id, action, arg) {
-  if (actor !== OWNER_ID && id !== actor && isAdminAccount(id)) throw new Error('Nur der Owner kann Admin-Accounts ändern.');
-  if (id === actor && actor !== OWNER_ID && action === 'unban') throw new Error('Du kannst dich nicht selbst entsperren.');
+  needManage(actor, id);
+  if (id === actor && actor !== OWNER_ID && (action === 'unban' || action === 'ban')) throw new Error('Das geht nicht mit deinem eigenen Account.');
+  if (id === actor && !isConfigAdmin(actor) && action === 'plan') throw new Error('Deinen eigenen Plan kann nur ein anderer Developer ändern.');
   const d = needDb();
   const t = Date.now();
   const l = d.prepare('SELECT * FROM licenses WHERE discord_id = ?').get(id);
   switch (action) {
     case 'plan': {
-      if (!PLANS[arg]) throw new Error('Unbekannter Plan');
+      if (!tiers.PLANS.includes(arg)) throw new Error('Unbekannter Plan');
+      if (!tiers.canGrant(tierOf(actor), arg)) throw new Error(`Den Plan ${PLANS[arg]} darf nur ein Developer vergeben.`);
       ensureUser(d, id);
       const active = l && !l.revoked && (l.expires_at == null || l.expires_at > t);
       if (l) d.prepare("UPDATE licenses SET plan = ?, revoked = 0, expires_at = ?, source = 'admin', updated_at = ? WHERE discord_id = ?").run(arg, active ? l.expires_at : t + 30 * DAY, t, id);
@@ -556,7 +583,6 @@ function userAction(actor, id, action, arg) {
     }
     case 'ban': {
       if (id === OWNER_ID) throw new Error('Der Owner kann nicht gesperrt werden.');
-      if (isAdminAccount(id) && actor !== OWNER_ID) throw new Error('Nur der Owner kann Admins sperren.');
       ensureUser(d, id);
       d.prepare('UPDATE users SET banned = 1, ban_reason = ? WHERE discord_id = ?').run(String(arg || '').slice(0, 200) || null, id);
       d.prepare('UPDATE sessions SET revoked = 1 WHERE discord_id = ?').run(id);
@@ -779,7 +805,7 @@ async function handle(i) {
     if (i.commandName === CMD_HUB) return i.reply({ ...hubView(), flags: EPHEMERAL });
     if (i.commandName === CMD_USER) {
       const u = i.options.getUser('user', true);
-      return i.reply({ ...userView(u.id), flags: EPHEMERAL });
+      return i.reply({ ...userView(u.id, undefined, i.user.id), flags: EPHEMERAL });
     }
     if (i.commandName === CMD_UPDATE) {
       const note = cleanNote(i.options.getString('nachricht'));
@@ -825,7 +851,7 @@ async function handle(i) {
     if (kind === 'ubanm' && isId(parts[2])) {
       const reason = String(i.fields.getTextInputValue('confirm') ?? '').trim();
       let note; try { note = userAction(i.user.id, parts[2], 'ban', reason); } catch (e) { note = `❌ ${e?.message || e}`; }
-      return upd(userView(parts[2], note));
+      return upd(userView(parts[2], note, i.user.id));
     }
     return upd(hubView());
   }
@@ -855,28 +881,29 @@ async function handle(i) {
   if (kind === 'users') return upd(usersPickView());
   if (kind === 'usel') {
     const id = i.values?.[0];
-    return upd(isId(id) ? userView(id) : usersPickView('⚠️ Kein User gewählt.'));
+    return upd(isId(id) ? userView(id, undefined, i.user.id) : usersPickView('⚠️ Kein User gewählt.'));
   }
   const USER_ACTIONS = { uplan: 'plan', uext: 'ext', ulife: 'life', udev: 'dev', ureset: 'reset', urevoke: 'revoke' };
   if (USER_ACTIONS[kind] && isId(parts[2])) {
     const id = parts[2];
     let note;
     try { note = userAction(i.user.id, id, USER_ACTIONS[kind], kind === 'uplan' ? i.values?.[0] : parts[3]); } catch (e) { note = `❌ ${e?.message || e}`; }
-    return upd(userView(id, note));
+    return upd(userView(id, note, i.user.id));
   }
   if (kind === 'uban' && isId(parts[2])) {
     const id = parts[2];
     const banned = needDb().prepare('SELECT banned FROM users WHERE discord_id = ?').get(id)?.banned;
-    if (banned) { let note; try { note = userAction(i.user.id, id, 'unban'); } catch (e) { note = `❌ ${e?.message || e}`; } return upd(userView(id, note)); }
-    if (id === OWNER_ID || (isAdminAccount(id) && i.user.id !== OWNER_ID)) return upd(userView(id, '❌ Diesen User darfst du nicht sperren.'));
+    if (banned) { let note; try { note = userAction(i.user.id, id, 'unban'); } catch (e) { note = `❌ ${e?.message || e}`; } return upd(userView(id, note, i.user.id)); }
+    if (id === OWNER_ID || id === i.user.id) return upd(userView(id, '❌ Diesen User darfst du nicht sperren.', i.user.id));
+    try { needManage(i.user.id, id); } catch (e) { return upd(userView(id, `❌ ${e.message}`, i.user.id)); }
     return i.showModal({ custom_id: `spk:ubanm:${id}`, title: 'User sperren', components: [row([{ type: 4, custom_id: 'confirm', label: 'Grund (sieht der User in der App)', style: 2, required: true, min_length: 2, max_length: 200, placeholder: 'z. B. Key weitergegeben' }])] });
   }
   if (kind === 'usend' && isId(parts[2])) {
     let note;
     try { await sendApp(i.client, parts[2], i.user.id); note = `📨 App per DM an <@${parts[2]}> gesendet.`; } catch (e) { note = /Cannot send|50007/.test(String(e?.message || e)) ? '⚠️ DM nicht möglich (DMs geschlossen).' : `❌ ${e?.message || e}`; }
-    return upd(userView(parts[2], note));
+    return upd(userView(parts[2], note, i.user.id));
   }
-  if (kind === 'new') return upd(createView({ ...DEFAULT }));
+  if (kind === 'new') return upd(createView({ ...DEFAULT }, undefined, i.user.id));
   if (kind === 'm') return upd(manageView(i.user.id, FILTERS[parts[2]] ? parts[2] : 'open', Math.max(0, Number(parts[3]) || 0)));
   if (kind === 'msel') {
     selections.set(i.user.id, { keys: (i.values ?? []).filter(isKey), at: Date.now(), v: crypto.randomBytes(4).toString('hex') });
@@ -905,15 +932,15 @@ async function handle(i) {
 
   if (!CREATE_ACTIONS.has(kind)) return upd(hubView());
   const { action, st } = decode(i.customId);
-  if (action === 'plan' || action === 'days' || action === 'devices') { st[action] = i.values?.[0] ?? st[action]; return upd(createView(st)); }
-  if (action === 'user') { st.user = i.values?.[0] ?? ''; return upd(createView(st)); }
-  if (action === 'count') { st.count = COUNTS[(COUNTS.indexOf(st.count) + 1) % COUNTS.length]; return upd(createView(st)); }
-  if (action === 'prod') { const order = ['sptool', 'skin', 'multi']; st.prod = order[(order.indexOf(st.prod) + 1) % order.length]; return upd(createView(st)); }
+  if (action === 'plan' || action === 'days' || action === 'devices') { st[action] = i.values?.[0] ?? st[action]; return upd(createView(st, undefined, i.user.id)); }
+  if (action === 'user') { st.user = i.values?.[0] ?? ''; return upd(createView(st, undefined, i.user.id)); }
+  if (action === 'count') { st.count = COUNTS[(COUNTS.indexOf(st.count) + 1) % COUNTS.length]; return upd(createView(st, undefined, i.user.id)); }
+  if (action === 'prod') { const order = ['sptool', 'skin', 'multi']; st.prod = order[(order.indexOf(st.prod) + 1) % order.length]; return upd(createView(st, undefined, i.user.id)); }
   if (action === 'cancel') return upd(hubView());
-  if (action === 'again') return upd(createView(st));
+  if (action === 'again') return upd(createView(st, undefined, i.user.id));
   if (action === 'create') {
     let keys;
-    try { keys = createKeys(i.user.id, st); } catch (e) { return upd(createView(st, `❌ Fehler: ${e?.message || e}`)); }
+    try { keys = createKeys(i.user.id, st); } catch (e) { return upd(createView(st, `❌ Fehler: ${e?.message || e}`, i.user.id)); }
     let dm = '';
     if (st.user) {
       try {

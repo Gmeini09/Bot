@@ -27,7 +27,8 @@ const PREFIX = '/api/v1/cloud/';
 const MAX_PROJECT = 3 * 1024 * 1024;
 const MAX_TOTAL = 25 * 1024 * 1024;
 const MAX_COUNT = 100;
-const RANK = { free: 0, premium: 1, creator: 2, developer: 3 };
+// licence levels (Free … Developer), shared with the licence server; found next to this file or one folder up
+const tiers = require(fs.existsSync(path.join(__dirname, 'tiers.cjs')) ? './tiers.cjs' : '../tiers.cjs');
 const ID_RE = /^prj-[a-z0-9-]{3,60}$/;
 const MARKER_DAYS = 60;
 
@@ -68,8 +69,8 @@ const hwidHash = (clientHash) => {
   return salt ? crypto.createHmac('sha256', salt).update(clientHash).digest('hex') : sha256(clientHash);
 };
 const configAdmin = (id) => id === OWNER_ID || String(process.env.SPTOOL_ADMIN_IDS || process.env.ADMIN_DISCORD_IDS || '').split(/[,\s;]+/).includes(id);
-// role admins lose their rights while banned; owner and configured admins never do
-const isAdmin = (u) => configAdmin(u.discord_id) || (u.role === 'admin' && !u.banned);
+// Admin and Developer level (licence or owner-set role); a banned account has no rights, owner/configured admins always do
+const isAdmin = (u) => configAdmin(u.discord_id) || tiers.isStaff(tiers.effectiveTier(openDb(), u.discord_id, configAdmin));
 
 function authUser(req) {
   const d = openDb();
@@ -93,7 +94,7 @@ function authenticate(req) {
   if (!isAdmin(u)) {
     const l = d.prepare('SELECT * FROM licenses WHERE discord_id = ?').get(u.discord_id);
     const active = l && !l.revoked && (l.expires_at == null || l.expires_at > Date.now());
-    if (!active || (RANK[l.plan] ?? 0) < RANK.premium) throw new HttpError(403, 'plan_required', 'SP Tool Cloud needs Premium or higher.');
+    if (!active || !tiers.atLeast(l.plan, 'premium')) throw new HttpError(403, 'plan_required', 'SP Tool Cloud needs Premium or higher.');
   }
   return u.discord_id;
 }

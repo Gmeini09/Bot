@@ -163,7 +163,7 @@ test('ban, owner protection, admin roles, device reset, setup', async () => {
   assert.match(text(await run(OWNER, 'sptool-admin', 'ban', { id: OWNER })), /Owner kann nicht/);
   assert.match(text(await run(OWNER, 'sptool-admin', 'admin', { aktion: 'admin', id: OTHER })), /jetzt SP Tool Admin/);
   assert.match(text(await run(OTHER, 'sptool-admin', 'stats')), /Übersicht/);
-  assert.match(text(await run(OTHER, 'sptool-admin', 'admin', { aktion: 'admin', id: USER })), /nur der Owner/);
+  assert.match(text(await run(OTHER, 'sptool-admin', 'admin', { aktion: 'admin', id: USER })), /nur ein Dev/);
   assert.match(text(await run(OTHER, 'sptool-admin', 'ban', { id: OWNER })), /Owner kann nicht/);
   assert.match(text(await run(OWNER, 'sptool-admin', 'admin', { aktion: 'user', id: OTHER })), /kein Admin mehr/);
   assert.match(text(await run(OTHER, 'sptool-admin', 'stats')), /Nur SP Tool Admins/);
