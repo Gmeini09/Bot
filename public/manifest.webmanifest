@@ -1,0 +1,17 @@
+{
+  "name": "SP Tool – Soundpack-Ersteller für FiveM",
+  "short_name": "SP Tool",
+  "description": "Waffensounds für FiveM-Soundpacks erstellen, bearbeiten und erzeugen.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#08090C",
+  "theme_color": "#0D0F14",
+  "categories": ["music", "utilities", "games"],
+  "icons": [
+    { "src": "assets/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "assets/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "assets/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

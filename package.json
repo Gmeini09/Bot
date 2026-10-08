@@ -1,0 +1,9 @@
+{
+  "name": "sptool-web",
+  "version": "1.9.0",
+  "private": true,
+  "description": "SP Tool web app (phone, tablet, browser) – static files + tiny Node server",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node server.mjs" }
+}
