@@ -5,7 +5,8 @@
 //  • Sessions: random 256-bit bearer tokens, stored only as SHA-256, 30-day expiry, revocable.
 //  • HWID binding: every session belongs to one registered device. Each request must send the
 //    device's HWID hash (X-SPTool-HWID); a token copied to another PC is rejected.
-//    A license allows `max_devices` devices; more devices need an admin reset.
+//    A license allows `max_devices` PCs; more PCs need an admin reset. Phone/web app: one extra slot,
+//    a new phone or browser replaces the previous one.
 //  • Licenses are checked server-side. The client receives an Ed25519-signed ticket that it can
 //    verify offline for a short grace period – it cannot forge or extend it.
 //  • Admins: the owner Discord ID (config.mjs) plus ADMIN_DISCORD_IDS. Every admin action is audited.
@@ -20,6 +21,9 @@ import { createLicenseService, DAY, isSnowflake, LicenseError } from './service.
 import tiers from './tiers.cjs';
 
 const PENDING_TTL = 10 * 60_000;
+// Devices of kind "mobile"/"browser" (phone, web app) use their own slot: one per licence, next to the PCs.
+const WEB_KINDS = ['mobile', 'browser'];
+const WEB_IN = WEB_KINDS.map((k) => `'${k}'`).join(', ');
 
 class HttpError extends LicenseError {}
 
@@ -130,8 +134,18 @@ export function createHandler({ cfg, db, discordUser, now = () => Date.now(), se
         audit(db, du.id, 'login.denied', du.id, { reason: 'device_revoked' });
         return { status: 'error', code: 'device_revoked', message: 'This computer was removed from your account by an admin.' };
       }
+      if (!dev && WEB_KINDS.includes(pending.device_kind)) {
+        // Phone/browser: one per licence on top of the PCs. A new one takes the place of the previous one
+        // (its sessions end), so changing phones or clearing the browser never needs an admin.
+        for (const o of db.prepare(`SELECT id FROM devices WHERE discord_id = ? AND revoked = 0 AND kind IN (${WEB_IN})`).all(du.id)) {
+          db.prepare('UPDATE sessions SET revoked = 1 WHERE device_id = ?').run(o.id);
+          db.prepare('DELETE FROM devices WHERE id = ?').run(o.id);
+          audit(db, du.id, 'device.replaced', o.id, { by: pending.device_name, kind: pending.device_kind });
+        }
+      }
       if (!dev) {
-        const active = db.prepare('SELECT COUNT(*) AS n FROM devices WHERE discord_id = ? AND revoked = 0').get(du.id).n;
+        const active = WEB_KINDS.includes(pending.device_kind) ? 0
+          : db.prepare(`SELECT COUNT(*) AS n FROM devices WHERE discord_id = ? AND revoked = 0 AND kind NOT IN (${WEB_IN})`).get(du.id).n;
         const max = svc.maxDevicesFor(du.id);
         if (active >= max) {
           audit(db, du.id, 'login.denied', du.id, { reason: 'device_limit', active, max });
