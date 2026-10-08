@@ -1,0 +1,28 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'app.turbodesign.sptool'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'app.turbodesign.sptool'
+        minSdk 29            // Android 10+: Downloads via MediaStore without storage permission
+        targetSdk 35
+        versionCode 1
+        versionName '1.9.0'
+        buildConfigField 'String', 'APP_URL', '"https://sp-tool-web-production.up.railway.app/"'
+    }
+    buildFeatures { buildConfig true }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig null   // signed afterwards with the SP Tool release key (kept outside the repo)
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

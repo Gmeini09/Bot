@@ -1,0 +1,36 @@
+# Builds the SP Tool Android app (unsigned release APK) and publishes it as a pre-release.
+# Signing happens outside GitHub with the SP Tool release key, which is never stored in this repository.
+name: Android APK
+on:
+  push:
+    branches: [sptool-web]
+    paths: ['android/**', '.github/workflows/android.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '8.11.1' }
+      - name: Build unsigned release APK
+        working-directory: android
+        run: gradle --no-daemon :app:assembleRelease
+      - name: Collect files (APK + apksigner for signing outside GitHub)
+        run: |
+          mkdir out
+          cp android/app/build/outputs/apk/release/app-release-unsigned.apk out/SPTool-unsigned.apk
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          cp "$BT/lib/apksigner.jar" out/apksigner.jar
+          "$BT/zipalign" -c -P 16 -v 4 out/SPTool-unsigned.apk | tail -1
+          sha256sum out/* | tee out/SHA256SUMS.txt
+      - name: Publish pre-release
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          TAG="android-build-${GITHUB_RUN_NUMBER}"
+          gh release create "$TAG" out/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "SP Tool Android build ${GITHUB_RUN_NUMBER} (unsigned)" --notes "Unsigned build for signing – not for installing."
