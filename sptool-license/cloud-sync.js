@@ -11,6 +11,7 @@
 //   GET  /api/v1/sptool-app/download  (active license) the newest app ZIP
 //   GET  /api/v1/sptool-app/mapping   (signed in) the published stream → slot mapping
 //   POST /api/v1/sptool-app/mapping   (admin) publish a mapping for every app
+//   POST /api/v1/sptool-app/feedback  (signed in) "Falsch erkannt": sound features + right answer (no audio) · GET (admin)
 //
 // Conflict-safe: every write names the revision it is based on; the server never overwrites a newer
 // revision silently. Same login as the license API: session token + hardware ID of the device.
@@ -126,7 +127,7 @@ function readBody(req, max) {
   });
 }
 
-// ── App release hand-off ─────────────────────────────────────────────────────
+// ── App release hand-off
 // An admin's SP Tool uploads its own release ZIP when the bot holds an older version, so every key DM
 // carries the newest app without a manual /sptool-app-datei upload. Same storage as the key panel.
 const APP_PREFIX = '/api/v1/sptool-app/';
@@ -158,7 +159,7 @@ function readRaw(req, max) {
   });
 }
 
-// ── published mapping (which game stream is which weapon slot) ───────────────
+// ── published mapping (which game stream is which weapon slot)
 const MAP_FILE = () => path.join(appDir(), 'mapping.json');
 const MAP_MAX = 2 * 1024 * 1024;
 const FILE_RE = /^F\d{2}$/;
@@ -176,6 +177,21 @@ function cleanMapping(body) {
     seen.set(`${e.file}:${e.stream}`, { file: e.file, stream: e.stream, weapon: e.weapon, slot: e.slot });
   }
   return { version: 1, updatedAt: Date.now(), entries: [...seen.values()] };
+}
+
+// ── detection feedback ("Falsch erkannt"): measured sound features + the right answer, no audio
+const FB_FILE = () => path.join(appDir(), 'detection-feedback.jsonl');
+const FB_MAX = 64 * 1024;
+const FB_FILE_MAX = 8 * 1024 * 1024;
+const FEAT_RE = /^[A-Za-z0-9]{1,24}$/;
+function cleanFeedback(body) {
+  if (!body || body.version !== 1 || !Array.isArray(body.items) || !body.items.length || body.items.length > 50) throw new HttpError(400, 'bad_feedback', 'Not SP Tool feedback.');
+  return body.items.map((it) => {
+    if (!it || !['shot', 'reload'].includes(it.label) || !['shot', 'reload'].includes(it.predicted) || typeof it.inputs !== 'object' || !it.inputs) throw new HttpError(400, 'bad_feedback', 'Invalid feedback item.');
+    const inputs = {};
+    for (const [k, v] of Object.entries(it.inputs).slice(0, 60)) if (FEAT_RE.test(k) && Number.isFinite(v)) inputs[k] = Math.round(v * 1e6) / 1e6;
+    return { label: it.label, predicted: it.predicted, score: Number.isFinite(it.score) ? Math.round(it.score * 1000) / 1000 : null, inputs, app: String(it.app ?? '').slice(0, 20), source: String(it.source ?? '').slice(0, 20) };
+  });
 }
 
 /** Signed-in user who may receive app updates: active license, not banned (admins always). */
@@ -219,6 +235,23 @@ async function handleApp(req, res) {
     try { openDb().prepare('INSERT INTO audit_log (at, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)').run(Date.now(), mu.discord_id, 'mapping.published', null, JSON.stringify({ entries: m.entries.length })); } catch { /* optional */ }
     console.log(`🗺️ SP Tool Zuordnung veröffentlicht: ${m.entries.length} Sounds`);
     return send(res, 200, { stored: true, entries: m.entries.length, updatedAt: m.updatedAt });
+  }
+  if (rest === 'feedback') {
+    const fu = authUser(req);
+    limit(fu.discord_id);
+    if (req.method === 'GET') {
+      if (!isAdmin(fu)) throw new HttpError(403, 'admin_only', 'Only admins can read the feedback.');
+      let lines = [];
+      try { lines = fs.readFileSync(FB_FILE(), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { /* none yet */ }
+      return send(res, 200, { version: 1, items: lines });
+    }
+    if (req.method !== 'POST') throw new HttpError(405, 'method', 'Method not allowed.');
+    const items = cleanFeedback(await readBody(req, FB_MAX));
+    let size = 0; try { size = fs.statSync(FB_FILE()).size; } catch { /* new */ }
+    if (size > FB_FILE_MAX) return send(res, 200, { stored: 0, full: true });
+    fs.mkdirSync(appDir(), { recursive: true });
+    fs.appendFileSync(FB_FILE(), items.map((it) => JSON.stringify({ ...it, by: fu.discord_id, at: Date.now() })).join('\n') + '\n');
+    return send(res, 200, { stored: items.length });
   }
   const u = authUser(req);
   if (!isAdmin(u)) throw new HttpError(403, 'admin_only', 'Only admins can publish the app.');

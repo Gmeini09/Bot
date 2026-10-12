@@ -74,11 +74,10 @@ test('license API is mounted on the bot web server, other paths stay with the bo
   assert.equal(h.ok, true);
   const bot = await (await fetch(`${base}/health`)).json();
   assert.equal(bot.bot, true);
+  // before the bot is ready its application (client) id is unknown: sign-in falls back to the /sptool verbinden code
   const r = await fetch(`${base}/api/v1/auth/discord/start?state=${'s'.repeat(40)}&hwid=${'a'.repeat(64)}`, { redirect: 'manual' });
-  assert.equal(r.status, 302);
-  const loc = r.headers.get('location');
-  assert.match(loc, /^https:\/\/discord\.com\/oauth2\/authorize/);
-  assert.match(decodeURIComponent(loc), /redirect_uri=https:\/\/bot\.example\.app\/api\/v1\/auth\/discord\/callback/);
+  assert.equal(r.status, 200);
+  assert.match(await r.text(), /\/sptool verbinden code:/);
 });
 
 test('signing key and HWID salt are created once on the volume', () => {
@@ -124,6 +123,13 @@ test('client hooks: our commands bypass the bot router; global commands are regi
   assert.deepEqual(posted.map((p) => p.name), ['sptool', 'sptool-admin']);
   assert.ok(posted.every((p) => p.route === '/applications/999999999999999999/commands'));
   assert.equal(lic.state.cfg.discord.clientId, '999999999999999999');
+  // now one-click Discord sign-in works, with the callback on the bot's public address
+  const r = await fetch(`${base}/api/v1/auth/discord/start?state=${'t'.repeat(40)}&hwid=${'a'.repeat(64)}`, { redirect: 'manual' });
+  assert.equal(r.status, 302);
+  const loc = r.headers.get('location');
+  assert.match(loc, /^https:\/\/discord\.com\/oauth2\/authorize/);
+  assert.match(decodeURIComponent(loc), /client_id=999999999999999999/);
+  assert.match(decodeURIComponent(loc), /redirect_uri=https:\/\/bot\.example\.app\/api\/v1\/auth\/discord\/callback/);
 });
 
 test('non-admins cannot use /sptool-admin', async () => {
