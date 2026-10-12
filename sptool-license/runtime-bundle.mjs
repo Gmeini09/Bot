@@ -26,7 +26,9 @@ const report = {};
 for (const [variable, [file, re]] of Object.entries(files)) {
   const src = readFileSync(join(here, file), 'utf8');
   if (!re.test(src)) throw new Error(`${file}: tiers import not found`);
-  const text = src.replace(re, () => inline).replace(/\n+$/, ''); // the variables hold the file without a trailing newline
+  let text = src.replace(re, () => inline).replace(/\n+$/, ''); // the variables hold the file without a trailing newline
+  // cloud-sync: whole-line comments and blank lines are left out too (it has no multi-line strings with such lines)
+  if (variable === 'SPTOOL_RUNTIME_CLOUD_JS') text = text.split('\n').filter((l, i) => i === 0 || (l.trim() && !/^\s*\/\//.test(l))).join('\n');
   writeFileSync(join(out, file), text);
   if (variable === 'SPTOOL_RUNTIME_KEYS_JS') {
     // split between two non-blank characters, so no part starts or ends with whitespace (values may be trimmed)

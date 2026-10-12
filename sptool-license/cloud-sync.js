@@ -149,6 +149,17 @@ function currentApp(product = 'sptool') {
   } catch { return null; }
 }
 const verCmp = (a, b) => { const x = String(a || '0.0.0').split('.').map(Number), y = String(b || '0.0.0').split('.').map(Number); for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); } return 0; };
+// changelog of every pushed version ("Was ist neu?"), newest first – the update window shows all versions a user skipped
+const HIST_FILE = (product) => path.join(appDir(product), 'changelog.json');
+function readHistory(product) { try { const h = JSON.parse(fs.readFileSync(HIST_FILE(product), 'utf8')); return Array.isArray(h) ? h : []; } catch { return []; } }
+function addHistory(product, version, notes) {
+  const h = readHistory(product).filter((e) => e && e.version !== version);
+  h.push({ version, notes, at: Date.now() });
+  h.sort((a, b) => verCmp(b.version, a.version));
+  fs.writeFileSync(`${HIST_FILE(product)}.tmp`, JSON.stringify(h.slice(0, 60)));
+  fs.renameSync(`${HIST_FILE(product)}.tmp`, HIST_FILE(product));
+}
+const historyOf = (product, cur) => { const h = readHistory(product); if (cur?.version && cur.notes && !h.some((e) => e.version === cur.version)) h.unshift({ version: cur.version, notes: cur.notes, at: cur.uploadedAt ?? null }); return h.slice(0, 30); };
 
 function readRaw(req, max) {
   return new Promise((resolve, reject) => {
@@ -216,7 +227,7 @@ async function handleApp(req, res) {
     limit(lu.discord_id);
     const cur = currentApp(product);
     if (!cur) throw new HttpError(404, 'no_release', 'No app version has been published yet.');
-    if (rest === 'latest') return send(res, 200, { version: cur.version ?? null, size: cur.size, sha256: cur.sha256 ?? null, uploadedAt: cur.uploadedAt ?? null, notes: cur.notes ?? '' });
+    if (rest === 'latest') return send(res, 200, { version: cur.version ?? null, size: cur.size, sha256: cur.sha256 ?? null, uploadedAt: cur.uploadedAt ?? null, notes: cur.notes ?? '', history: historyOf(product, cur) });
     const file = path.join(appDir(product), cur.stored);
     res.writeHead(200, { ...HEADERS, 'Content-Type': 'application/zip', 'Content-Length': String(fs.statSync(file).size), 'Content-Disposition': `attachment; filename="${app.zip}"`, 'X-SPTool-Version': String(cur.version ?? ''), 'X-SPTool-SHA256': String(cur.sha256 ?? ''), 'Access-Control-Expose-Headers': 'X-SPTool-Version, X-SPTool-SHA256' });
     fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
@@ -259,7 +270,7 @@ async function handleApp(req, res) {
   limit(u.discord_id);
   if (rest !== 'release') throw new HttpError(404, 'not_found', 'Not found.');
   const cur = currentApp(product);
-  if (req.method === 'GET') return send(res, 200, { version: cur?.version ?? null, size: cur?.size ?? null, uploadedAt: cur?.uploadedAt ?? null, notes: cur?.notes ?? '' });
+  if (req.method === 'GET') return send(res, 200, { version: cur?.version ?? null, size: cur?.size ?? null, uploadedAt: cur?.uploadedAt ?? null, notes: cur?.notes ?? '', history: historyOf(product, cur) });
   if (req.method !== 'POST') throw new HttpError(405, 'method', 'Method not allowed.');
   const version = String(req.headers['x-sptool-version'] || '');
   if (!VER_RE.test(version)) throw new HttpError(400, 'bad_version', 'Invalid version.');
@@ -272,6 +283,7 @@ async function handleApp(req, res) {
     const meta2 = { ...cur, notes };
     fs.writeFileSync(path.join(appDir(product), 'meta.json.tmp'), JSON.stringify(meta2, null, 2));
     fs.renameSync(path.join(appDir(product), 'meta.json.tmp'), path.join(appDir(product), 'meta.json'));
+    addHistory(product, version, notes);
     return send(res, 200, { stored: false, version, notesUpdated: true });
   }
   const latest = currentApp(product); // another upload may have finished while this body was arriving
@@ -285,6 +297,7 @@ async function handleApp(req, res) {
   const meta = { name: app.zip, uploadedName: app.zip, product, stored, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), version, notes, uploadedAt: Date.now(), uploadedBy: u.discord_id, via: 'app' };
   fs.writeFileSync(path.join(appDir(product), 'meta.json.tmp'), JSON.stringify(meta, null, 2));
   fs.renameSync(path.join(appDir(product), 'meta.json.tmp'), path.join(appDir(product), 'meta.json'));
+  addHistory(product, version, notes);
   if (latest && latest.stored !== stored) { try { fs.unlinkSync(path.join(appDir(product), latest.stored)); } catch { /* ignore */ } }
   try { openDb().prepare('INSERT INTO audit_log (at, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)').run(Date.now(), u.discord_id, 'app.uploaded', null, JSON.stringify({ name: app.zip, product, size: buf.length, version, notes: notes.length, via: 'app-push' })); } catch { /* optional */ }
   console.log(`📦 ${app.label} App v${version} verteilt (${(buf.length / 1048576).toFixed(1)} MB) – alle Nutzer bekommen das Update in der App, Key-DMs enthalten diese Version.`);
