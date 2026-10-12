@@ -1727,6 +1727,9 @@ input[type='range']:active::-webkit-slider-thumb { transform: scale(1.3); box-sh
 .update-bar.err { border-color: color-mix(in srgb, var(--error) 50%, transparent); background: color-mix(in srgb, var(--error) 9%, transparent); }
 .update-bar .grow { flex: 1; min-width: 0; }
 .update-bar .progress { margin-top: 8px; }
+.update-prompt { min-width: 0; }
+.update-notes { max-height: 240px; overflow: auto; padding: 10px 12px; margin-bottom: 10px; border-radius: 10px; border: 1px solid var(--border, rgba(255,255,255,.1)); background: color-mix(in srgb, var(--accent, #7c5cff) 6%, transparent); }
+.update-prompt .progress { margin-top: 6px; }
 .update-ic { flex: none; width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; background: var(--accent); color: var(--accent-ink); animation: update-bob 2.4s ease-in-out infinite; }
 .update-bar.err .update-ic { background: var(--error); animation: none; }
 @keyframes update-bob { 50% { transform: translateY(-2px); } }
