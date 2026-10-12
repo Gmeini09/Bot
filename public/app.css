@@ -513,7 +513,7 @@ label.field { display: grid; gap: 6px; font-size: 12.5px; color: var(--text-2); 
   .gen .analysis { grid-template-columns: repeat(2, 1fr) !important; }
 
   /* Settings */
-  .settings { grid-template-columns: 1fr; height: auto; }
+  .settings { grid-template-columns: 1fr; height: auto; align-content: start; }
   .settings-nav { display: flex; gap: 6px; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--border-soft); padding: 10px 12px; }
   .settings-nav .nav-item { width: auto; white-space: nowrap; flex: none; }
   .settings-body { padding: 16px 14px 30px; }
@@ -787,7 +787,7 @@ img.avatar { object-fit: cover; background: var(--input); }
 .brand-hero .brand-emblem { display: none; }
 
 /* ── Install & backups ───────────────────────────────────────────────────── */
-.install-page { max-width: 980px; display: grid; gap: 14px; }
+.install-page { max-width: 980px; display: grid; gap: 14px; align-content: start; }
 .inst-state { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--r-card); border: 1px solid var(--border-soft); background: var(--input); font-size: 13px; }
 .inst-state > div { flex: 1; min-width: 0; }
 .inst-state.ok > svg { color: var(--success); }
@@ -823,6 +823,21 @@ select.select.map-select.on { color: var(--text); border-color: var(--accent-lin
 .cloud-row.warn { border-color: color-mix(in srgb, var(--warning) 40%, transparent) !important; }
 button.sb-item.link-like { background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 0; }
 button.sb-item.link-like:hover { color: var(--text); }
+@media (max-width: 720px) {
+  .inst-state { flex-wrap: wrap; }
+  .inst-state > .btn { margin-left: 28px; }
+}
+
+/* 1.9.7 phone check: nothing may be cut off at 390 px */
+.empty .row { flex-wrap: wrap; justify-content: center; }
+.seg { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.seg button { white-space: nowrap; flex: none; }
+.lib-toolbar .select { flex: none; }
+@media (max-width: 760px) {
+  .inst-state { flex-wrap: wrap; }
+  .inst-state > div { min-width: calc(100% - 40px); }
+  .inst-state > .btn { margin-left: 30px; }
+}
 
 /* ════════════════════════════════════════════════════════════════════════════
    TURBO DESIGN – default look of SP Tool (data-theme="turbo").
@@ -1788,6 +1803,14 @@ input[type='range']:active::-webkit-slider-thumb { transform: scale(1.3); box-sh
 .pair-cmd:hover { box-shadow: 0 0 0 3px rgba(88,101,242,.25); transform: translateY(-1px); }
 .pair-alt { border: 0; background: none; padding: 4px 0; color: var(--text-3); font: inherit; font-size: 12.5px; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .pair-alt:hover { color: var(--text); }
+.changelog { display: grid; gap: 12px; }
+.cl-entry { display: grid; gap: 4px; }
+.cl-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cl-entry ul { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13px; line-height: 1.45; }
+.cl-entry li::marker { color: var(--accent-2); }
+.update-notes .cl-title { display: block; margin-bottom: 8px; }
+.update-notes .changelog { gap: 10px; }
+.set-block .changelog { padding: 12px 14px; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--input); margin-bottom: 8px; }
 
 /* ── "Soundpack in 1 Minute" + base pack chooser ─────────────────────────── */
 .qp-hero { display: flex; align-items: center; gap: 14px; width: 100%; margin: 4px 0 16px; padding: 14px 16px; border-radius: var(--r-card); cursor: pointer; text-align: left; color: var(--text);
@@ -1908,6 +1931,6 @@ input[type='range']:active::-webkit-slider-thumb { transform: scale(1.3); box-sh
 @media (max-width: 600px) { .simple-cards { grid-template-columns: 1fr; } }
 .nav-fold { display: flex; align-items: center; justify-content: space-between; width: 100%; background: none; border: 0; cursor: pointer; font: inherit; color: inherit; text-align: left; }
 .nav-fold:hover { color: var(--text); }
-.nav-fold svg { transform: rotate(-90deg); transition: transform .15s; opacity: .7; }
-.nav-fold svg.open { transform: rotate(0deg); }
+.nav-fold svg { transform: none; transition: transform .15s; opacity: .7; }
+.nav-fold svg.open { transform: rotate(90deg); }
 .link-btn { background: none; border: 0; padding: 0; color: var(--accent-2, #5aa0ff); font: inherit; text-decoration: underline; cursor: pointer; }
