@@ -1,6 +1,6 @@
 // SP Tool service worker: caches the app shell so the PWA works offline.
-// 1.9.7-mv57cms2 is replaced at build time; a new version replaces the old cache.
-const CACHE = 'sptool-1.9.7-mv57cms2';
+// 1.9.8-mv58bclh is replaced at build time; a new version replaces the old cache.
+const CACHE = 'sptool-1.9.8-mv58bclh';
 const SHELL = ['./', 'index.html', 'main.js', 'audio.worker.js', 'app.css', 'manifest.webmanifest',
   'assets/logo.svg', 'assets/icons/icon-192.png', 'assets/icons/icon-512.png', 'assets/icons/maskable-512.png', 'assets/icons/icon-180.png'];
 
