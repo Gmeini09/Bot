@@ -6,8 +6,8 @@
 //   POST /api/v1/cloud/projects/:id          save {baseRev, name, data} – 409 if the cloud changed meanwhile
 //   POST /api/v1/cloud/projects/:id/delete   delete {baseRev} – 409 if the cloud changed meanwhile
 //
-//   GET  /api/v1/sptool-app/release   (admin) stored app version · POST uploads a newer ZIP
-//   GET  /api/v1/sptool-app/latest    (active license) newest version + size + sha256 → in-app update
+//   GET  /api/v1/sptool-app/release   (admin) stored app version · POST pushes a newer ZIP (+ "Was ist neu?") to all users
+//   GET  /api/v1/sptool-app/latest    (active license) newest version + size + sha256 + notes → in-app update
 //   GET  /api/v1/sptool-app/download  (active license) the newest app ZIP
 //   GET  /api/v1/sptool-app/mapping   (signed in) the published stream → slot mapping
 //   POST /api/v1/sptool-app/mapping   (admin) publish a mapping for every app
@@ -216,7 +216,7 @@ async function handleApp(req, res) {
     limit(lu.discord_id);
     const cur = currentApp(product);
     if (!cur) throw new HttpError(404, 'no_release', 'No app version has been published yet.');
-    if (rest === 'latest') return send(res, 200, { version: cur.version ?? null, size: cur.size, sha256: cur.sha256 ?? null, uploadedAt: cur.uploadedAt ?? null });
+    if (rest === 'latest') return send(res, 200, { version: cur.version ?? null, size: cur.size, sha256: cur.sha256 ?? null, uploadedAt: cur.uploadedAt ?? null, notes: cur.notes ?? '' });
     const file = path.join(appDir(product), cur.stored);
     res.writeHead(200, { ...HEADERS, 'Content-Type': 'application/zip', 'Content-Length': String(fs.statSync(file).size), 'Content-Disposition': `attachment; filename="${app.zip}"`, 'X-SPTool-Version': String(cur.version ?? ''), 'X-SPTool-SHA256': String(cur.sha256 ?? ''), 'Access-Control-Expose-Headers': 'X-SPTool-Version, X-SPTool-SHA256' });
     fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
@@ -259,11 +259,21 @@ async function handleApp(req, res) {
   limit(u.discord_id);
   if (rest !== 'release') throw new HttpError(404, 'not_found', 'Not found.');
   const cur = currentApp(product);
-  if (req.method === 'GET') return send(res, 200, { version: cur?.version ?? null, size: cur?.size ?? null, uploadedAt: cur?.uploadedAt ?? null });
+  if (req.method === 'GET') return send(res, 200, { version: cur?.version ?? null, size: cur?.size ?? null, uploadedAt: cur?.uploadedAt ?? null, notes: cur?.notes ?? '' });
   if (req.method !== 'POST') throw new HttpError(405, 'method', 'Method not allowed.');
   const version = String(req.headers['x-sptool-version'] || '');
   if (!VER_RE.test(version)) throw new HttpError(400, 'bad_version', 'Invalid version.');
+  // "Was ist neu?" – shown to every user in the update dialog (URI-encoded header, at most 1000 characters)
+  let notes = '';
+  try { notes = decodeURIComponent(String(req.headers['x-sptool-notes'] || '')).replace(/\r/g, '').trim().slice(0, 1000); } catch { throw new HttpError(400, 'bad_notes', 'Invalid release notes.'); }
   const buf = await readRaw(req, MAX_APP_BYTES);
+  // same version again: only the notes change (e.g. a typo fixed) – the app file stays
+  if (cur && verCmp(version, cur.version) === 0 && req.headers['x-sptool-notes'] !== undefined) {
+    const meta2 = { ...cur, notes };
+    fs.writeFileSync(path.join(appDir(product), 'meta.json.tmp'), JSON.stringify(meta2, null, 2));
+    fs.renameSync(path.join(appDir(product), 'meta.json.tmp'), path.join(appDir(product), 'meta.json'));
+    return send(res, 200, { stored: false, version, notesUpdated: true });
+  }
   const latest = currentApp(product); // another upload may have finished while this body was arriving
   if (latest && verCmp(version, latest.version) <= 0) return send(res, 200, { stored: false, version: latest.version });
   if (cur && verCmp(version, cur.version) <= 0) return send(res, 200, { stored: false, version: cur.version });
@@ -272,19 +282,19 @@ async function handleApp(req, res) {
   fs.mkdirSync(appDir(product), { recursive: true });
   const stored = `app-${Date.now()}.zip`;
   fs.writeFileSync(path.join(appDir(product), stored), buf);
-  const meta = { name: app.zip, uploadedName: app.zip, product, stored, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), version, uploadedAt: Date.now(), uploadedBy: u.discord_id, via: 'app' };
+  const meta = { name: app.zip, uploadedName: app.zip, product, stored, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), version, notes, uploadedAt: Date.now(), uploadedBy: u.discord_id, via: 'app' };
   fs.writeFileSync(path.join(appDir(product), 'meta.json.tmp'), JSON.stringify(meta, null, 2));
   fs.renameSync(path.join(appDir(product), 'meta.json.tmp'), path.join(appDir(product), 'meta.json'));
   if (latest && latest.stored !== stored) { try { fs.unlinkSync(path.join(appDir(product), latest.stored)); } catch { /* ignore */ } }
-  try { openDb().prepare('INSERT INTO audit_log (at, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)').run(Date.now(), u.discord_id, 'app.uploaded', null, JSON.stringify({ name: app.zip, product, size: buf.length, version, via: 'app-auto' })); } catch { /* optional */ }
-  console.log(`📦 ${app.label} App v${version} automatisch übernommen (${(buf.length / 1048576).toFixed(1)} MB) – Key-DMs enthalten jetzt diese Version.`);
+  try { openDb().prepare('INSERT INTO audit_log (at, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)').run(Date.now(), u.discord_id, 'app.uploaded', null, JSON.stringify({ name: app.zip, product, size: buf.length, version, notes: notes.length, via: 'app-push' })); } catch { /* optional */ }
+  console.log(`📦 ${app.label} App v${version} verteilt (${(buf.length / 1048576).toFixed(1)} MB) – alle Nutzer bekommen das Update in der App, Key-DMs enthalten diese Version.`);
   return send(res, 200, { stored: true, version });
 }
 
 const HEADERS = {
   'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
   'Access-Control-Allow-Origin': process.env.CORS_ORIGINS || '*',
-  'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-SPTool-HWID, X-SPTool-Version',
+  'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-SPTool-HWID, X-SPTool-Version, X-SPTool-Notes',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Max-Age': '600',
 };
 const send = (res, status, body) => { res.writeHead(status, HEADERS); res.end(body === '' ? '' : JSON.stringify(body)); };
