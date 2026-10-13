@@ -1,7 +1,7 @@
 'use strict';
 // One-time layout per server: use the owner's own channels and roles, and remove only what the first
 // version of /setup created (matched by stored ID *and* its exact original name, so nothing else is touched).
-const { postAll } = require('./setup');
+const { postAll, postPanel } = require('./setup');
 const { embed } = require('./ui');
 
 const LAYOUTS = {
@@ -21,6 +21,8 @@ const LAYOUTS = {
     staffRoles: ['FOUNDER', 'OWNER'], // matched by name
     newStaffRole: '・MOD 𓇻',
     memberRole: '.gg/xvy',
+    // texts of the ticket types (by id) – applied on every start
+    ticketTypes: { bewerbung: { description: 'Bewirb dich für XVY' } },
     // products for 🛒┇bestellen – added once each (not again if the owner removes one later)
     products: [
       { key: 'thumbnail', name: 'Thumbnail', price: 0, emoji: '📸', description: 'Individuelles Thumbnail' },
@@ -82,11 +84,31 @@ async function seedProducts(guild, g, layout, ctx) {
   return added;
 }
 
+/** Applies the layout's ticket-type texts; refreshes the ticket panel when something changed. */
+async function applyTicketTypes(guild, g, layout, ctx) {
+  let changed = false;
+  for (const [id, patch] of Object.entries(layout.ticketTypes || {})) {
+    const t = g.config.ticketTypes.find((x) => x.id === id);
+    if (!t) continue;
+    for (const [k, v] of Object.entries(patch)) if (t[k] !== v) { t[k] = v; changed = true; }
+  }
+  if (changed) {
+    g.config.ticketTypes = g.config.ticketTypes.map((t) => ({ ...t })); // own copy, not the shared default
+    ctx.store.save();
+    if (g.panels.tickets) await postPanel(guild, g, 'tickets', g.config.supportChannelId, ctx.tickets.panel(g)).catch(() => {});
+  }
+  return changed;
+}
+
 async function applyLayout(guild, ctx) {
   const layout = LAYOUTS[guild.id];
   const g = ctx.store.guild(guild.id);
   if (!layout) return false;
-  if (g.layoutVersion === layout.version) { await seedProducts(guild, g, layout, ctx); return false; }
+  if (g.layoutVersion === layout.version) {
+    await seedProducts(guild, g, layout, ctx);
+    await applyTicketTypes(guild, g, layout, ctx);
+    return false;
+  }
   await guild.roles.fetch().catch(() => {});
   await guild.channels.fetch().catch(() => {});
   const report = [];
@@ -112,6 +134,7 @@ async function applyLayout(guild, ctx) {
 
   g.layoutVersion = layout.version;
   await seedProducts(guild, g, layout, ctx);
+  await applyTicketTypes(guild, g, layout, ctx);
   const panels = await postAll(guild, g, ctx);
   ctx.store.save();
   const summary = [

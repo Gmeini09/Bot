@@ -56,6 +56,7 @@ async function ownServer(world, ctx) {
     channels: { welcomeChannelId: own.welcome.id, verifyChannelId: own.rules.id, shopChannelId: own.infos.id, supportChannelId: own.wishes.id, modLogChannelId: own.modOnly.id, ticketLogChannelId: own.modOnly.id, ticketCategoryId: own.shopCat.id, orderCategoryId: own.shopCat.id },
     staffRoles: ['FOUNDER', 'OWNER'], newStaffRole: '・MOD 𓇻', memberRole: '.gg/xvy',
     products: [{ key: 'thumb', name: 'Thumbnail', price: 0, emoji: '📸' }, { key: 'sp', name: 'Soundpack', price: 0.5, emoji: '🔊' }],
+    ticketTypes: { bewerbung: { description: 'Bewirb dich für XVY' } },
   };
   return { own, old };
 }
@@ -89,6 +90,8 @@ test('layout: uses the own channels and roles, removes only the old setup leftov
   assert.deepEqual(c.staffRoleIds, [own.founder.id, own.owner.id, mod.id]);
   assert.deepEqual(customIds(own.rules.messages.cache.get(g.panels.verify).payload), ['"custom_id":"verify:start"']);
   assert.ok(customIds(own.wishes.messages.cache.get(g.panels.tickets).payload).includes('"custom_id":"ticket:open"'));
+  assert.match(JSON.stringify(own.wishes.messages.cache.get(g.panels.tickets).payload), /Bewerbung\*\* – Bewirb dich für XVY/);
+  assert.equal(require('../src/store').DEFAULT_TICKET_TYPES[2].description, 'Bewirb dich für das Team', 'default not changed');
   assert.ok(customIds(own.infos.messages.cache.get(g.panels.shop).payload).includes('"custom_id":"shop:cart"'));
   assert.ok(ctx.logs.some((l) => /eingerichtet/.test(l.title)));
   const shopText = JSON.stringify(own.infos.messages.cache.get(g.panels.shop).payload);

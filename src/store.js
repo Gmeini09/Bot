@@ -33,7 +33,7 @@ function defaultGuild() {
       supportChannelId: null,
       ticketCategoryId: null,
       ticketLogChannelId: null,
-      ticketTypes: DEFAULT_TICKET_TYPES,
+      ticketTypes: DEFAULT_TICKET_TYPES.map((t) => ({ ...t })),
       shopChannelId: null,
       orderCategoryId: null,
       paymentInfo: 'Die Zahlungsinformationen erhältst du im Bestell-Ticket vom Team.',
