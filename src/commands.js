@@ -19,7 +19,7 @@ const COMMANDS = [
   ]),
   base('config', 'Einstellungen des Bots', P.ADMIN, [
     sub('anzeigen', 'Zeigt alle Einstellungen'),
-    sub('name', 'Name, der in Embeds steht', [opt(T.STRING, 'name', 'z. B. XVY Imperium', { required: true, max_length: 60 })]),
+    sub('name', 'Name, der in Embeds steht', [opt(T.STRING, 'name', 'z. B. XVY Kaiserreich', { required: true, max_length: 60 })]),
     sub('farbe', 'Farbe der Embeds', [opt(T.STRING, 'hex', 'z. B. #c9a227', { required: true, max_length: 9 })]),
     sub('teamrolle', 'Team-Rolle hinzufügen oder entfernen (sieht Tickets und Bestellungen)', [opt(T.ROLE, 'rolle', 'Rolle', { required: true })]),
     sub('mitgliedrolle', 'Rolle nach der Verifizierung', [opt(T.ROLE, 'rolle', 'Rolle', { required: true })]),

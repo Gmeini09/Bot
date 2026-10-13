@@ -1,10 +1,10 @@
-# XVY Imperium Bot
+# XVY Kaiserreich Bot
 
-Discord-Bot für **XVY Imperium**: Verifizierung mit Captcha, Willkommensnachrichten, Ticket-System mit Transkripten, Moderation mit Verwarnungen, Automod gegen Spam und Raids, und ein Shop mit Warenkorb und Bestell-Tickets.
+Discord-Bot für **XVY Kaiserreich**: Verifizierung mit Captcha, Willkommensnachrichten, Ticket-System mit Transkripten, Moderation mit Verwarnungen, Automod gegen Spam und Raids, und ein Shop mit Warenkorb und Bestell-Tickets.
 
 ## Einrichtung (einmalig)
 
-1. **Bot anlegen:** <https://discord.com/developers/applications> → *New Application* → Name „XVY Imperium“.
+1. **Bot anlegen:** <https://discord.com/developers/applications> → *New Application* → Name „XVY Kaiserreich“.
 2. **Bot → Privileged Gateway Intents:** **Server Members Intent** und **Message Content Intent** einschalten → *Save*.
 3. **Bot → Reset Token** → Token kopieren und in Railway beim Dienst als Variable `DISCORD_TOKEN` eintragen.
 4. **Einladen:** Der Bot schreibt nach dem Start den Einladungslink ins Railway-Log. Alternativ:

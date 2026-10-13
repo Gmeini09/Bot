@@ -1,8 +1,8 @@
 {
-  "name": "xvy-imperium-bot",
+  "name": "xvy-kaiserreich-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Discord-Bot für XVY Imperium: Verifizierung, Willkommen, Tickets, Moderation, Schutz und Shop.",
+  "description": "Discord-Bot für XVY Kaiserreich: Verifizierung, Willkommen, Tickets, Moderation, Schutz und Shop.",
   "main": "src/index.js",
   "type": "commonjs",
   "scripts": {

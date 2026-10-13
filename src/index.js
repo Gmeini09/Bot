@@ -1,5 +1,5 @@
 'use strict';
-// XVY Imperium Bot – entry point: login, command registration, event routing, health endpoint.
+// XVY Kaiserreich Bot – entry point: login, command registration, event routing, health endpoint.
 const http = require('http');
 const path = require('path');
 const { Client, GatewayIntentBits, Partials, Events, AuditLogEvent } = require('discord.js');
@@ -63,9 +63,16 @@ async function registerCommands(guild) {
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`✅ Eingeloggt als ${c.user.tag} – ${c.guilds.cache.size} Server`);
-  c.user.setPresence({ activities: [{ name: 'XVY Imperium', type: 3 }], status: 'online' });
+  c.user.setPresence({ activities: [{ name: 'XVY Kaiserreich', type: 3 }], status: 'online' });
+  // the bot account itself: "… Imperium" → "… Kaiserreich" (Discord allows only a few name changes per hour)
+  if (/imperium/i.test(c.user.username)) {
+    const name = c.user.username.replace(/imperium/i, 'Kaiserreich');
+    await c.user.setUsername(name).then(() => console.log(`✏️ Bot-Name: ${name}`)).catch((e) => console.error('❌ Bot-Name nicht geändert:', e.message));
+  }
   for (const guild of c.guilds.cache.values()) {
     await registerCommands(guild);
+    const me = guild.members.me;
+    if (me?.nickname && /imperium/i.test(me.nickname)) await me.setNickname(me.nickname.replace(/imperium/i, 'Kaiserreich')).catch((e) => console.error('❌ Spitzname nicht geändert:', e.message));
     store.guild(guild.id);
     await adopt.applyLayout(guild, ctx).catch((e) => console.error(`❌ Layout für ${guild.name} fehlgeschlagen:`, e));
   }
@@ -131,7 +138,7 @@ client.on(Events.InteractionCreate, async (i) => {
   } catch (e) {
     console.error('❌ Interaktion fehlgeschlagen:', i.customId || i.commandName, e);
     if (i.isAutocomplete?.()) return;
-    const g = i.guildId ? store.guild(i.guildId) : { config: { color: 0xe74c3c, name: 'XVY Imperium' } };
+    const g = i.guildId ? store.guild(i.guildId) : { config: { color: 0xe74c3c, name: 'XVY Kaiserreich' } };
     const payload = fail(g, `Da ist etwas schiefgelaufen: ${String(e.message || e).slice(0, 300)}`);
     try {
       if (i.deferred || i.replied) await i.followUp(payload); else await i.reply(payload);

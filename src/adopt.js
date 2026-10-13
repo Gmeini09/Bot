@@ -8,6 +8,8 @@ const LAYOUTS = {
   // XVY Imerpium
   '1553861110866911253': {
     version: 1,
+    // server name in embeds/panels – replaces only these old names, never one chosen with /config name
+    name: 'XVY Kaiserreich', renameFrom: ['XVY Imperium'],
     channels: {
       welcomeChannelId: '1553861111869083713', // ✋┇wilkommen
       verifyChannelId: '1553861111869083715', // 📋┇rules
@@ -103,10 +105,23 @@ async function applyTicketTypes(guild, g, layout, ctx) {
   return changed;
 }
 
+/** Renames the server in embeds once (e.g. XVY Imperium → XVY Kaiserreich) and refreshes the panels. */
+async function applyName(guild, g, layout, ctx) {
+  if (!layout.name || !(layout.renameFrom || []).includes(g.config.name)) return false;
+  const old = g.config.name;
+  g.config.name = layout.name;
+  ctx.store.save();
+  await ctx.refreshPanels(guild, g);
+  console.log(`✏️ Name geändert: ${old} → ${layout.name}`);
+  return true;
+}
+
 async function applyLayout(guild, ctx) {
   const layout = LAYOUTS[guild.id];
   const g = ctx.store.guild(guild.id);
   if (!layout) return false;
+  if (g.layoutVersion === layout.version) await applyName(guild, g, layout, ctx);
+  else if (layout.name && (layout.renameFrom || []).includes(g.config.name)) g.config.name = layout.name; // panels are posted below
   for (const [key, id] of Object.entries(layout.fillChannels || {})) if (!g.config[key] && guild.channels.cache.get(id)) { g.config[key] = id; ctx.store.save(); }
   if (g.layoutVersion === layout.version) {
     await seedProducts(guild, g, layout, ctx);
@@ -151,4 +166,4 @@ async function applyLayout(guild, ctx) {
   return true;
 }
 
-module.exports = { applyLayout, seedProducts, LAYOUTS, OLD_CHANNELS, OLD_ROLES };
+module.exports = { applyLayout, applyName, seedProducts, LAYOUTS, OLD_CHANNELS, OLD_ROLES };

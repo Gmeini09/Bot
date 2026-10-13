@@ -14,7 +14,7 @@ const DEFAULT_TICKET_TYPES = [
 function defaultGuild() {
   return {
     config: {
-      name: 'XVY Imperium',
+      name: 'XVY Kaiserreich',
       color: 0xc9a227,
       staffRoleIds: [], // team roles: see tickets/orders, exempt from automod
       memberRoleId: null,

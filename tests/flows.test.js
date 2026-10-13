@@ -379,3 +379,15 @@ test('config: settings change and panels refresh', async (t) => {
   await config.onCommand(show, ctx);
   assert.match(lastText(show), /Automod/);
 });
+
+test('layout: renames XVY Imperium to XVY Kaiserreich once and refreshes the panels, keeps an own name', async (t) => {
+  const { world, ctx, g, own } = await setUp(t);
+  Object.assign(adopt.LAYOUTS[world.guild.id], { name: 'XVY Kaiserreich', renameFrom: ['XVY Imperium'] });
+  g.config.name = 'XVY Imperium';
+  await adopt.applyLayout(world.guild, ctx);
+  assert.equal(g.config.name, 'XVY Kaiserreich');
+  assert.match(JSON.stringify(own.rules.messages.cache.get(g.panels.verify).payload), /XVY Kaiserreich/);
+  g.config.name = 'Mein Name';
+  await adopt.applyLayout(world.guild, ctx);
+  assert.equal(g.config.name, 'Mein Name', 'a name chosen with /config name stays');
+});
