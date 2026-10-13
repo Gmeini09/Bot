@@ -70,6 +70,7 @@ const SELLING = {
     { name: '🚗・FIVEM KÄUFER', key: 'buyer_fivem', color: 0xfee75c, hoist: false, permissions: [] },
     { name: '🤖・BOT KÄUFER', key: 'buyer_bot', color: 0x5865f2, hoist: false, permissions: [] },
     { name: '📦・BUNDLE KÄUFER', key: 'buyer_bundle', color: 0xe67e22, hoist: false, permissions: [] },
+    { name: '🎧・SP TOOL KÄUFER', key: 'buyer_sptool', color: 0x3b82f6, hoist: false, permissions: [] },
     { name: '🥉・STAMMKUNDE BRONZE', key: 'loyalty_bronze', color: 0xcd7f32, hoist: false, permissions: [] },
     { name: '🥈・STAMMKUNDE SILBER', key: 'loyalty_silver', color: 0xc0c0c0, hoist: false, permissions: [] },
     { name: '🥇・STAMMKUNDE GOLD', key: 'loyalty_gold', color: 0xffd700, hoist: true, permissions: [] },
@@ -89,7 +90,10 @@ const PRODUCT_TYPES = {
   fivem: { label: 'FiveM Asset', emoji: '🚗', roleKey: 'buyer_fivem', revisions: 1, delivery: 'nach Umfang', etaDays: 4 },
   bot: { label: 'Custom Discord Bot', emoji: '🤖', roleKey: 'buyer_bot', revisions: 2, delivery: 'nach Umfang', etaDays: 4 },
   bundle: { label: 'Bundle / Komplettpaket', emoji: '📦', roleKey: 'buyer_bundle', revisions: 2, delivery: 'nach Umfang', etaDays: 4 },
+  sptool: { label: 'SP Tool (Soundpack Tool)', emoji: '🎧', roleKey: 'buyer_sptool', revisions: 0, delivery: 'Lizenz-Key per DM', etaDays: 1 },
 };
+// SP Tool is a licence, not a custom order: the catalog shows its plans (same prices as the website) until a fixed price is set.
+const SPTOOL_PLANS = [['Woche', 10], ['Monat', 15], ['Lifetime', 20]];
 
 const SUPPORT_TYPES = {
   general: { label: 'Allgemeiner Support', emoji: '🎫' },
@@ -2685,6 +2689,7 @@ async function seedSellingServer(structure) {
     new ButtonBuilder().setCustomId('selling_cart_add:thumbnail').setLabel('Thumbnail +').setEmoji('🖼️').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('selling_cart_add:nve').setLabel('NVE +').setEmoji('🌆').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('selling_cart_add:soundpack').setLabel('Soundpack +').setEmoji('🔊').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('selling_cart_add:sptool').setLabel('SP Tool +').setEmoji('🎧').setStyle(ButtonStyle.Primary),
   );
   const orderRow2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('selling_cart_add:grafik').setLabel('Design +').setEmoji('🎨').setStyle(ButtonStyle.Secondary),
@@ -4666,6 +4671,7 @@ function catalogRows() {
       new ButtonBuilder().setCustomId('selling_cart_add:thumbnail').setLabel('Thumbnail +').setEmoji('🖼️').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('selling_cart_add:nve').setLabel('NVE +').setEmoji('🌆').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('selling_cart_add:soundpack').setLabel('Soundpack +').setEmoji('🔊').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('selling_cart_add:sptool').setLabel('SP Tool +').setEmoji('🎧').setStyle(ButtonStyle.Primary),
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('selling_cart_add:grafik').setLabel('Design +').setEmoji('🎨').setStyle(ButtonStyle.Secondary),
@@ -4683,7 +4689,9 @@ async function refreshShopCatalog(guild, data) {
   const lines = Object.entries(PRODUCT_TYPES).map(([key, item]) => {
     const cfg = productConfig(data, key);
     const status = cfg.enabled ? '🟢' : '🔴';
-    const price = cfg.price !== null && cfg.price !== undefined && cfg.price !== '' && Number.isFinite(Number(cfg.price)) ? formatEuro(cfg.price) : 'Preis im Ticket';
+    const fixed = cfg.price !== null && cfg.price !== undefined && cfg.price !== '' && Number.isFinite(Number(cfg.price));
+    if (key === 'sptool') return `${status} ${item.emoji} **${item.label}**\n> ${fixed ? formatEuro(cfg.price) : SPTOOL_PLANS.map(([label, eur]) => `${label} ${formatEuro(eur)}`).join(' · ')} • ${item.delivery}`;
+    const price = fixed ? formatEuro(cfg.price) : 'Preis im Ticket';
     return `${status} ${item.emoji} **${item.label}**\n> ${price} • ETA ca. ${cfg.etaDays || item.etaDays} Tag(e)`;
   }).join('\n\n');
   const payload = {
