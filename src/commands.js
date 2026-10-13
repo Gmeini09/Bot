@@ -11,7 +11,7 @@ const user = (req = true) => opt(T.USER, 'nutzer', 'Mitglied', { required: req }
 const reason = (req = false) => opt(T.STRING, 'grund', 'Grund', { required: req, max_length: 400 });
 
 const COMMANDS = [
-  base('setup', 'Legt Rollen, Kanäle und Panels für Verifizierung, Tickets, Shop und Logs an', P.ADMIN),
+  base('setup', 'Postet die Panels in die eingestellten Kanäle und zeigt die Einrichtung', P.ADMIN),
   base('panel', 'Postet ein Panel neu', P.ADMIN, [
     opt(T.STRING, 'art', 'Welches Panel', { required: true, choices: [
       { name: 'Verifizierung', value: 'verify' }, { name: 'Tickets', value: 'tickets' }, { name: 'Shop', value: 'shop' },
@@ -21,8 +21,18 @@ const COMMANDS = [
     sub('anzeigen', 'Zeigt alle Einstellungen'),
     sub('name', 'Name, der in Embeds steht', [opt(T.STRING, 'name', 'z. B. XVY Imperium', { required: true, max_length: 60 })]),
     sub('farbe', 'Farbe der Embeds', [opt(T.STRING, 'hex', 'z. B. #c9a227', { required: true, max_length: 9 })]),
-    sub('teamrolle', 'Rolle, die Tickets und Bestellungen sieht', [opt(T.ROLE, 'rolle', 'Team-Rolle', { required: true })]),
-    sub('mitgliedrolle', 'Rolle nach der Verifizierung', [opt(T.ROLE, 'rolle', 'Mitglied-Rolle', { required: true })]),
+    sub('teamrolle', 'Team-Rolle hinzufügen oder entfernen (sieht Tickets und Bestellungen)', [opt(T.ROLE, 'rolle', 'Rolle', { required: true })]),
+    sub('mitgliedrolle', 'Rolle nach der Verifizierung', [opt(T.ROLE, 'rolle', 'Rolle', { required: true })]),
+    sub('kundenrolle', 'Rolle nach einer gelieferten Bestellung (leer = keine)', [opt(T.ROLE, 'rolle', 'Rolle')]),
+    sub('kanal', 'Kanal für ein Panel, die Logs oder die Ticket-Kategorie', [
+      opt(T.STRING, 'art', 'Wofür', { required: true, choices: [
+        { name: 'Willkommen', value: 'welcomeChannelId' }, { name: 'Verifizieren (Panel)', value: 'verifyChannelId' },
+        { name: 'Shop (Panel)', value: 'shopChannelId' }, { name: 'Tickets (Panel)', value: 'supportChannelId' },
+        { name: 'Mod-Log', value: 'modLogChannelId' }, { name: 'Ticket-Log', value: 'ticketLogChannelId' },
+        { name: 'Kategorie für Tickets', value: 'ticketCategoryId' }, { name: 'Kategorie für Bestellungen', value: 'orderCategoryId' },
+      ] }),
+      opt(T.CHANNEL, 'kanal', 'Kanal oder Kategorie', { required: true, channel_types: [0, 4, 5] }),
+    ]),
     sub('zahlung', 'Zahlungsinfos, die in jeder Bestellung stehen', [opt(T.STRING, 'text', 'z. B. PayPal: name@mail.at (Freunde & Familie)', { required: true, max_length: 900 })]),
     sub('willkommen', 'Willkommenstext ({user}, {server}, {verify}, {count})', [opt(T.STRING, 'text', 'Text', { required: true, max_length: 900 })]),
     sub('regeln', 'Regeltext im Verifizierungs-Panel (\\n = neue Zeile)', [opt(T.STRING, 'text', 'Regeln', { required: true, max_length: 3500 })]),

@@ -2,7 +2,7 @@
 // Shop: catalog panel with a product menu, cart, checkout → private order channel; the team sets the status.
 const { embed, button, row, select, modal, ok, fail, BTN } = require('./ui');
 const { money, parsePrice, cartLines, cartTotal, addToCart, slug, pad, validEmoji, ORDER_STATUS, transcript } = require('./logic');
-const { privateChannel, isStaff, fetchAll } = require('./tickets');
+const { privateChannel, isStaff, fetchAll, staffPing } = require('./tickets');
 const { postPanel } = require('./setup');
 
 const enabledProducts = (g) => Object.values(g.products).filter((p) => p.enabled !== false).sort((a, b) => a.createdAt - b.createdAt);
@@ -117,8 +117,8 @@ async function onOrder(interaction, ctx) {
     return interaction.editReply(fail(g, `Bestellung konnte nicht erstellt werden: ${e.message}`));
   }
   const o = { no, id: `O${pad(no)}`, userId: interaction.user.id, items: lines, total: cartTotal(lines), notes: interaction.fields.getTextInputValue('notes')?.trim() || '', status: 'open', channelId: ch.id, createdAt: Date.now(), messageId: null };
-  const staffPing = g.config.staffRoleId ? `<@&${g.config.staffRoleId}>` : '';
-  const msg = await ch.send({ content: `<@${o.userId}> ${staffPing}`.trim(), embeds: [orderEmbed(g, o)], components: orderButtons(o), allowedMentions: { users: [o.userId], roles: g.config.staffRoleId ? [g.config.staffRoleId] : [] } });
+  const ping = staffPing(g, interaction.guild);
+  const msg = await ch.send({ content: `<@${o.userId}> ${ping.text}`.trim(), embeds: [orderEmbed(g, o)], components: orderButtons(o), allowedMentions: { users: [o.userId], roles: ping.roles } });
   o.messageId = msg.id;
   g.orders[o.id] = o;
   delete g.carts[interaction.user.id];

@@ -4,7 +4,10 @@ const { embed, button, row, select, modal, ok, fail, BTN } = require('./ui');
 const { transcript, slug, pad } = require('./logic');
 const { F, TEXT } = require('./setup');
 
-const isStaff = (member, g) => !!member && (member.roles?.cache?.has(g.config.staffRoleId) || member.permissions?.has?.(1n << 5n));
+const staffIds = (g, guild) => (g.config.staffRoleIds || []).filter((id) => !guild || guild.roles.cache.get(id));
+const isStaff = (member, g) => !!member && (staffIds(g).some((id) => member.roles?.cache?.has(id)) || member.permissions?.has?.(1n << 5n));
+/** Mention text + allowedMentions roles for the team. */
+const staffPing = (g, guild) => { const ids = staffIds(g, guild); return { text: ids.map((id) => `<@&${id}>`).join(' '), roles: ids }; };
 
 function panel(g) {
   const types = g.config.ticketTypes;
@@ -31,7 +34,7 @@ async function privateChannel(guild, g, parentId, name, userId, topic) {
     { id: userId, type: 1, allow: [F.VIEW, F.SEND, F.HISTORY, F.ATTACH, F.EMBED] },
     { id: me.id, type: 1, allow: [F.VIEW, F.SEND, F.HISTORY, F.ATTACH, F.EMBED, F.MANAGE_MESSAGES, F.MANAGE_CHANNELS] },
   ];
-  if (g.config.staffRoleId && guild.roles.cache.get(g.config.staffRoleId)) overwrites.push({ id: g.config.staffRoleId, type: 0, allow: [F.VIEW, F.SEND, F.HISTORY, F.ATTACH, F.EMBED, F.MANAGE_MESSAGES] });
+  for (const id of staffIds(g, guild)) overwrites.push({ id, type: 0, allow: [F.VIEW, F.SEND, F.HISTORY, F.ATTACH, F.EMBED, F.MANAGE_MESSAGES] });
   const parent = parentId && guild.channels.cache.get(parentId) ? parentId : null;
   return guild.channels.create({ name, type: TEXT, parent, topic: topic?.slice(0, 1024), permissionOverwrites: overwrites, reason: 'XVY-Bot' });
 }
@@ -67,16 +70,16 @@ async function onCreate(interaction, ctx) {
   }
   g.tickets[ch.id] = { no, userId: interaction.user.id, type: type.id, topic: topic.slice(0, 1000), openedAt: Date.now(), claimedBy: null };
   ctx.store.save();
-  const staffPing = g.config.staffRoleId ? `<@&${g.config.staffRoleId}>` : '';
+  const ping = staffPing(g, interaction.guild);
   await ch.send({
-    content: `<@${interaction.user.id}> ${staffPing}`.trim(),
+    content: `<@${interaction.user.id}> ${ping.text}`.trim(),
     embeds: [embed(g, {
       title: `${type.emoji} ${type.label} #${pad(no)}`,
       description: `Danke, <@${interaction.user.id}>! Das Team meldet sich so schnell wie möglich.\n\n**Anliegen**\n${topic}`,
       fields: [{ name: 'Erstellt von', value: `<@${interaction.user.id}>`, inline: true }, { name: 'Art', value: type.label, inline: true }],
     })],
     components: [row(button('ticket:claim', 'Übernehmen', BTN.primary, '🙋'), button('ticket:close', 'Schließen', BTN.danger, '🔒'))],
-    allowedMentions: { users: [interaction.user.id], roles: g.config.staffRoleId ? [g.config.staffRoleId] : [] },
+    allowedMentions: { users: [interaction.user.id], roles: ping.roles },
   });
   return interaction.editReply(ok(g, `Dein Ticket ist offen: ${ch}`));
 }
@@ -172,4 +175,4 @@ async function onCommand(interaction, ctx) {
   return interaction.reply({ embeds: [embed(g, { description: `➖ <@${u.id}> wurde aus dem Ticket entfernt.`, timestamp: false })] });
 }
 
-module.exports = { panel, onSelect, onCreate, onClaim, onCloseButton, onCloseConfirm, onCommand, closeTicket, privateChannel, isStaff, fetchAll };
+module.exports = { panel, onSelect, onCreate, onClaim, onCloseButton, onCloseConfirm, onCommand, closeTicket, privateChannel, isStaff, staffIds, staffPing, fetchAll };

@@ -12,8 +12,8 @@ function show(g) {
   return embed(g, {
     title: `⚙️ Einstellungen – ${c.name}`,
     fields: [
-      { name: 'Rollen', value: `Team: ${ro(c.staffRoleId)}\nMitglied: ${ro(c.memberRoleId)}\nKunde: ${ro(c.customerRoleId)}`, inline: true },
-      { name: 'Kanäle', value: `Willkommen: ${ch(c.welcomeChannelId)}\nVerifizieren: ${ch(c.verifyChannelId)}\nShop: ${ch(c.shopChannelId)}\nSupport: ${ch(c.supportChannelId)}\nMod-Log: ${ch(c.modLogChannelId)}\nTicket-Log: ${ch(c.ticketLogChannelId)}`, inline: true },
+      { name: 'Rollen', value: `Team: ${(c.staffRoleIds || []).map(ro).join(' ') || '–'}\nVerifiziert: ${ro(c.memberRoleId)}\nKunde: ${ro(c.customerRoleId)}`, inline: true },
+      { name: 'Kanäle', value: `Willkommen: ${ch(c.welcomeChannelId)}\nVerifizieren: ${ch(c.verifyChannelId)}\nShop: ${ch(c.shopChannelId)}\nTickets: ${ch(c.supportChannelId)}\nMod-Log: ${ch(c.modLogChannelId)}\nTicket-Log: ${ch(c.ticketLogChannelId)}\nTicket-Kategorie: ${ch(c.ticketCategoryId)}\nBestell-Kategorie: ${ch(c.orderCategoryId)}`, inline: true },
       { name: 'Verifizierung', value: `Captcha: ${onOff(c.captcha)}` },
       { name: 'Automod', value: `Gesamt: ${onOff(a.enabled)} · Spam: ${onOff(a.spam)} · Einladungen: ${onOff(a.invites)}\nMax. Erwähnungen: ${a.maxMentions} · Timeout ab ${a.warnTimeoutAt || '–'} Verwarnungen\nMindestalter: ${a.minAccountAgeDays ? `${a.minAccountAgeDays} Tage` : 'aus'} · Raid ab ${a.raidJoins} Beitritten in ${a.raidSeconds} s` },
       { name: 'Zahlung', value: c.paymentInfo },
@@ -33,7 +33,19 @@ async function onCommand(interaction, ctx) {
     const col = parseColor(o.getString('hex', true));
     if (col === null) return interaction.reply(fail(g, 'Ungültige Farbe – z. B. `#c9a227`.'));
     c.color = col;
-  } else if (sub === 'teamrolle') c.staffRoleId = o.getRole('rolle', true).id;
+  } else if (sub === 'teamrolle') {
+    const id = o.getRole('rolle', true).id;
+    c.staffRoleIds = (c.staffRoleIds || []).includes(id) ? c.staffRoleIds.filter((x) => x !== id) : [...(c.staffRoleIds || []), id];
+  } else if (sub === 'kundenrolle') c.customerRoleId = o.getRole('rolle')?.id ?? null;
+  else if (sub === 'kanal') {
+    const key = o.getString('art', true);
+    const chan = o.getChannel('kanal', true);
+    const wantsCategory = key === 'ticketCategoryId' || key === 'orderCategoryId';
+    if (wantsCategory !== (chan.type === 4)) return interaction.reply(fail(g, wantsCategory ? 'Bitte eine Kategorie wählen.' : 'Bitte einen Textkanal wählen, keine Kategorie.'));
+    c[key] = chan.id;
+    const panel = { verifyChannelId: 'verify', shopChannelId: 'shop', supportChannelId: 'tickets' }[key];
+    if (panel) delete g.panels[panel]; // the panel is posted in the new channel
+  }
   else if (sub === 'mitgliedrolle') c.memberRoleId = o.getRole('rolle', true).id;
   else if (sub === 'zahlung') c.paymentInfo = o.getString('text', true).replace(/\\n/g, '\n');
   else if (sub === 'willkommen') c.welcomeText = o.getString('text', true).replace(/\\n/g, '\n');
@@ -49,7 +61,7 @@ async function onCommand(interaction, ctx) {
   }
   ctx.store.save();
   // texts that appear in panels → refresh them
-  if (['name', 'farbe', 'regeln'].includes(sub)) await ctx.refreshPanels(interaction.guild, g);
+  if (['name', 'farbe', 'regeln', 'kanal', 'mitgliedrolle'].includes(sub)) await ctx.refreshPanels(interaction.guild, g);
   return interaction.reply({ ...ok(g, 'Gespeichert.'), embeds: [ok(g, 'Gespeichert.').embeds[0], show(g)] });
 }
 

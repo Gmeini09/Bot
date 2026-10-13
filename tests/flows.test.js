@@ -13,6 +13,7 @@ const tickets = require('../src/tickets');
 const shop = require('../src/shop');
 const moderation = require('../src/moderation');
 const config = require('../src/config');
+const adopt = require('../src/adopt');
 
 function makeCtx(world) {
   const store = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'xvy-flow-')));
@@ -20,45 +21,101 @@ function makeCtx(world) {
   const ctx = {
     client: world.client, store, logs, verify, tickets, shop,
     async log(guild, e) { logs.push(e); },
-    async refreshPanels(guild, g) {
-      await setup.postPanel(guild, g, 'verify', g.config.verifyChannelId, verify.panel(g));
-      await setup.postPanel(guild, g, 'shop', g.config.shopChannelId, shop.panel(g));
-    },
+    async refreshPanels(guild, g) { await setup.postAll(guild, g, ctx); },
   };
   return ctx;
 }
 const customIds = (payload) => JSON.stringify(payload.components || []).match(/"custom_id":"[^"]+"/g) || [];
 
+/** A server like XVY Imerpium: own roles and channels, plus what the first /setup version left behind. */
+async function ownServer(world, ctx) {
+  const G = world.guild;
+  const mk = (name, type = 0, parent) => G.channels.create({ name, type, parent });
+  const role = (name, position) => G.roles.create({ name }).then((r) => { r.position = position; return r; });
+  const own = {
+    founder: await role('・FOUNDER 𓇻', 30), owner: await role('・OWNER 𓇻', 29), gg: await role('・.gg/xvy 𓇻', 10),
+    shopCat: await mk('।︱Shop︱।', 4), modOnly: await mk('mod-only'),
+  };
+  Object.assign(own, { welcome: await mk('✋┇wilkommen'), rules: await mk('📋┇rules'), infos: await mk('❗┇infos', 0, own.shopCat.id), wishes: await mk('🥳┇wünsche', 0, own.shopCat.id) });
+  const g = ctx.store.guild(G.id);
+  const oldStart = await mk('📌 START', 4), oldTeamCat = await mk('🔒 TEAM', 4), oldShopCat = await mk('🛒 SHOP', 4);
+  const old = {
+    team: await G.roles.create({ name: '🛡️ Team' }), member: await G.roles.create({ name: '✅ Mitglied' }), kunde: await G.roles.create({ name: '💎 Kunde' }),
+    welcome: await mk('👋・willkommen', 0, oldStart.id), verify: await mk('✅・verifizieren', 0, oldStart.id), shop: await mk('🛍️・shop', 0, oldShopCat.id),
+    support: await mk('🎫・support', 0, oldShopCat.id), modLog: await mk('🛡️・mod-log', 0, oldTeamCat.id), ticketLog: await mk('📁・ticket-log', 0, oldTeamCat.id),
+    tickets: await mk('🎫 TICKETS', 4), orders: await mk('📦 BESTELLUNGEN', 4), oldStart, oldTeamCat, oldShopCat,
+  };
+  own.userInOldCat = await mk('mein-kanal', 0, oldShopCat.id); // an own channel in an old category keeps the category
+  Object.assign(g.config, {
+    staffRoleIds: [old.team.id], memberRoleId: old.member.id, customerRoleId: old.kunde.id,
+    welcomeChannelId: old.welcome.id, verifyChannelId: old.verify.id, shopChannelId: old.shop.id, supportChannelId: old.support.id,
+    modLogChannelId: old.modLog.id, ticketLogChannelId: old.ticketLog.id, ticketCategoryId: old.tickets.id, orderCategoryId: old.orders.id,
+  });
+  adopt.LAYOUTS[G.id] = {
+    version: 1,
+    channels: { welcomeChannelId: own.welcome.id, verifyChannelId: own.rules.id, shopChannelId: own.infos.id, supportChannelId: own.wishes.id, modLogChannelId: own.modOnly.id, ticketLogChannelId: own.modOnly.id, ticketCategoryId: own.shopCat.id, orderCategoryId: own.shopCat.id },
+    staffRoles: ['FOUNDER', 'OWNER'], newStaffRole: '・MOD 𓇻', memberRole: '.gg/xvy',
+  };
+  return { own, old };
+}
+
 async function setUp(t) {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const world = makeWorld();
   const ctx = makeCtx(world);
-  const i = interaction(world, world.owner, 'command', { commandName: 'setup' });
-  await setup.runSetup(i, ctx);
-  return { world, ctx, g: ctx.store.guild(world.guild.id) };
+  const { own, old } = await ownServer(world, ctx);
+  await adopt.applyLayout(world.guild, ctx);
+  const g = ctx.store.guild(world.guild.id);
+  const staffRole = world.guild.roles.cache.get(g.config.staffRoleIds[2]); // ・MOD
+  return { world, ctx, g, own, old, staffRole };
 }
 
-test('setup creates roles, channels and all three panels; running it again creates nothing new', async (t) => {
-  const { world, ctx, g } = await setUp(t);
-  const c = g.config;
-  for (const k of ['staffRoleId', 'memberRoleId', 'customerRoleId', 'welcomeChannelId', 'verifyChannelId', 'shopChannelId', 'supportChannelId', 'ticketCategoryId', 'orderCategoryId', 'modLogChannelId', 'ticketLogChannelId']) assert.ok(c[k], k);
-  const verifyCh = world.guild.channels.cache.get(c.verifyChannelId);
-  const panelMsg = verifyCh.messages.cache.get(g.panels.verify);
-  assert.deepEqual(customIds(panelMsg.payload), ['"custom_id":"verify:start"']);
-  assert.ok(customIds(world.guild.channels.cache.get(c.supportChannelId).messages.cache.get(g.panels.tickets).payload).includes('"custom_id":"ticket:open"'));
-  assert.ok(customIds(world.guild.channels.cache.get(c.shopChannelId).messages.cache.get(g.panels.shop).payload).includes('"custom_id":"shop:cart"'));
-  // staff-only channels hide from @everyone
-  const modLog = world.guild.channels.cache.get(c.modLogChannelId);
-  assert.ok(modLog.overwrites.some((o) => o.id === world.guild.id && o.deny?.includes(1n << 10n)));
-  const channels = world.guild.channels.cache.size, roles = world.guild.roles.cache.size;
-  await setup.runSetup(interaction(world, world.owner, 'command', { commandName: 'setup' }), ctx);
-  assert.equal(world.guild.channels.cache.size, channels);
-  assert.equal(world.guild.roles.cache.size, roles);
-  assert.equal(panelMsg.edits, 1, 'panel edited in place, not posted twice');
+test('layout: uses the own channels and roles, removes only the old setup leftovers, posts panels, runs once', async (t) => {
+  const { world, ctx, g, own, old } = await setUp(t);
+  const G = world.guild, c = g.config;
+  for (const k of ['team', 'member', 'kunde']) assert.ok(old[k].deleted, `old role ${k} removed`);
+  for (const k of ['welcome', 'verify', 'shop', 'support', 'modLog', 'ticketLog', 'tickets', 'orders', 'oldStart', 'oldTeamCat']) assert.ok(old[k].deleted, `old ${k} removed`);
+  assert.ok(!old.oldShopCat.deleted, 'category with an own channel stays');
+  for (const k of Object.keys(own)) assert.ok(!own[k].deleted, `own ${k} untouched`);
+  assert.equal(c.welcomeChannelId, own.welcome.id);
+  assert.equal(c.verifyChannelId, own.rules.id);
+  assert.equal(c.ticketCategoryId, own.shopCat.id);
+  assert.equal(c.memberRoleId, own.gg.id);
+  assert.equal(c.customerRoleId, null);
+  const mod = G.roles.cache.find((r) => r.name === '・MOD 𓇻');
+  assert.ok(mod && mod.hoist, 'MOD role created');
+  assert.equal(mod.position, 28, 'MOD sits right below OWNER');
+  assert.deepEqual(c.staffRoleIds, [own.founder.id, own.owner.id, mod.id]);
+  assert.deepEqual(customIds(own.rules.messages.cache.get(g.panels.verify).payload), ['"custom_id":"verify:start"']);
+  assert.ok(customIds(own.wishes.messages.cache.get(g.panels.tickets).payload).includes('"custom_id":"ticket:open"'));
+  assert.ok(customIds(own.infos.messages.cache.get(g.panels.shop).payload).includes('"custom_id":"shop:cart"'));
+  assert.ok(ctx.logs.some((l) => /eingerichtet/.test(l.title)));
+  const roles = G.roles.cache.size, msgs = own.rules.messages.cache.size;
+  assert.equal(await adopt.applyLayout(G, ctx), false, 'runs only once');
+  assert.equal(G.roles.cache.size, roles);
+  assert.equal(own.rules.messages.cache.size, msgs);
+  const chans = G.channels.cache.size;
+  const s = interaction(world, world.owner, 'command', { commandName: 'setup' });
+  await setup.runSetup(s, ctx);
+  assert.equal(G.channels.cache.size, chans, '/setup creates no channels');
+  assert.equal(G.roles.cache.size, roles, '/setup creates no roles');
+  assert.match(lastText(s), /Verifizieren/);
+  const neu = await G.channels.create({ name: 'shop-neu', type: 0 });
+  await config.onCommand(interaction(world, world.owner, 'command', { commandName: 'config', sub: 'kanal', opts: { art: 'shopChannelId', kanal: neu } }), ctx);
+  assert.equal(c.shopChannelId, neu.id);
+  assert.equal(neu.messages.cache.size, 1, 'shop panel posted in the new channel');
+  const bad = interaction(world, world.owner, 'command', { commandName: 'config', sub: 'kanal', opts: { art: 'ticketCategoryId', kanal: neu } });
+  await config.onCommand(bad, ctx);
+  assert.match(lastText(bad), /Kategorie/);
+  const extra = await G.roles.create({ name: 'Helfer' });
+  await config.onCommand(interaction(world, world.owner, 'command', { commandName: 'config', sub: 'teamrolle', opts: { rolle: extra } }), ctx);
+  assert.ok(c.staffRoleIds.includes(extra.id));
+  await config.onCommand(interaction(world, world.owner, 'command', { commandName: 'config', sub: 'teamrolle', opts: { rolle: extra } }), ctx);
+  assert.ok(!c.staffRoleIds.includes(extra.id));
 });
 
 test('verification with captcha: wrong answer refused, right answer gives the member role', async (t) => {
-  const { world, ctx, g } = await setUp(t);
+  const { world, ctx, g, staffRole } = await setUp(t);
   const m = world.addUser('neu');
   const b = interaction(world, m, 'button', { customId: 'verify:start' });
   await verify.onButton(b, ctx);
@@ -87,8 +144,8 @@ test('verification with captcha: wrong answer refused, right answer gives the me
 });
 
 test('ticket: open via menu + modal, one per user, claim, add member, close with transcript and DM', async (t) => {
-  const { world, ctx, g } = await setUp(t);
-  const staff = world.addUser('mod', { roles: [world.guild.roles.cache.get(g.config.staffRoleId)], position: 10 });
+  const { world, ctx, g, staffRole } = await setUp(t);
+  const staff = world.addUser('mod', { roles: [staffRole], position: 10 });
   const u = world.addUser('kunde');
   const sel = interaction(world, u, 'select', { customId: 'ticket:open', values: ['support'] });
   await tickets.onSelect(sel, ctx);
@@ -100,7 +157,7 @@ test('ticket: open via menu + modal, one per user, claim, add member, close with
   assert.equal(ch.parentId, g.config.ticketCategoryId);
   assert.match(ch.name, /^support-0001-kunde$/);
   assert.ok(ch.overwrites.some((o) => o.id === u.id && o.type === 1));
-  assert.ok(ch.overwrites.some((o) => o.id === g.config.staffRoleId && o.type === 0));
+  assert.ok(g.config.staffRoleIds.every((id) => ch.overwrites.some((o) => o.id === id && o.type === 0)), 'all team roles see the ticket');
   assert.match(JSON.stringify(ch.messages.cache.first().payload), /Mein Kauf geht nicht/);
   // second ticket refused
   const again = interaction(world, u, 'select', { customId: 'ticket:open', values: ['support'] });
@@ -130,8 +187,8 @@ test('ticket: open via menu + modal, one per user, claim, add member, close with
 });
 
 test('shop: products, panel, cart, order channel, status buttons, customer role', async (t) => {
-  const { world, ctx, g } = await setUp(t);
-  const staff = world.addUser('mod', { roles: [world.guild.roles.cache.get(g.config.staffRoleId)], position: 10 });
+  const { world, ctx, g, staffRole } = await setUp(t);
+  const staff = world.addUser('mod', { roles: [staffRole], position: 10 });
   const add = (opts) => shop.onProductCommand(interaction(world, world.owner, 'command', { commandName: 'produkt', sub: 'hinzufuegen', opts }), ctx);
   await add({ name: 'Logo', preis: '14,99', beschreibung: 'Dein Logo', emoji: '🎨' });
   await add({ name: 'Banner', preis: '5' });
@@ -180,13 +237,21 @@ test('shop: products, panel, cart, order channel, status buttons, customer role'
   assert.equal(o.status, 'paid');
   await shop.onOrderButton(interaction(world, staff, 'button', { customId: 'order:delivered', channel: och }), ctx);
   assert.equal(o.status, 'delivered');
-  assert.ok(u.roles.cache.has(g.config.customerRoleId), 'customer role after delivery');
+  assert.equal(g.config.customerRoleId, null, 'no customer role by default – delivery works without one');
   assert.ok(u.user.dms.length >= 2, 'customer informed by DM');
   await shop.onOrderButton(interaction(world, staff, 'button', { customId: 'order:close', channel: och }), ctx);
   t.mock.timers.tick(5000);
   await new Promise((r) => setImmediate(r));
   assert.ok(och.deleted);
   assert.ok(o.closedAt);
+  // with a customer role set, delivery gives it
+  const kundeRole = await world.guild.roles.create({ name: 'Kunde' });
+  await config.onCommand(interaction(world, world.owner, 'command', { commandName: 'config', sub: 'kundenrolle', opts: { rolle: kundeRole } }), ctx);
+  await shop.onAdd(interaction(world, u, 'select', { customId: 'shop:add', values: ['p1'] }), ctx);
+  await shop.onOrder(interaction(world, u, 'modal', { customId: 'shop:order', fields: { notes: '' } }), ctx);
+  const o2 = Object.values(g.orders).find((x) => x.no === 2);
+  await shop.onOrderButton(interaction(world, staff, 'button', { customId: 'order:delivered', channel: world.guild.channels.cache.get(o2.channelId) }), ctx);
+  assert.ok(u.roles.cache.has(kundeRole.id), 'customer role after delivery');
   // edit & remove product
   await shop.onProductCommand(interaction(world, world.owner, 'command', { commandName: 'produkt', sub: 'bearbeiten', opts: { produkt: 'p2', preis: '7,50', verfuegbar: false } }), ctx);
   assert.equal(g.products.p2.price, 7.5);
@@ -197,8 +262,8 @@ test('shop: products, panel, cart, order channel, status buttons, customer role'
 });
 
 test('moderation: warn escalates to timeout, hierarchy is respected, kick/ban/clear', async (t) => {
-  const { world, ctx, g } = await setUp(t);
-  const mod = world.addUser('mod', { roles: [world.guild.roles.cache.get(g.config.staffRoleId)], perms: (1n << 40n) | (1n << 1n) | (1n << 2n), position: 10 });
+  const { world, ctx, g, staffRole } = await setUp(t);
+  const mod = world.addUser('mod', { roles: [staffRole], perms: (1n << 40n) | (1n << 1n) | (1n << 2n), position: 10 });
   const u = world.addUser('stoerer', { position: 1 });
   for (let n = 0; n < 3; n++) await moderation.onCommand(interaction(world, mod, 'command', { commandName: 'warn', opts: { nutzer: u.user, grund: `Test ${n}` } }), ctx);
   assert.equal(g.warns[u.id].length, 3);
@@ -211,7 +276,7 @@ test('moderation: warn escalates to timeout, hierarchy is respected, kick/ban/cl
   await moderation.onCommand(interaction(world, mod, 'command', { commandName: 'unwarn', opts: { nutzer: u.user, nummer: 1 } }), ctx);
   assert.equal(g.warns[u.id].length, 2);
   // a member above the moderator cannot be touched
-  const boss = world.addUser('boss', { position: 20 });
+  const boss = world.addUser('boss', { position: 40 });
   const tryKick = interaction(world, mod, 'command', { commandName: 'kick', opts: { nutzer: boss.user } });
   await moderation.onCommand(tryKick, ctx);
   assert.match(lastText(tryKick), /höhere Rolle/);
@@ -237,7 +302,7 @@ test('moderation: warn escalates to timeout, hierarchy is respected, kick/ban/cl
 });
 
 test('automod: invites, mass mentions, spam; team is exempt; raid kicks new accounts', async (t) => {
-  const { world, ctx, g } = await setUp(t);
+  const { world, ctx, g, staffRole } = await setUp(t);
   const ch = world.guild.channels.cache.get(g.config.shopChannelId);
   const u = world.addUser('spammer', { position: 1 });
   const msg = async (member, content, mentions = 0) => {
@@ -260,7 +325,7 @@ test('automod: invites, mass mentions, spam; team is exempt; raid kicks new acco
   assert.ok(burst.some((m) => m.deleted), 'burst detected');
   assert.ok(u.timeouts.length >= before + 1, "spammer timed out");
   assert.equal(u.timeouts.at(-1).ms, 3_600_000, "3rd automod warning escalates to 1 h");
-  const staff = world.addUser('mod', { roles: [world.guild.roles.cache.get(g.config.staffRoleId)], position: 10 });
+  const staff = world.addUser('mod', { roles: [staffRole], position: 10 });
   const teamInv = await msg(staff, 'discord.gg/partner');
   assert.ok(!teamInv.deleted, 'team may post invites');
   // raid: 8 joins in 30 s → new accounts are kicked
@@ -281,7 +346,7 @@ test('automod: invites, mass mentions, spam; team is exempt; raid kicks new acco
 });
 
 test('config: settings change and panels refresh', async (t) => {
-  const { world, ctx, g } = await setUp(t);
+  const { world, ctx, g, staffRole } = await setUp(t);
   const run = (sub, opts) => config.onCommand(interaction(world, world.owner, 'command', { commandName: 'config', sub, opts }), ctx);
   await run('name', { name: 'XVY Imperium RP' });
   await run('farbe', { hex: '#112233' });

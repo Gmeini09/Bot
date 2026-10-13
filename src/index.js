@@ -12,6 +12,7 @@ const tickets = require('./tickets');
 const shop = require('./shop');
 const moderation = require('./moderation');
 const config = require('./config');
+const adopt = require('./adopt');
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const DATA_DIR = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '..', 'data');
@@ -32,17 +33,16 @@ async function log(guild, { title, description, color, ping }) {
   const g = store.guild(guild.id);
   const ch = guild.channels.cache.get(g.config.modLogChannelId);
   if (!ch) return;
+  const p = ping ? tickets.staffPing(g, guild) : { text: '', roles: [] };
   await ch.send({
-    content: ping && g.config.staffRoleId ? `<@&${g.config.staffRoleId}>` : undefined,
+    content: p.text || undefined,
     embeds: [embed(g, { title, description, color: color ?? 0x5865f2 })],
-    allowedMentions: { roles: ping && g.config.staffRoleId ? [g.config.staffRoleId] : [] },
+    allowedMentions: { roles: p.roles },
   }).catch(() => {});
 }
 
 async function refreshPanels(guild, g) {
-  await setup.postPanel(guild, g, 'verify', g.config.verifyChannelId, verify.panel(g)).catch(() => {});
-  await setup.postPanel(guild, g, 'tickets', g.config.supportChannelId, tickets.panel(g)).catch(() => {});
-  await setup.postPanel(guild, g, 'shop', g.config.shopChannelId, shop.panel(g)).catch(() => {});
+  await setup.postAll(guild, g, ctx).catch(() => {});
   store.save();
 }
 
@@ -63,6 +63,7 @@ client.once(Events.ClientReady, async (c) => {
   for (const guild of c.guilds.cache.values()) {
     await registerCommands(guild);
     store.guild(guild.id);
+    await adopt.applyLayout(guild, ctx).catch((e) => console.error(`❌ Layout für ${guild.name} fehlgeschlagen:`, e));
   }
   store.save();
   console.log(`🔗 Einladen: https://discord.com/oauth2/authorize?client_id=${c.user.id}&permissions=8&scope=bot%20applications.commands`);

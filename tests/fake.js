@@ -5,6 +5,7 @@ class Coll extends Map {
   filter(fn) { const c = new Coll(); for (const [k, v] of this) if (fn(v, k)) c.set(k, v); return c; }
   first() { return this.values().next().value; }
   last() { return [...this.values()].pop(); }
+  some(fn) { for (const v of this.values()) if (fn(v)) return true; return false; }
 }
 
 let seq = 1000;
@@ -13,6 +14,8 @@ const nid = () => String(100000000000000000n + BigInt(seq++));
 class Role {
   constructor(guild, { name, color, position = 1 }) { this.id = nid(); this.guild = guild; this.name = name; this.color = color; this.position = position; }
   comparePositionTo(o) { return this.position - o.position; }
+  async delete() { this.deleted = true; this.guild.roles.cache.delete(this.id); }
+  async setPosition(p) { this.position = p; }
   toString() { return `<@&${this.id}>`; }
 }
 
@@ -87,11 +90,13 @@ function makeWorld() {
   everyone.id = guild.id;
   guild.roles = {
     cache: new Coll([[everyone.id, everyone]]), everyone,
-    async create(o) { const r = new Role(guild, { ...o, position: 5 }); guild.roles.cache.set(r.id, r); return r; },
+    async create(o) { const r = new Role(guild, { ...o, position: 5 }); r.permissions = o.permissions; r.hoist = o.hoist; guild.roles.cache.set(r.id, r); return r; },
+    async fetch() { return guild.roles.cache; },
   };
   guild.channels = {
     cache: new Coll(),
     async create(o) { const c = new Channel(guild, o); guild.channels.cache.set(c.id, c); return c; },
+    async fetch() { return guild.channels.cache; },
   };
   const memberMap = new Coll();
   guild.members = {
@@ -121,7 +126,7 @@ function interaction(world, member, kind, { commandName, sub, opts = {}, customI
     isModalSubmit: () => kind === 'modal', isAutocomplete: () => kind === 'autocomplete',
     options: {
       getSubcommand: () => sub, getString: (n) => opts[n] ?? null, getInteger: (n) => opts[n] ?? null, getBoolean: (n) => opts[n] ?? null,
-      getUser: (n) => opts[n] ?? null, getRole: (n) => opts[n] ?? null, getFocused: () => opts.focused ?? '',
+      getUser: (n) => opts[n] ?? null, getRole: (n) => opts[n] ?? null, getChannel: (n) => opts[n] ?? null, getFocused: () => opts.focused ?? '',
     },
     fields: { getTextInputValue: (id) => fields[id] ?? '' },
     async reply(p) { i.replied = true; calls.push(['reply', p]); },

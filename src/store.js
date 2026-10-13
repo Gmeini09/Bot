@@ -16,7 +16,7 @@ function defaultGuild() {
     config: {
       name: 'XVY Imperium',
       color: 0xc9a227,
-      staffRoleId: null,
+      staffRoleIds: [], // team roles: see tickets/orders, exempt from automod
       memberRoleId: null,
       customerRoleId: null,
       welcomeChannelId: null,
@@ -72,6 +72,9 @@ function migrate(g) {
   out.config = { ...d.config, ...(g.config || {}) };
   out.config.automod = { ...d.config.automod, ...((g.config || {}).automod || {}) };
   if (!Array.isArray(out.config.ticketTypes) || !out.config.ticketTypes.length) out.config.ticketTypes = DEFAULT_TICKET_TYPES;
+  if (!Array.isArray(out.config.staffRoleIds)) out.config.staffRoleIds = [];
+  if (out.config.staffRoleId && !out.config.staffRoleIds.includes(out.config.staffRoleId)) out.config.staffRoleIds.push(out.config.staffRoleId);
+  delete out.config.staffRoleId;
   for (const k of ['panels', 'tickets', 'warns', 'products', 'carts', 'orders']) if (!out[k] || typeof out[k] !== 'object') out[k] = {};
   return out;
 }
@@ -98,8 +101,8 @@ class Store {
   guild(id) {
     const cur = this.data.guilds[id];
     if (!cur) this.data.guilds[id] = defaultGuild();
-    else if (!cur.__v || cur.__v < 1) this.data.guilds[id] = migrate(cur);
-    this.data.guilds[id].__v = 1;
+    else if (!cur.__v || cur.__v < 2) this.data.guilds[id] = migrate(cur);
+    this.data.guilds[id].__v = 2;
     return this.data.guilds[id];
   }
 
