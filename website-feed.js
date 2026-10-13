@@ -7,6 +7,7 @@ const REQUEST_TYPES = [...TYPES, 'soundpack-tool', 'partnership'];
 const GUILD_ID = '1531989453168578650';
 const NVE_PREVIEW_CHANNEL = '1550470513070178374';
 const SOUND_PREVIEW_CHANNEL = '1550470565364506694';
+const REVIEWS_CHANNEL = '1550121564870025398';
 const WEBSITE_CALLBACK = 'https://turbodesigns.net/auth/discord/callback';
 const { TOOL_PLANS } = require('./selling-order-service');
 function imageUrl(raw) {
@@ -56,6 +57,46 @@ function extractNvePreviews(messages, guildId, channelId) {
     }
   }
   return items;
+}
+function publicReviewText(value, max) {
+  if (typeof value !== 'string') return '';
+  return value.replace(/<@!?\d+>|<@&\d+>|<#\d+>|<a?:\w+:\d+>/g, '')
+    .replace(/\b(?:UF-\d{4,}|WEB-[a-f\d]{8}|LIC-[a-z\d-]+)\b/gi, '')
+    .replace(/\b\d{17,20}\b/g, '').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/https?:\/\/\S+|[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, '')
+    .replace(/<[^>]*>/g, '').replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069`*_~|]/g, ' ')
+    .replace(/\s+/g, ' ').trim().slice(0, max).trim();
+}
+function extractReviews(messages, guildId, channelId, botUserId) {
+  if (guildId !== GUILD_ID || channelId !== REVIEWS_CHANNEL || !/^\d{17,20}$/.test(botUserId || '')) return [];
+  const productLabels = {
+    'Thumbnail': 'thumbnail', 'NVE Preset / Grafik-Setup': 'nve', 'Soundpack': 'soundpack',
+    'Grafik / Design': 'grafik', 'FiveM Asset': 'fivem', 'Custom Discord Bot': 'bot',
+    'Bundle / Komplettpaket': 'bundle', 'SP Tool (Soundpack Tool)': 'soundpack-tool',
+  };
+  const reviews = [], seen = new Set();
+  for (const message of messages) {
+    if (message.author?.id !== botUserId || !message.author.bot || message.webhookId || !/^\d{17,20}$/.test(message.id || '') || seen.has(message.id)) continue;
+    for (const embed of message.embeds || []) {
+      // These markers are emitted only by the native completed-purchase flow.
+      const title = embed.title?.match(/^(⭐{1,5}) Verifizierte Bewertung$/);
+      if (!title || embed.footer?.text !== 'Turbo Designs • Verifizierter Kauf') continue;
+      const ratingField = embed.fields?.find(field => field.name === 'Bewertung');
+      const rating = Number(ratingField?.value?.match(/^\*\*([1-5])\/5\*\*$/)?.[1]);
+      if (!Number.isInteger(rating) || rating !== [...title[1]].length) continue;
+      const text = publicReviewText(embed.description, 320), authorDisplayName = publicReviewText(embed.author?.name, 64);
+      const timestamp = message.createdTimestamp;
+      if (!text || !authorDisplayName || !Number.isFinite(timestamp) || timestamp < 946684800000 || timestamp > Date.now() + 300000) continue;
+      const productValue = embed.fields?.find(field => field.name === 'Produkt')?.value;
+      const productLabel = typeof productValue === 'string' ? productValue.trim().replace(/^[^\p{L}\p{N}]+/u, '') : '';
+      const productKey = Object.hasOwn(productLabels, productLabel) ? productLabels[productLabel] : undefined;
+      reviews.push({ text, rating, authorDisplayName, date: new Date(timestamp).toISOString(), messageUrl: `https://discord.com/channels/${guildId}/${channelId}/${message.id}`, ...(productKey ? { productKey } : {}) });
+      seen.add(message.id);
+      if (reviews.length === 12) return reviews;
+      break;
+    }
+  }
+  return reviews;
 }
 function readCatalog(guildId, directory) {
   const raw = JSON.parse(fs.readFileSync(path.join(directory, 'selling-data.json'), 'utf8'));
@@ -229,7 +270,13 @@ function install() {
         try {const nveMessages=await nveChannel.messages.fetch({limit:100,cache:false});nvePreviews=extractNvePreviews([...nveMessages.values()].sort((a,b)=>b.createdTimestamp-a.createdTimestamp),guild.id,nveChannel.id);}
         catch{nveAvailable=false;}
       }
-      const extras = { samples, samplesAvailable, soundChannelUrl:`https://discord.com/channels/${guild.id}/${SOUND_PREVIEW_CHANNEL}`, nvePreviews,nveAvailable,nveChannelUrl:`https://discord.com/channels/${guild.id}/${NVE_PREVIEW_CHANNEL}`, orderChannelUrl:channelLink('bestellen'),reviewsChannelUrl:channelLink('bewertungen') };
+      const reviewsChannel = channels.get(REVIEWS_CHANNEL);
+      let reviews = [], reviewsAvailable = Boolean(reviewsChannel?.isTextBased());
+      if (reviewsAvailable) {
+        try { const published = await reviewsChannel.messages.fetch({limit:100,cache:false}); reviews = extractReviews([...published.values()].sort((a,b)=>b.createdTimestamp-a.createdTimestamp),guild.id,reviewsChannel.id,client.user.id); }
+        catch { reviewsAvailable = false; }
+      }
+      const extras = { samples, samplesAvailable, soundChannelUrl:`https://discord.com/channels/${guild.id}/${SOUND_PREVIEW_CHANNEL}`, nvePreviews,nveAvailable,nveChannelUrl:`https://discord.com/channels/${guild.id}/${NVE_PREVIEW_CHANNEL}`, reviews,reviewsAvailable,orderChannelUrl:channelLink('bestellen'),reviewsChannelUrl:`https://discord.com/channels/${guild.id}/${REVIEWS_CHANNEL}` };
       const data = { ...extras, connected: true, updatedAt: new Date().toISOString(), previews, products, previewChannelUrl: `https://discord.com/channels/${guild.id}/${channel.id}`, inviteUrl: 'https://discord.gg/turbodesigns' };
       cache = { at: Date.now(), data }; return data;
     })().catch(error => { retryAt = Date.now()+30000; console.warn('[website-feed] Refresh unavailable:', error.code || error.message); throw error; }).finally(() => { pending = null; });
@@ -264,4 +311,4 @@ function install() {
     return createServer.apply(this,args);
   };
 }
-module.exports = { imageUrl, extractImages, readCatalog, extractSamples, extractNvePreviews, validateRequest, verifyRequestSignature, createRequestService, assertPrivateChannel, install };
+module.exports = { imageUrl, extractImages, readCatalog, extractSamples, extractNvePreviews, extractReviews, publicReviewText, validateRequest, verifyRequestSignature, createRequestService, assertPrivateChannel, install };

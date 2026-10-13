@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { Readable } = require('node:stream');
 const { Collection, PermissionsBitField, PermissionFlagsBits: P, ChannelType, EmbedBuilder } = require('discord.js');
-const { createRequestService, extractNvePreviews, verifyRequestSignature, validateRequest, assertPrivateChannel } = require('./website-feed');
+const { createRequestService, extractNvePreviews, extractReviews, verifyRequestSignature, validateRequest, assertPrivateChannel } = require('./website-feed');
 const { createSellingOrderService, ShopRequestError } = require('./selling-order-service');
 
 const guildId = '1531989453168578650';
@@ -373,4 +373,58 @@ test('NVE previews accept only safe Discord image/video attachments and deduplic
   assert.equal(items[0].image, image);
   assert.ok(items[1].url.endsWith('preview.mp4'));
   assert.match(items[0].messageUrl, /1550470513070178374\/1550470513070178376$/);
+});
+
+const reviewChannelId = '1550121564870025398';
+function publishedReview(overrides = {}, embedOverrides = {}) {
+  return {
+    id: '1550470513070178399', author: { id: env.DISCORD_CLIENT_ID, bot: true }, createdTimestamp: Date.UTC(2026, 9, 10, 12),
+    embeds: [{ title: '⭐⭐⭐⭐⭐ Verifizierte Bewertung', footer: { text: 'Turbo Designs • Verifizierter Kauf' },
+      description: 'Schnelle Umsetzung und tolles Ergebnis!', author: { name: 'Creator.One', iconURL: 'https://avatar.invalid/private.png' },
+      fields: [{ name: 'Bewertung', value: '**5/5**' }, { name: 'Produkt', value: '🖼️ Thumbnail' }, { name: 'Bestellung', value: '`UF-0042`' }],
+      ...embedOverrides }], ...overrides,
+  };
+}
+
+test('public reviews expose only actual native published review fields', () => {
+  const reviews = extractReviews([publishedReview()], guildId, reviewChannelId, env.DISCORD_CLIENT_ID);
+  assert.deepEqual(reviews, [{ text: 'Schnelle Umsetzung und tolles Ergebnis!', rating: 5, authorDisplayName: 'Creator.One', date: '2026-10-10T12:00:00.000Z',
+    messageUrl: `https://discord.com/channels/${guildId}/${reviewChannelId}/1550470513070178399`, productKey: 'thumbnail' }]);
+  assert.doesNotMatch(JSON.stringify(reviews), /UF-0042|avatar\.invalid|userId|orderId|iconURL/);
+});
+
+test('review extraction ignores arbitrary text, impostors, webhooks, private channels and invalid native markers', () => {
+  const invalid = [
+    publishedReview({ author: { id: userId, bot: false } }),
+    publishedReview({ author: { id: env.DISCORD_CLIENT_ID, bot: false } }),
+    publishedReview({ webhookId: '1550470999999999999' }),
+    publishedReview({ embeds: [], content: '⭐⭐⭐⭐⭐ fake customer review' }),
+    publishedReview({}, { title: 'Bestellübersicht' }),
+    publishedReview({}, { footer: { text: 'Turbo Designs • Order Center' } }),
+    publishedReview({}, { fields: [{ name: 'Bewertung', value: '**4/5**' }] }),
+    publishedReview({}, { author: { name: '' } }),
+    publishedReview({ createdTimestamp: NaN }),
+    publishedReview({ createdTimestamp: Date.now() + 600000 }),
+  ];
+  assert.deepEqual(extractReviews(invalid, guildId, reviewChannelId, env.DISCORD_CLIENT_ID), []);
+  assert.deepEqual(extractReviews([publishedReview()], guildId, '1550470565364506694', env.DISCORD_CLIENT_ID), []);
+  assert.deepEqual(extractReviews([publishedReview()], '999999999999999999', reviewChannelId, env.DISCORD_CLIENT_ID), []);
+});
+
+test('review plain text is bounded and removes mentions, order references, tokens, emails and markup', () => {
+  const description = '**Sehr gut!** <@697402284849627180> UF-0042 LIC-UF-0042-0001-SECRET test@example.com https://evil.invalid/?token=private <b>Danke</b> ' + 'a'.repeat(500);
+  const reviews = extractReviews([publishedReview({}, { description })], guildId, reviewChannelId, env.DISCORD_CLIENT_ID);
+  assert.equal(reviews.length, 1);
+  assert.ok(reviews[0].text.length <= 320);
+  assert.match(reviews[0].text, /^Sehr gut! Danke /);
+  assert.doesNotMatch(reviews[0].text, /697402284849627180|UF-0042|LIC-|SECRET|example\.com|evil\.invalid|<|\*/);
+});
+
+test('reviews deduplicate publication links and do not misclassify mixed product bundles', () => {
+  const mixed = publishedReview({}, { fields: [{ name: 'Bewertung', value: '**5/5**' }, { name: 'Produkt', value: '🛒 Thumbnail + Soundpack' }] });
+  const review = extractReviews([mixed, mixed], guildId, reviewChannelId, env.DISCORD_CLIENT_ID);
+  assert.equal(review.length, 1);
+  assert.equal(review[0].productKey, undefined);
+  const messages = Array.from({ length: 15 }, (_, index) => publishedReview({ id: String(1550470513070178400n + BigInt(index)) }));
+  assert.equal(extractReviews(messages, guildId, reviewChannelId, env.DISCORD_CLIENT_ID).length, 12);
 });
