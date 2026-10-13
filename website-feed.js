@@ -8,7 +8,7 @@ const GUILD_ID = '1531989453168578650';
 const NVE_PREVIEW_CHANNEL = '1550470513070178374';
 const SOUND_PREVIEW_CHANNEL = '1550470565364506694';
 const WEBSITE_CALLBACK = 'https://turbodesigns.net/auth/discord/callback';
-const TOOL_PLANS = Object.freeze({ week: { label: 'Woche', price: 10 }, month: { label: 'Monat', price: 15 }, lifetime: { label: 'Lifetime', price: 20 } });
+const { TOOL_PLANS } = require('./selling-order-service');
 function imageUrl(raw) {
   try { const u = new URL(raw); return u.protocol === 'https:' && ['cdn.discordapp.com','media.discordapp.net'].includes(u.hostname) && u.pathname.startsWith('/attachments/') ? u.href : null; } catch { return null; }
 }
@@ -109,40 +109,11 @@ function createRequestService(getClient,options={}) {
   const env=options.env||process.env,fetchImpl=options.fetchImpl||fetch;
   const directory=options.directory||env.RAILWAY_VOLUME_MOUNT_PATH||env.DATA_DIR||__dirname;
   const requestPending=new Map(),requestFingerprints=new Map(),userPending=new Map();
-  async function requestChannel() {
-    const client=getClient();
-    if(!client?.isReady())throw new Error('BOT_NOT_READY');
-    const guild=await client.guilds.fetch(GUILD_ID);
-    const channels=await guild.channels.fetch();await guild.roles.fetch();
-    const channel=channels.find(c=>c&&normalizeName(c.name)==='bestellungen'&&c.isTextBased()&&typeof c.send==='function');
-    if(!channel)throw new Error('PRIVATE_CHANNEL_UNAVAILABLE');
-    const me=guild.members.me || await guild.members.fetchMe();
-    assertPrivateChannel(channel,guild,staffRoles(guild),null,me);
-    const {ChannelType}=require('discord.js');
-    if(!channels.some(c=>c?.type===ChannelType.GuildCategory&&/\btickets\b/i.test(c.name)))throw new Error('TICKET_UNAVAILABLE');
-    return channel;
-  }
-  async function personalChannel(team,data,fingerprint){
-    const {PermissionFlagsBits:P,ChannelType}=require('discord.js'),guild=team.guild;
-    const member=await guild.members.fetch(data.discordUserId).catch(()=>null);if(!member||member.user?.bot)throw new Error('JOIN_REQUIRED');
-    const me=guild.members.me||await guild.members.fetchMe();if(!me.permissions.has(P.ManageChannels))throw new Error('TICKET_UNAVAILABLE');
-    const roles=staffRoles(guild,data.product==='partnership');if(!roles.length)throw new Error('TICKET_UNAVAILABLE');
-    const channels=await guild.channels.fetch();
-    let channel=channels.find(c=>c?.topic?.startsWith(`website-owner:${data.discordUserId}|`)&&c.topic.includes(`|request:${data.requestId}|`)&&c.isTextBased()&&typeof c.send==='function');
-    if(channel){
-      if(!channel.topic.includes(`|fingerprint:${fingerprint}|`))throw new Error('INVALID_REQUEST');
-      assertPrivateChannel(channel,guild,roles,member,me);
-      return channel;
-    }
-    const common=[P.ViewChannel,P.SendMessages,P.ReadMessageHistory,P.AttachFiles,P.EmbedLinks];
-    const overwrites=[{id:guild.roles.everyone.id,deny:[P.ViewChannel]},{id:data.discordUserId,allow:common},{id:me.id,allow:[...common,P.ManageChannels,P.ManageMessages]},...roles.map(role=>({id:role.id,allow:common}))];
-    const username=member.user.username.toLowerCase().replace(/[^a-z0-9-]/g,'').slice(0,50)||'kunde';
-    const category=channels.find(c=>c?.type===ChannelType.GuildCategory&&/\btickets\b/i.test(c.name));
-    if(!category)throw new Error('TICKET_UNAVAILABLE');
-    const prefix=data.product==='partnership'?'partnerschaft':'bestellung';
-    const created=await guild.channels.create({name:`${prefix}-${username}-${data.requestId.slice(0,8)}`,type:ChannelType.GuildText,parent:category.id,topic:`website-owner:${data.discordUserId}|request:${data.requestId}|fingerprint:${fingerprint}|kind:${data.product==='partnership'?'partnership':'order'}|created:${Date.now()}`,permissionOverwrites:overwrites,reason:data.product==='partnership'?'Partnerschaftsanfrage von turbodesigns.net':'Bestellticket von turbodesigns.net'});
-    assertPrivateChannel(created,guild,roles,member,me);
-    return created;
+  function nativeApi() {
+    const client = getClient();
+    if (!client?.isReady()) throw new Error('BOT_NOT_READY');
+    if (!client.__turboSellingWebsite?.createRequest) throw new Error('TICKET_UNAVAILABLE');
+    return client.__turboSellingWebsite;
   }
   async function deliverWebsiteRequest(raw) {
     const data=validateRequest(raw);
@@ -154,24 +125,13 @@ function createRequestService(getClient,options={}) {
     const previous=data.discordUserId?userPending.get(data.discordUserId):null;
     const task=(async()=>{
       if(previous)await previous.catch(()=>{});
-      const team=await requestChannel();
+      const api=nativeApi();
       const file=path.join(directory,'website-request-receipts.json');
       const receipts=fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):{};
       if(receipts[data.requestId]){const saved=receipts[data.requestId];if(saved.ownerId!==data.discordUserId||(saved.fingerprint&&saved.fingerprint!==fingerprint))throw new Error('INVALID_REQUEST');return saved;}
-      const channel=await personalChannel(team,data,fingerprint);
-      const labels={thumbnail:'Thumbnail',nve:'NVE Preset / Grafik-Setup',soundpack:'Soundpack',grafik:'Grafik / Design',fivem:'FiveM Asset',bot:'Custom Discord Bot',bundle:'Bundle / Komplettpaket','soundpack-tool':'Soundpack Tool',partnership:'Partnerschaft'};
-      const reference='WEB-'+data.requestId.slice(0,8).toUpperCase();
-      const member=await team.guild.members.fetch(data.discordUserId);
-      const plan=data.plan?TOOL_PLANS[data.plan]:null;
-      const fields=[{name:data.product==='partnership'?'Anfrage':'Produkt',value:labels[data.product],inline:true},{name:'Kunde',value:`${member.user.username} · ${data.discordUserId}`,inline:true},...(plan?[{name:'Laufzeit',value:plan.label,inline:true},{name:'Preis',value:`${plan.price.toFixed(2).replace('.',',')} €`,inline:true}]:[]),{name:'Wunschtermin',value:data.deadline||'Noch offen'},{name:'Vorhandene Materialien',value:data.assets||'Noch zu besprechen'},...(data.reference?[{name:'Stilreferenz',value:data.reference}]:[]),{name:'Status',value:data.product==='partnership'?'Partnerschaftsanfrage. Vorschlag und gemeinsame Möglichkeiten mit dem Interessenten abstimmen.':'Neue Bestellung. Lieferumfang, Zahlung und Termin mit dem Kunden abstimmen.'}];
-      const {ActionRowBuilder,ButtonBuilder,ButtonStyle}=require('discord.js');
-      const components=[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('website_request_close').setLabel('Ticket abschließen').setStyle(ButtonStyle.Secondary))];
-      // A persisted channel and message also protect a retry after a process restart.
-      const messages=await channel.messages.fetch({limit:100,cache:false});
-      const footer=reference+' · turbodesigns.net · '+data.requestId+' · '+fingerprint;
-      const existing=messages.find(message=>message.author?.id===getClient()?.user?.id&&message.embeds?.some(embed=>embed.footer?.text===footer));
-      const message=existing||await channel.send({allowedMentions:{parse:[],users:[],roles:[],repliedUser:false},nonce:crypto.createHash('sha256').update(data.requestId).digest('hex').slice(0,24),enforceNonce:true,embeds:[{title:data.product==='partnership'?'Neue Partnerschaftsanfrage':'Neue Website-Bestellung',color:0x80c2ff,description:data.project,fields,footer:{text:footer},timestamp:new Date().toISOString()}],components});
-      const receipt={reference,messageId:message.id,ownerId:data.discordUserId,fingerprint,ticketUrl:`https://discord.com/channels/${channel.guild.id}/${channel.id}`};
+      const delivered = await api.createRequest(data, fingerprint);
+      if (!delivered?.reference || (data.product !== 'partnership' && !delivered.ticketUrl)) throw new Error('TICKET_UNAVAILABLE');
+      const receipt = { ...delivered, nativeReference: delivered.reference, reference: `WEB-${data.requestId.slice(0,8).toUpperCase()}`, ownerId: data.discordUserId, fingerprint };
       // Serialize receipt writes after the awaited send to avoid losing concurrent entries.
       const latest=fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):{};latest[data.requestId]=receipt;
       const trimmed=Object.fromEntries(Object.entries(latest).slice(-1000));const temp=file+'.tmp';fs.writeFileSync(temp,JSON.stringify(trimmed),{mode:0o600});fs.renameSync(temp,file);
@@ -186,9 +146,18 @@ function createRequestService(getClient,options={}) {
     try{
       const raw=req.method==='POST'?await requestBody(req):'';
       if(!verifyRequestSignature(req,raw,'/turbo-website-requests',env))return reply(401,{ok:false});
-      if(req.method==='GET'){await requestChannel();return reply(200,{ready:true});}
-      const receipt=await deliverWebsiteRequest(JSON.parse(raw));return reply(200,{ok:true,reference:receipt.reference,...(receipt.ticketUrl?{ticketUrl:receipt.ticketUrl}:{})});
-    }catch(error){const invalid=['INVALID_REQUEST','BODY_TOO_LARGE'].includes(error.message)||error instanceof SyntaxError;console.warn('[website-requests]',invalid?'INVALID_REQUEST':error.code||error.message);return reply(invalid?400:error.message==='AUTH_REQUIRED'?401:['JOIN_REQUIRED','TICKET_UNAVAILABLE'].includes(error.message)?409:503,{ok:false,...(['JOIN_REQUIRED','TICKET_UNAVAILABLE','AUTH_REQUIRED'].includes(error.message)?{error:error.message}:{})});}
+      if(req.method==='GET'){await nativeApi().ready();return reply(200,{ready:true});}
+      const receipt=await deliverWebsiteRequest(JSON.parse(raw));return reply(200,{ok:true,reference:receipt.reference,...(receipt.ticketUrl?{ticketUrl:receipt.ticketUrl}:{}),...(receipt.requestType?{requestType:receipt.requestType}:{})});
+    } catch(error) {
+      const invalid=['INVALID_REQUEST','BODY_TOO_LARGE','INVALID_DISCOUNT'].includes(error.message)||error instanceof SyntaxError;
+      const conflicts=['JOIN_REQUIRED','TICKET_UNAVAILABLE','ORDER_EXISTS','ORDER_BUSY','BLACKLISTED','SHOP_CLOSED','PRODUCT_UNAVAILABLE','ORDER_CLOSED'];
+      const nativeCode=error.code||error.message,code=nativeCode==='RATE_LIMITED'?'RATE_LIMIT':nativeCode;
+      console.warn('[website-requests]',invalid?'INVALID_REQUEST':code);
+      return reply(invalid?400:code==='AUTH_REQUIRED'?401:code==='RATE_LIMIT'?429:conflicts.includes(code)?409:503,{
+        ok:false,...(conflicts.includes(code)||['AUTH_REQUIRED','RATE_LIMIT'].includes(code)?{error:code}:{}),
+        ...(code==='ORDER_EXISTS'&&error.ticketUrl?{ticketUrl:error.ticketUrl}:{}),
+      });
+    }
   }
   function oauthConfig() {
     const clientId=env.DISCORD_CLIENT_ID||env.CLIENT_ID||getClient()?.application?.id||'';
@@ -272,21 +241,7 @@ function install() {
     if (!this.__websiteFeedInstalled) {
       this.__websiteFeedInstalled = true;
       this.once(Events.ClientReady, () => refresh().catch(() => {}));
-      this.on(Events.InteractionCreate,async interaction=>{
-        if(!interaction.isButton?.()||interaction.customId!=='website_request_close'||interaction.guildId!=='1531989453168578650')return;
-        const owner=interaction.channel?.topic?.match(/^website-owner:(\d{17,20})\|/)?.[1];
-        if(!owner)return interaction.reply({content:'Diese Anfrage ist bereits abgeschlossen.',ephemeral:true}).catch(()=>{});
-        const {PermissionFlagsBits:P}=require('discord.js');
-        const roles=staffRoles(interaction.guild),isStaff=interaction.memberPermissions?.has(P.Administrator)||roles.some(role=>interaction.member?.roles?.cache?.has(role.id));
-        if(interaction.user.id!==owner&&!isStaff)return interaction.reply({content:'Nur der Kunde und das Team können diese Anfrage abschließen.',ephemeral:true}).catch(()=>{});
-        try{
-          await interaction.deferReply({ephemeral:true});
-          await interaction.channel.permissionOverwrites.edit(owner,{SendMessages:false,AttachFiles:false});
-          await interaction.channel.setTopic(interaction.channel.topic.replace('website-owner:','website-closed:'));
-          await interaction.channel.setName('abgeschlossen-'+interaction.channel.name.replace(/^(anfrage|bestellung|partnerschaft)-/,'').slice(0,70));
-          await interaction.editReply('Ticket abgeschlossen. Der Verlauf bleibt für dich und das Team lesbar.');
-        }catch{if(interaction.deferred)await interaction.editReply('Die Anfrage konnte nicht abgeschlossen werden. Bitte wende dich an das Team.').catch(()=>{});}
-      });
+
     }
     return login.apply(this,args);
   };

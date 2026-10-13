@@ -6,8 +6,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { Readable } = require('node:stream');
-const { Collection, PermissionsBitField, PermissionFlagsBits: P, ChannelType } = require('discord.js');
-const { createRequestService, extractNvePreviews, verifyRequestSignature, validateRequest } = require('./website-feed');
+const { Collection, PermissionsBitField, PermissionFlagsBits: P, ChannelType, EmbedBuilder } = require('discord.js');
+const { createRequestService, extractNvePreviews, verifyRequestSignature, validateRequest, assertPrivateChannel } = require('./website-feed');
+const { createSellingOrderService, ShopRequestError } = require('./selling-order-service');
 
 const guildId = '1531989453168578650';
 const userId = '697402284849627180';
@@ -53,13 +54,14 @@ function setup(t, options = {}) {
   function textChannel(id, name, overwrites = [], topic) {
     const cache = new Collection(overwrites.map(o => [o.id, { id: o.id, type: roles.has(o.id) ? 0 : 1, allow: permissions(o.allow || []), deny: permissions(o.deny || []) }]));
     const messages = new Collection();
-    const channel = { id, name, topic, guild, isTextBased: () => true, permissionOverwrites: { cache }, messages: { fetch: async () => messages }, permissionsFor: entity => {
+    const channel = { id, name, topic, guild, isTextBased: () => true, permissionOverwrites: { cache }, messages: { fetch: async value => typeof value === 'string' ? messages.get(value) : messages }, permissionsFor: entity => {
       if (entity.id === me.id || entity.permissions?.has(P.Administrator)) return permissions([P.ViewChannel, P.SendMessages, P.EmbedLinks]);
-      if (options.publicInternal && name === '📦・bestellungen' && entity.id === guildId) return permissions([P.ViewChannel]);
+      if (options.publicInternal && name === '🤝・partner-anfragen' && entity.id === guildId) return permissions([P.ViewChannel]);
       return cache.get(entity.id)?.allow || permissions([]);
     }, send: async data => {
-      sent.push({ channel, data });
-      const message = { id: `15504705653645${String(sent.length).padStart(5, '0')}`, author: { id: me.id }, embeds: data.embeds };
+      const embeds = data.embeds.map(embed => embed.toJSON ? embed.toJSON() : embed);
+      sent.push({ channel, data: { ...data, embeds } });
+      const message = { id: `15504705653645${String(sent.length).padStart(5, '0')}`, author: { id: me.id }, embeds };
       messages.set(message.id, message);
       return message;
     } };
@@ -67,7 +69,9 @@ function setup(t, options = {}) {
   }
   channels.set('category', { id: '1550470565364506600', name: '┣━━〔 TICKETS 〕━━┫', type: ChannelType.GuildCategory });
   channels.set('internal', textChannel('1550470565364506601', '📦・bestellungen', [{ id: owner.id, allow: [P.ViewChannel] }, { id: management.id, allow: [P.ViewChannel] }]));
-  guild.channels = { fetch: async () => channels, create: async config => {
+  channels.set('partner', textChannel('1550470565364506602', '🤝・partner-anfragen', [{ id: owner.id, allow: [P.ViewChannel] }, { id: management.id, allow: [P.ViewChannel] }]));
+  guild.channels = { cache: channels, fetch: async id => id ? channels.find(channel => channel.id === id) : channels, create: async config => {
+    if (options.failCreateOnce) { options.failCreateOnce=false; throw new Error('Simulated Discord timeout'); }
     created.push(config);
     const overwrites = [...config.permissionOverwrites];
     if (options.leakyTicket) overwrites.push({ id: customer.id, allow: [P.ViewChannel] });
@@ -76,8 +80,44 @@ function setup(t, options = {}) {
     return channel;
   } };
   const client = { isReady: () => true, guilds: { fetch: async () => guild }, application: { id: env.DISCORD_CLIENT_ID }, user: { id: me.id } };
+  const data = { orders: {}, partnerApplications: {}, blacklist: {}, config: { availability: 'open' }, nextOrder: 1, nextPartner: 1 };
+  const locks = new Set(), workflow = [];
+  const native = createSellingOrderService({
+    products: { thumbnail: { label: 'Thumbnail', etaDays: 2, revisions: 1 }, sptool: { label: 'Soundpack Tool', etaDays: 1, revisions: 0 } },
+    ordersCategory: 'tickets', findSellingCategory: () => channels.get('category'),
+    getGuildShopData: () => ({ store: data, data }), saveSellingStore: () => {},
+    acquireSellingActionLock: key => !locks.has(key) && (locks.add(key), true), releaseSellingActionLock: key => locks.delete(key),
+    consumeSellingRateLimit: () => !options.rateLimited, productConfig: () => ({ enabled: !options.productDisabled }),
+    getDiscountCodeState: () => ({}), loyaltyForUser: () => ({ discount: 0 }),
+    nextOrderId: () => `UF-${String(data.nextOrder++).padStart(4,'0')}`, nextAdvancedId: () => `PA-${data.nextPartner++}`,
+    parseDeadlineToTimestamp: () => null, sanitizeName: value => value,
+    sellingOrderTicketOverwrites: () => [
+      { id: guildId, deny: [P.ViewChannel] }, { id: userId, allow: [P.ViewChannel,P.SendMessages] },
+      ...[owner,management,support,designer].map(role => ({ id: role.id, allow: [P.ViewChannel,P.SendMessages] })),
+    ],
+    configuredOrderPrice: () => 0, calculateOrderFinalPrice: order => order.basePrice,
+    orderInfoEmbed: order => new EmbedBuilder().setTitle(`Bestellung ${order.id}`).addFields(
+      { name: 'Kunde', value: `<@${order.userId}>` }, { name: 'Preis', value: `${order.finalPrice.toFixed(2).replace('.',',')} €` },
+    ),
+    assertPrivateOrderChannel: channel => assertPrivateChannel(channel,guild,[owner,management,support,designer],member,me),
+    assertPrivatePartnerChannel: channel => assertPrivateChannel(channel,guild,[owner,management],null,me),
+    automateNewOrder: async (guild,data,order) => { order.assignedTo=designer.id; workflow.push('assign'); },
+    syncOrderWorkflow: async (guild,data,order,channel) => { workflow.push('sync'); },
+    notifyNewOrder: async () => { workflow.push('notify'); }, refreshOrderStatusPanel: async () => { workflow.push('status'); },
+    logSelling: async () => {}, queueInfoForOrder: () => ({ position: null }),
+    findSellingTextChannel: (guild,name) => channels.find(channel => channel.name === name),
+    shopEmbed: (title,description) => new EmbedBuilder().setTitle(title).setDescription(description),
+  });
+  client.__turboSellingWebsite = {
+    ready: () => native.ready(guild),
+    createRequest: async (request,fingerprint) => {
+      const verified = await guild.members.fetch(request.discordUserId).catch(() => null);
+      if (!verified) throw new ShopRequestError('JOIN_REQUIRED');
+      return native.createWebsiteRequest(guild,verified.user,request,fingerprint);
+    },
+  };
   const service = createRequestService(() => client, { env, directory, fetchImpl: options.fetchImpl });
-  return { service, client, guild, created, sent, channels, directory, roles: { owner, management, support, designer, customer }, member, me };
+  return { service, native, data, workflow, client, guild, created, sent, channels, directory, roles: { owner, management, support, designer, customer }, member, me };
 }
 
 test('signatures bind the timestamp, HTTP method, endpoint and exact body', () => {
@@ -154,24 +194,41 @@ test('an order creates a personal Bestellticket with only the customer and autho
   assert.equal(response.status, 200);
   assert.equal(response.body.ok, true);
   assert.match(response.body.ticketUrl, /^https:\/\/discord\.com\/channels\/1531989453168578650\/\d+$/);
-  assert.match(mock.created[0].name, /^bestellung-actual-discord-name-/);
+  assert.match(mock.created[0].name, /^uf-0001-thumbnail-actual-discord-name/);
   assert.equal(mock.created[0].parent, '1550470565364506600');
   const overwrites = mock.created[0].permissionOverwrites;
   assert.ok(overwrites.find(o => o.id === guildId).deny.includes(P.ViewChannel));
   assert.ok(overwrites.find(o => o.id === userId).allow.includes(P.ViewChannel));
   assert.equal(overwrites.some(o => o.id === mock.roles.customer.id), false);
   const customerField = mock.sent[0].data.embeds[0].fields.find(field => field.name === 'Kunde').value;
-  assert.match(customerField, /actual-discord-name/);
+  assert.match(customerField, new RegExp(userId));
   assert.doesNotMatch(customerField, /browser supplied name/);
+  const saved = mock.data.orders['UF-0001'];
+  assert.equal(saved.source, 'website');
+  assert.equal(saved.userId, userId);
+  assert.equal(saved.assignedTo, mock.roles.designer.id);
+  assert.ok(saved.creationCompletedAt);
+  assert.deepEqual(mock.workflow, ['assign','sync','notify','status']);
+  const ids = mock.sent[0].data.components.flatMap(row => row.toJSON().components.map(component => component.custom_id));
+  assert.equal(ids.length, 11);
+  assert.ok(ids.includes('selling_claim:UF-0001'));
+  assert.ok(ids.includes('selling_deliver_start:UF-0001'));
+  assert.ok(ids.includes('selling_close:UF-0001'));
+  assert.ok(ids.every(id => id.startsWith('selling_')));
+  assert.match(response.body.reference, /^WEB-[A-F0-9]{8}$/);
 });
 
-test('partnership ticket is limited to the applicant, bot, management and owner', async t => {
+test('partnerships enter the native staff inbox and registry without exposing its URL', async t => {
   const mock = setup(t);
   const response = await call(mock.service, '/turbo-website-requests', request({ product: 'partnership', project: 'Community partnership proposal' }));
   assert.equal(response.status, 200);
-  assert.match(mock.created[0].name, /^partnerschaft-/);
-  assert.equal(mock.created[0].permissionOverwrites.some(o => o.id === mock.roles.support.id || o.id === mock.roles.designer.id), false);
-  assert.equal(mock.sent[0].data.embeds[0].title, 'Neue Partnerschaftsanfrage');
+  assert.equal(mock.created.length, 0);
+  assert.equal(mock.sent[0].channel.name, '🤝・partner-anfragen');
+  assert.equal(mock.sent[0].data.embeds[0].title, '🤝 Partnerschaft PA-1');
+  assert.equal(mock.data.partnerApplications['PA-1'].userId, userId);
+  assert.equal(mock.data.partnerApplications['PA-1'].status, 'pending');
+  assert.equal(response.body.requestType, 'partnership');
+  assert.equal(response.body.ticketUrl, undefined);
 });
 
 test('Soundpack Tool prices are assigned by the bot for all three plans', async t => {
@@ -180,6 +237,8 @@ test('Soundpack Tool prices are assigned by the bot for all three plans', async 
     const response = await call(mock.service, '/turbo-website-requests', request({ product: 'soundpack-tool', plan, price: 0.01 }));
     assert.equal(response.status, 200);
     assert.equal(mock.sent.at(-1).data.embeds[0].fields.find(field => field.name === 'Preis').value, price);
+    assert.equal(Object.values(mock.data.orders).at(-1).productKey, 'sptool');
+    Object.values(mock.data.orders).at(-1).closedAt = Date.now();
   }
 });
 
@@ -219,12 +278,14 @@ test('a request ID cannot be reused for another owner or changed order details',
   assert.equal(mock.sent.length, 1);
 });
 
-test('each different order gets its own ticket', async t => {
+test('an open native order is reused as the next step instead of creating another ticket', async t => {
   const mock = setup(t);
   const first = await call(mock.service, '/turbo-website-requests', request());
   const second = await call(mock.service, '/turbo-website-requests', request());
-  assert.equal(mock.created.length, 2);
-  assert.notEqual(first.body.ticketUrl, second.body.ticketUrl);
+  assert.equal(mock.created.length, 1);
+  assert.equal(second.status, 409);
+  assert.equal(second.body.error, 'ORDER_EXISTS');
+  assert.equal(first.body.ticketUrl, second.body.ticketUrl);
 });
 
 test('non-members must join before an order ticket is created', async t => {
@@ -235,10 +296,62 @@ test('non-members must join before an order ticket is created', async t => {
   assert.equal(mock.created.length, 0);
 });
 
+test('Discord checkout and website checkout share the native order registry and controls', async t => {
+  const mock = setup(t);
+  const native = await mock.native.createOrder({ guild: mock.guild, user: mock.member.user, productKey: 'thumbnail', input: { details: 'Discord checkout brief' } });
+  assert.equal(native.reference, 'UF-0001');
+  assert.equal(mock.data.orders[native.reference].source, undefined);
+  const web = await call(mock.service, '/turbo-website-requests', request());
+  assert.equal(web.body.error, 'ORDER_EXISTS');
+  assert.equal(web.body.ticketUrl, native.ticketUrl);
+  assert.equal(mock.created.length, 1);
+});
+
+test('native admission checks block closed, disabled, blacklisted and rate-limited orders', async t => {
+  for (const [kind, expected] of [['closed','SHOP_CLOSED'],['disabled','PRODUCT_UNAVAILABLE'],['blocked','BLACKLISTED'],['rate','RATE_LIMIT']]) {
+    const mock = setup(t, { productDisabled: kind==='disabled', rateLimited: kind==='rate' });
+    if (kind==='closed') mock.data.config.availability='closed';
+    if (kind==='blocked') mock.data.blacklist[userId]={reason:'test'};
+    const response = await call(mock.service, '/turbo-website-requests', request());
+    assert.equal(response.status, kind==='rate'?429:409);
+    assert.equal(response.body.error, expected);
+    assert.equal(mock.created.length, 0);
+    assert.equal(mock.sent.length, 0);
+  }
+});
+
+test('a failed Discord channel creation resumes the reserved native order on retry', async t => {
+  const mock = setup(t, { failCreateOnce: true }), data=request();
+  const failed = await call(mock.service, '/turbo-website-requests', data);
+  assert.equal(failed.status, 503);
+  assert.equal(Object.keys(mock.data.orders).length, 1);
+  assert.equal(mock.created.length, 0);
+  const retry = await call(mock.service, '/turbo-website-requests', data);
+  assert.equal(retry.status, 200);
+  assert.equal(Object.keys(mock.data.orders).length, 1);
+  assert.equal(mock.created.length, 1);
+  assert.equal(mock.sent.length, 1);
+});
+
+test('receipt recovery keeps the native order after workflow updates and a lost message pointer', async t => {
+  const mock = setup(t), data=request();
+  const first = await call(mock.service, '/turbo-website-requests', data);
+  const saved = mock.data.orders['UF-0001'], channel=mock.channels.get(saved.channelId);
+  channel.topic=`selling-owner:${userId}|selling-kind:order|selling-order:${saved.id}|selling-product:thumbnail|selling-status:processing|website-request:${data.requestId}|website-fingerprint:${saved.websiteFingerprint}|`;
+  saved.initialMessageId=null;
+  fs.unlinkSync(path.join(mock.directory,'website-request-receipts.json'));
+  const restarted = createRequestService(() => mock.client, { env, directory: mock.directory });
+  const retry = await call(restarted, '/turbo-website-requests', data);
+  assert.deepEqual(retry.body, first.body);
+  assert.equal(mock.created.length, 1);
+  assert.equal(mock.sent.length, 1);
+  assert.deepEqual(mock.workflow,['assign','sync','notify','status']);
+});
+
 test('public or leaky channels fail closed without sending order details', async t => {
   for (const options of [{ publicInternal: true }, { leakyTicket: true }]) {
     const mock = setup(t, options);
-    const response = await call(mock.service, '/turbo-website-requests', request());
+    const response = await call(mock.service, '/turbo-website-requests', request(options.publicInternal ? { product: 'partnership' } : {}));
     assert.equal(response.status, 409);
     assert.equal(response.body.error, 'TICKET_UNAVAILABLE');
     assert.equal(mock.sent.length, 0);

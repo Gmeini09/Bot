@@ -27,6 +27,7 @@ const http = require('http');
 const crypto = require('crypto');
 const QRCode = require('qrcode');
 const { Pool } = require('pg');
+const { createSellingOrderService, orderActionRows, ShopRequestError } = require('./selling-order-service');
 
 // Turbo Design Branding Banner (embedded so Railway only needs selling-entry.js + package.json)
 const TURBO_DESIGN_BANNER_NAME = 'turbo-design-banner.jpeg';
@@ -1273,6 +1274,7 @@ async function autoRenameOrderTicket(guild, order) {
     `selling-status:${order.closedAt ? 'closed' : 'open'}`,
     `selling-waiting:${order.waitingOn || 'none'}`,
     `selling-priority:${order.priority || 'normal'}`,
+    ...(order.websiteRequestId ? [`website-request:${order.websiteRequestId}`, `website-fingerprint:${order.websiteFingerprint}`, ''] : []),
   ].join('|').slice(0, 1024);
   if (channel.topic !== nextTopic) await channel.setTopic(nextTopic, `Selling Workflow Sync ${order.id}`).catch(() => {});
   return channel;
@@ -2897,7 +2899,7 @@ function producerRoleKeysForProducts(productKeys = []) {
       keys.add('designer');
       keys.add('developer');
     }
-    if (productKey === 'soundpack') keys.add('sound');
+    if (productKey === 'soundpack' || productKey === 'sptool') keys.add('sound');
     if (productKey === 'fivem' || productKey === 'bot') keys.add('developer');
     if (productKey === 'bundle') {
       keys.add('designer');
@@ -3047,29 +3049,6 @@ async function syncDynamicSellingPermissions(guild, data) {
   return updated;
 }
 
-function orderActionRows(order) {
-  const id = order.id;
-  return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`selling_claim:${id}`).setLabel('Übernehmen').setEmoji('🙋').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`selling_price:${id}`).setLabel('Preis').setEmoji('💶').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`selling_status:${id}:paid`).setLabel('Bezahlt').setEmoji('💳').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`selling_status:${id}:processing`).setLabel('Bearbeitung').setEmoji('🛠️').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`selling_deliver_start:${id}`).setLabel('Produkt liefern').setEmoji('📤').setStyle(ButtonStyle.Success),
-    ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`selling_offer_start:${id}`).setLabel('Angebot').setEmoji('🧾').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`selling_priority_cycle:${id}`).setLabel('Priorität').setEmoji('🚦').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`selling_revision:${id}`).setLabel(`Revision (${Math.max(0, Number(order.revisionsRemaining || 0))})`).setEmoji('🔄').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`selling_dispute:${id}`).setLabel('Problem / Streitfall').setEmoji('⚠️').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`selling_close:${id}`).setLabel('Ticket schließen').setEmoji('🔒').setStyle(ButtonStyle.Danger),
-    ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`selling_express:${id}`).setLabel(order.expressRequested ? 'Express angefragt' : 'Express anfragen').setEmoji('⚡').setStyle(ButtonStyle.Danger).setDisabled(Boolean(order.expressRequested || order.paidAt || order.closedAt)),
-    ),
-  ];
-}
-
 function supportActionRows() {
   return [new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('selling_support_claim').setLabel('Übernehmen').setEmoji('🙋').setStyle(ButtonStyle.Primary),
@@ -3119,7 +3098,7 @@ function orderInfoEmbed(order, data = null) {
     { name: '🖼️ Referenzen', value: orderReferenceText(order) },
     { name: '📝 Zusatz', value: String(order.notes || '—').slice(0, 1024), inline: false },
     { name: '💸 Rabatt / Extras', value: `${discountParts.length ? discountParts.join(' • ') : 'Kein Rabatt'}\nZusatzkosten: ${formatEuro(acceptedExtraChargesTotal(order))}`, inline: false },
-  ], { color, footer: `Turbo Designs • Order Center • ${order.id}` });
+  ], { color, footer: `Turbo Designs • Order Center • ${order.id}` + (order.websiteRequestId ? ` • ${order.websiteRequestId} • ${order.websiteFingerprint}` : '') });
 }
 
 function dashboardEmbed(guild, data) {
@@ -3463,149 +3442,73 @@ async function showOrderModal(interaction, productKey) {
   await interaction.showModal(modal);
 }
 
+const sellingOrderService = createSellingOrderService({
+  products: PRODUCT_TYPES, ordersCategory: SELLING.categories.orders,
+  getGuildShopData, saveSellingStore, acquireSellingActionLock, releaseSellingActionLock,
+  consumeSellingRateLimit, productConfig, getDiscountCodeState, loyaltyForUser, nextOrderId,
+  nextAdvancedId, parseDeadlineToTimestamp, findSellingCategory, findSellingTextChannel, sanitizeName,
+  sellingOrderTicketOverwrites, configuredOrderPrice, calculateOrderFinalPrice, orderInfoEmbed,
+  automateNewOrder, syncOrderWorkflow, refreshOrderStatusPanel, logSelling, queueInfoForOrder, shopEmbed,
+  async assertPrivateOrderChannel(channel, guild, userId, productKey) {
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (!member || member.user.bot) throw new ShopRequestError('JOIN_REQUIRED');
+    const me = guild.members.me || await guild.members.fetchMe();
+    const roles = ['owner','management','support',...producerRoleKeysForProducts([productKey])].map(key => configuredRoleForKey(guild,key)).filter(Boolean);
+    if (!roles.length) throw new ShopRequestError('TICKET_UNAVAILABLE');
+    require('./website-feed').assertPrivateChannel(channel,guild,roles,member,me);
+  },
+  async assertPrivatePartnerChannel(channel, guild) {
+    const me = guild.members.me || await guild.members.fetchMe();
+    const roles = ['owner','management'].map(key => configuredRoleForKey(guild,key)).filter(Boolean);
+    require('./website-feed').assertPrivateChannel(channel,guild,roles,null,me);
+  },
+  async notifyNewOrder(guild, data, order, channel) {
+    await channel.send({ content: '📎 **Referenzen:** Weitere Beispielbilder, Screenshots oder Dateien kannst du jederzeit direkt in dieses Ticket schicken; passende Uploads werden automatisch der Bestellung zugeordnet.' }).catch(() => {});
+    const internal = findSellingTextChannel(guild, '📦・bestellungen');
+    if (internal) await internal.send({
+      embeds: [shopEmbed(`🛒 Neue Bestellung ${order.id}`, `${orderProductEmoji(order)} **${orderProductLabel(order)}** von <@${order.userId}>\nTicket: <#${channel.id}>${order.couponCode ? `\nRabattcode: \`${order.couponCode}\` (${order.discountPercent} %)` : ''}`)],
+      allowedMentions: { parse: [] },
+    });
+  },
+});
+
 async function createOrderFromModal(interaction, productKey) {
-  const creationLock = `order-create-lock:${interaction.guildId}:${interaction.user.id}`;
-  if (!acquireSellingActionLock(creationLock)) {
-    await interaction.reply({ content: '⏳ Eine Bestellung wird gerade bereits erstellt. Bitte warte kurz.', ephemeral: true }).catch(() => {});
-    return;
-  }
+  if (!interaction.inGuild()) return;
   try {
-  const product = PRODUCT_TYPES[productKey];
-  if (!product || !interaction.inGuild()) return;
-
-  const { store, data } = getGuildShopData(interaction.guildId);
-  if (data.blacklist[interaction.user.id]) {
-    await interaction.reply({ content: '🚫 Du bist aktuell für neue Bestellungen gesperrt.', ephemeral: true });
-    return;
-  }
-  if (data.config.availability === 'closed') {
-    await interaction.reply({ content: '🔴 Neue Bestellungen sind aktuell geschlossen.', ephemeral: true });
-    return;
-  }
-  const duplicate = Object.values(data.orders).find(order => order.userId === interaction.user.id && !order.closedAt);
-  if (duplicate) {
-    await interaction.reply({ content: `❌ Du hast bereits eine offene Bestellung **${duplicate.id}**.`, ephemeral: true });
-    return;
-  }
-  if (!productConfig(data, productKey)?.enabled) {
-    await interaction.reply({ content: '🔴 Dieses Produkt wurde inzwischen deaktiviert und kann nicht mehr bestellt werden.', ephemeral: true });
-    return;
-  }
-
-  const couponState = getDiscountCodeState(data, interaction.fields.getTextInputValue('coupon'));
-  if (couponState.error) {
-    await interaction.reply({ content: `❌ Rabattcode ungültig: ${couponState.error}`, ephemeral: true });
-    return;
-  }
-  if (!consumeSellingRateLimit(`order-create:${interaction.guildId}:${interaction.user.id}`, 2, 5 * 60 * 1000)) {
-    await interaction.reply({ content: '⏳ Zu viele Bestellversuche in kurzer Zeit. Bitte warte einige Minuten.', ephemeral: true });
-    return;
-  }
-
-  const loyalty = loyaltyForUser(data, interaction.user.id);
-  const orderId = nextOrderId(data);
-  const order = {
-    id: orderId,
-    userId: interaction.user.id,
-    productKey,
-    details: interaction.fields.getTextInputValue('details').trim(),
-    style: interaction.fields.getTextInputValue('style').trim(),
-    references: '',
-    referenceUploadUrl: modalUploadedReferences(interaction)[0]?.url || null,
-    referenceUploads: modalUploadedReferences(interaction),
-    deadline: interaction.fields.getTextInputValue('deadline').trim(),
-    dueAt: parseDeadlineToTimestamp(interaction.fields.getTextInputValue('deadline'), product.etaDays),
-    notes: '',
-    couponCode: couponState.coupon ? couponState.code : null,
-    voucherCode: couponState.voucher ? couponState.code : null,
-    voucherAmount: couponState.voucher ? Number(couponState.voucher.remainingAmount ?? couponState.voucher.amount ?? 0) : 0,
-    discountPercent: couponState.coupon ? Number(couponState.coupon.percent || 0) : 0,
-    loyaltyDiscountPercent: loyalty.discount,
-    loyaltyLabel: loyalty.level?.label || null,
-    basePrice: null,
-    finalPrice: null,
-    status: 'pending',
-    revisionsRemaining: Number(product.revisions || 0),
-    assignedTo: null,
-    createdAt: Date.now(),
-    paidAt: null,
-    deliveredAt: null,
-    closedAt: null,
-    channelId: null,
-    deliveryChannelId: null,
-    licenseId: null,
-    reviewSubmitted: false,
-    couponRedeemedAt: null,
-    voucherRedeemedAt: null,
-    priority: 'normal',
-    waitingOn: 'staff',
-    lastActivityAt: Date.now(),
-    lastCustomerAt: Date.now(),
-    initialRevisions: Number(product.revisions || 0),
-    testMode: Boolean(data.config.testMode),
-    extraCharges: [], expressRequested: false, expressApproved: false,
-  };
-  data.orders[orderId] = order;
-  saveSellingStore(store);
-
-  const category = findSellingCategory(interaction.guild, SELLING.categories.orders);
-  if (!category) {
-    order.closedAt = Date.now();
-    saveSellingStore(store);
-    await interaction.reply({ content: '❌ Die Kauf-Ticket-Kategorie fehlt. Führe `/setup server selling` erneut aus.', ephemeral: true });
-    return;
-  }
-
-  let channel;
-  try {
-    channel = await interaction.guild.channels.create({
-      name: `${orderId.toLowerCase()}-${productKey}-${sanitizeName(interaction.user.username)}`.slice(0, 95),
-      type: ChannelType.GuildText,
-      parent: category.id,
-      topic: `selling-owner:${interaction.user.id}|selling-kind:order|selling-order:${orderId}|selling-product:${productKey}|selling-status:open`,
-      permissionOverwrites: sellingOrderTicketOverwrites(interaction.guild, interaction.user.id, [productKey]),
-      reason: `Selling Bestellung ${orderId} von ${interaction.user.tag}`,
+    const result = await sellingOrderService.createOrder({
+      guild: interaction.guild, user: interaction.user, productKey,
+      input: {
+        details: interaction.fields.getTextInputValue('details'), style: interaction.fields.getTextInputValue('style'),
+        deadline: interaction.fields.getTextInputValue('deadline'), coupon: interaction.fields.getTextInputValue('coupon'),
+        referenceUploads: modalUploadedReferences(interaction),
+      },
+    });
+    await interaction.reply({
+      content: `✅ Bestellung **${result.reference}** wurde erstellt: <#${result.channel.id}>\nDas Team bestätigt dort Preis, Lieferumfang und PayPal-Zahlung.${result.queue.position ? `\nQueue-Position: **#${result.queue.position} von ${result.queue.total}**` : ''}`,
+      ephemeral: true,
     });
   } catch (error) {
-    order.closedAt = Date.now();
-    order.failedAt = Date.now();
-    saveSellingStore(store);
-    throw error;
+    const messages = {
+      ORDER_BUSY: '⏳ Eine Bestellung wird gerade bereits erstellt. Bitte warte kurz.',
+      BLACKLISTED: '🚫 Du bist aktuell für neue Bestellungen gesperrt.',
+      SHOP_CLOSED: '🔴 Neue Bestellungen sind aktuell geschlossen.',
+      ORDER_EXISTS: '❌ Du hast bereits eine offene Bestellung.',
+      PRODUCT_UNAVAILABLE: '🔴 Dieses Produkt wurde inzwischen deaktiviert und kann nicht mehr bestellt werden.',
+      INVALID_DISCOUNT: '❌ Der Rabattcode ist ungültig.',
+      RATE_LIMITED: '⏳ Zu viele Bestellversuche in kurzer Zeit. Bitte warte einige Minuten.',
+      TICKET_UNAVAILABLE: '❌ Das Kauf-Ticketsystem ist derzeit nicht verfügbar. Bitte wende dich an das Shop-Team.',
+    };
+    if (!messages[error.code]) throw error;
+    await interaction.reply({ content: messages[error.code] + (error.ticketUrl ? ` ${error.ticketUrl}` : ''), ephemeral: true });
   }
+}
 
-  order.channelId = channel.id;
-  const autoPrice = configuredOrderPrice(data, [productKey]);
-  if (autoPrice !== null) { order.basePrice = autoPrice; order.finalPrice = calculateOrderFinalPrice(order); }
-  await automateNewOrder(interaction.guild, data, order, channel).catch(() => {});
-  saveSellingStore(store);
-
-  await channel.send({
-    content: `<@${interaction.user.id}>`,
-    embeds: [orderInfoEmbed(order, data)],
-    components: orderActionRows(order),
-    allowedMentions: { users: [interaction.user.id] },
-  });
-  await channel.send({ content: '📎 **Referenzen:** Du kannst Referenzen bereits im Bestellformular hochladen. Weitere Beispielbilder, Screenshots oder Dateien kannst du jederzeit direkt in dieses Ticket schicken; passende Uploads werden automatisch der Bestellung zugeordnet.' }).catch(() => {});
-  await syncOrderWorkflow(interaction.guild, data, order).catch(() => {});
-
-  const internal = findSellingTextChannel(interaction.guild, '📦・bestellungen');
-  if (internal) {
-    await internal.send({
-      embeds: [shopEmbed(`🛒 Neue Bestellung ${orderId}`, `${product.emoji} **${product.label}** von <@${interaction.user.id}>\nTicket: <#${channel.id}>${order.couponCode ? `\nRabattcode: \`${order.couponCode}\` (${order.discountPercent} %)` : ''}`)],
-      allowedMentions: { parse: [] },
-    }).catch(() => {});
-  }
-
-  await refreshOrderStatusPanel(interaction.guild, data).catch(() => {});
-  const queue = queueInfoForOrder(data, order);
-  await interaction.reply({
-    content: `✅ Bestellung **${orderId}** wurde erstellt: <#${channel.id}>\nDas Team bestätigt dort Preis, Lieferumfang und PayPal-Zahlung.${queue.position ? `\nQueue-Position: **#${queue.position} von ${queue.total}**` : ''}`,
-    ephemeral: true,
-  });
-  await logSelling(interaction.guild, '🛒 Neue Bestellung', `<@${interaction.user.id}> hat **${orderId} • ${product.label}** erstellt: <#${channel.id}>`);
-  } finally {
-    releaseSellingActionLock(creationLock);
-  }
+async function createWebsiteShopRequest(client, request, fingerprint) {
+  const guild = await client.guilds.fetch('1531989453168578650');
+  await guild.channels.fetch(); await guild.roles.fetch();
+  const member = await guild.members.fetch(request.discordUserId).catch(() => null);
+  if (!member || member.user.bot) throw new ShopRequestError('JOIN_REQUIRED');
+  return sellingOrderService.createWebsiteRequest(guild, member.user, request, fingerprint);
 }
 
 async function openSupportTicket(interaction, supportKey = 'general') {
@@ -4586,7 +4489,7 @@ function configuredOrderPrice(data, keys) {
 
 function teamRoleKeyForProduct(key) {
   if (key === 'thumbnail' || key === 'grafik' || key === 'nve') return 'designer';
-  if (key === 'soundpack') return 'sound';
+  if (key === 'soundpack' || key === 'sptool') return 'sound';
   if (key === 'fivem' || key === 'bot') return 'developer';
   return 'support';
 }
@@ -5694,19 +5597,16 @@ async function submitGiftOrder(interaction) {
 }
 
 async function submitPartnerApplication(interaction) {
-  const { store, data } = getGuildShopData(interaction.guildId);
-  if (!consumeSellingRateLimit(`partner:${interaction.guildId}:${interaction.user.id}`, 2, 24*3600000)) return interaction.reply({ content:'⏳ Du hast bereits kürzlich eine Partnerschaftsanfrage gestellt.', ephemeral:true });
-  const id = nextAdvancedId(data, 'nextPartner', 'PA');
-  const app = {
-    id, userId:interaction.user.id, project:interaction.fields.getTextInputValue('project').trim(),
-    members:interaction.fields.getTextInputValue('members').trim(), invite:interaction.fields.getTextInputValue('invite').trim(),
-    reason:interaction.fields.getTextInputValue('reason').trim(), ad:interaction.fields.getTextInputValue('ad').trim(),
-    status:'pending', createdAt:Date.now(),
-  };
-  data.partnerApplications[id]=app; saveSellingStore(store);
-  const channel=findSellingTextChannel(interaction.guild,'🤝・partner-anfragen');
-  if(channel) await channel.send({embeds:[shopEmbed(`🤝 Partnerschaft ${id}`,`**Antragsteller:** <@${app.userId}>\n**Projekt:** ${app.project}\n**Reichweite:** ${app.members||'—'}\n**Link:** ${app.invite}\n\n**Grund:**\n${app.reason}\n\n**Ad:**\n${app.ad||'—'}`)],allowedMentions:{parse:[]}}).catch(()=>{});
-  await interaction.reply({content:`✅ Partnerschaftsanfrage **${id}** wurde eingereicht.`,ephemeral:true});
+  try {
+    const result = await sellingOrderService.createPartnerApplication({
+      guild: interaction.guild, user: interaction.user,
+      input: Object.fromEntries(['project','members','invite','reason','ad'].map(key => [key,interaction.fields.getTextInputValue(key).trim()])),
+    });
+    await interaction.reply({ content: `✅ Partnerschaftsanfrage **${result.reference}** wurde eingereicht.`, ephemeral: true });
+  } catch (error) {
+    if (error.code === 'RATE_LIMITED' || error.code === 'ORDER_BUSY') return interaction.reply({ content:'⏳ Du hast bereits kürzlich eine Partnerschaftsanfrage gestellt. Bitte warte etwas.', ephemeral:true });
+    throw error;
+  }
 }
 
 async function submitRefundRequest(interaction) {
@@ -6716,6 +6616,10 @@ async function reportSellingError(guild, error, context = {}) {
 
 const originalLogin = Client.prototype.login;
 Client.prototype.login = function patchedLogin(...args) {
+  this.__turboSellingWebsite = {
+    ready: async () => sellingOrderService.ready(await this.guilds.fetch('1531989453168578650')),
+    createRequest: (request, fingerprint) => createWebsiteShopRequest(this, request, fingerprint),
+  };
   sellingLoginToken = args[0] || sellingLoginToken;
   if (!this.__sellingSetupInstalled) {
     this.__sellingSetupInstalled = true;
