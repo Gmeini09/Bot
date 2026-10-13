@@ -55,6 +55,7 @@ async function ownServer(world, ctx) {
     version: 1,
     channels: { welcomeChannelId: own.welcome.id, verifyChannelId: own.rules.id, shopChannelId: own.infos.id, supportChannelId: own.wishes.id, modLogChannelId: own.modOnly.id, ticketLogChannelId: own.modOnly.id, ticketCategoryId: own.shopCat.id, orderCategoryId: own.shopCat.id },
     staffRoles: ['FOUNDER', 'OWNER'], newStaffRole: '・MOD 𓇻', memberRole: '.gg/xvy',
+    products: [{ key: 'thumb', name: 'Thumbnail', price: 0, emoji: '📸' }, { key: 'sp', name: 'Soundpack', price: 0.5, emoji: '🔊' }],
   };
   return { own, old };
 }
@@ -90,6 +91,13 @@ test('layout: uses the own channels and roles, removes only the old setup leftov
   assert.ok(customIds(own.wishes.messages.cache.get(g.panels.tickets).payload).includes('"custom_id":"ticket:open"'));
   assert.ok(customIds(own.infos.messages.cache.get(g.panels.shop).payload).includes('"custom_id":"shop:cart"'));
   assert.ok(ctx.logs.some((l) => /eingerichtet/.test(l.title)));
+  const shopText = JSON.stringify(own.infos.messages.cache.get(g.panels.shop).payload);
+  assert.match(shopText, /Thumbnail\*\* – Gratis/);
+  assert.match(shopText, /Soundpack\*\* – €\s0,50/);
+  // a removed seed product does not come back on the next start
+  delete g.products.p1;
+  await adopt.applyLayout(G, ctx);
+  assert.equal(Object.values(g.products).filter((p) => p.name === 'Thumbnail').length, 0);
   const roles = G.roles.cache.size, msgs = own.rules.messages.cache.size;
   assert.equal(await adopt.applyLayout(G, ctx), false, 'runs only once');
   assert.equal(G.roles.cache.size, roles);
@@ -188,6 +196,8 @@ test('ticket: open via menu + modal, one per user, claim, add member, close with
 
 test('shop: products, panel, cart, order channel, status buttons, customer role', async (t) => {
   const { world, ctx, g, staffRole } = await setUp(t);
+  for (const k of Object.keys(g.products)) delete g.products[k]; // start without the seeded products
+  g.productCounter = 0;
   const staff = world.addUser('mod', { roles: [staffRole], position: 10 });
   const add = (opts) => shop.onProductCommand(interaction(world, world.owner, 'command', { commandName: 'produkt', sub: 'hinzufuegen', opts }), ctx);
   await add({ name: 'Logo', preis: '14,99', beschreibung: 'Dein Logo', emoji: '🎨' });

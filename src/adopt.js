@@ -21,6 +21,12 @@ const LAYOUTS = {
     staffRoles: ['FOUNDER', 'OWNER'], // matched by name
     newStaffRole: '・MOD 𓇻',
     memberRole: '.gg/xvy',
+    // products for 🛒┇bestellen – added once each (not again if the owner removes one later)
+    products: [
+      { key: 'thumbnail', name: 'Thumbnail', price: 0, emoji: '📸', description: 'Individuelles Thumbnail' },
+      { key: 'soundpack', name: 'Soundpack', price: 0.5, emoji: '🔊', description: 'Waffen-Soundpack für FiveM' },
+      { key: 'nve', name: 'NVE', price: 3, emoji: '🌆', description: 'NVE Grafik-Preset für FiveM' },
+    ],
   },
 };
 
@@ -55,10 +61,32 @@ async function removeOld(guild, g, report) {
   g.panels = {};
 }
 
+/** Adds the layout's products once each; returns how many were added. */
+async function seedProducts(guild, g, layout, ctx) {
+  g.seededProducts ||= [];
+  let added = 0;
+  for (const p of layout.products || []) {
+    if (g.seededProducts.includes(p.key)) continue;
+    g.seededProducts.push(p.key);
+    if (Object.values(g.products).some((x) => x.name.toLowerCase() === p.name.toLowerCase())) continue;
+    if (Object.keys(g.products).length >= 25) break;
+    const id = `p${++g.productCounter}`;
+    g.products[id] = { id, name: p.name, price: p.price, description: p.description || '', emoji: p.emoji || '', enabled: true, createdAt: Date.now() + added };
+    added++;
+  }
+  if (added) {
+    ctx.store.save();
+    await ctx.shop.refreshPanel(guild, g);
+    await ctx.log(guild, { title: '🛒 Produkte angelegt', description: (layout.products || []).map((p) => `${p.emoji} ${p.name}`).join(' · '), color: 0x2ecc71 });
+  }
+  return added;
+}
+
 async function applyLayout(guild, ctx) {
   const layout = LAYOUTS[guild.id];
   const g = ctx.store.guild(guild.id);
-  if (!layout || g.layoutVersion === layout.version) return false;
+  if (!layout) return false;
+  if (g.layoutVersion === layout.version) { await seedProducts(guild, g, layout, ctx); return false; }
   await guild.roles.fetch().catch(() => {});
   await guild.channels.fetch().catch(() => {});
   const report = [];
@@ -82,8 +110,9 @@ async function applyLayout(guild, ctx) {
   c.memberRoleId = findRole(guild, layout.memberRole)?.id ?? null;
   c.customerRoleId = null;
 
-  const panels = await postAll(guild, g, ctx);
   g.layoutVersion = layout.version;
+  await seedProducts(guild, g, layout, ctx);
+  const panels = await postAll(guild, g, ctx);
   ctx.store.save();
   const summary = [
     '**Bot an deinen Server angepasst** – er nutzt jetzt nur deine Kanäle und Rollen.',
@@ -95,4 +124,4 @@ async function applyLayout(guild, ctx) {
   return true;
 }
 
-module.exports = { applyLayout, LAYOUTS, OLD_CHANNELS, OLD_ROLES };
+module.exports = { applyLayout, seedProducts, LAYOUTS, OLD_CHANNELS, OLD_ROLES };

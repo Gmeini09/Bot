@@ -1,7 +1,7 @@
 'use strict';
 // Pure helpers without Discord objects – easy to test.
 
-const money = (v, currency = 'EUR') => new Intl.NumberFormat('de-AT', { style: 'currency', currency }).format(Number(v) || 0);
+const money = (v, currency = 'EUR') => (Number(v) === 0 ? 'Gratis' : new Intl.NumberFormat('de-AT', { style: 'currency', currency }).format(Number(v) || 0));
 
 /** "{user}", "{server}", "{verify}", "{count}" in welcome texts. */
 function fillTemplate(text, vars) {
