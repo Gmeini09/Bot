@@ -48,7 +48,7 @@ async function onCommand(interaction, ctx) {
   if (name === 'warns') {
     const u = interaction.options.getUser('nutzer', true);
     const list = g.warns[u.id] || [];
-    return interaction.reply({ embeds: [embed(g, { title: `⚠️ Verwarnungen von ${u.username}`, description: list.length ? list.map((w, i) => `**${i + 1}.** ${w.reason} – <@${w.by}> <t:${Math.floor(w.at / 1000)}:R>`).join('\n') : 'Keine Verwarnungen.' })], ephemeral: true });
+    return interaction.reply({ embeds: [embed(g, { title: `⚠️ Verwarnungen von ${u.username}`, description: list.length ? list.map((w, i) => `**${i + 1}.** ${w.reason} – <@${w.by}> <t:${Math.floor(w.at / 1000)}:R>`).join('\n') : 'Keine Verwarnungen.' })], flags: 64 });
   }
   if (name === 'unwarn') {
     const u = interaction.options.getUser('nutzer', true);
@@ -70,7 +70,7 @@ async function onCommand(interaction, ctx) {
   if (name === 'clear') {
     const n = interaction.options.getInteger('anzahl', true);
     const u = interaction.options.getUser('nutzer');
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: 64 });
     let msgs = await interaction.channel.messages.fetch({ limit: 100 });
     if (u) msgs = msgs.filter((m) => m.author.id === u.id);
     const del = await interaction.channel.bulkDelete([...msgs.values()].slice(0, n), true).catch(() => null);

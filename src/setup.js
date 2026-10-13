@@ -49,7 +49,7 @@ async function postAll(guild, g, ctx) {
 async function runSetup(interaction, ctx) {
   const { guild } = interaction;
   const g = ctx.store.guild(guild.id);
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: 64 });
   const lines = await postAll(guild, g, ctx);
   ctx.store.save();
   const c = g.config;

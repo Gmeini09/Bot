@@ -94,6 +94,8 @@ const MOD = new Set(['warn', 'warns', 'unwarn', 'timeout', 'untimeout', 'kick', 
 
 async function route(i) {
   if (!i.inGuild()) return null;
+  // "ephemeral" (flag 64) only belongs to the first reply – editing a deferred reply must not send it again
+  if (i.editReply) { const edit = i.editReply.bind(i); i.editReply = (p) => edit(p && typeof p === 'object' ? { ...p, flags: undefined } : p); }
   if (i.isAutocomplete()) return i.commandName === 'produkt' ? shop.onAutocomplete(i, ctx) : null;
   if (i.isChatInputCommand()) {
     if (COMMAND_HANDLERS[i.commandName]) return COMMAND_HANDLERS[i.commandName](i, ctx);

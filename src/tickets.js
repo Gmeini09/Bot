@@ -59,7 +59,7 @@ async function onCreate(interaction, ctx) {
   const type = g.config.ticketTypes.find((t) => t.id === typeId) || { id: typeId, label: 'Ticket', emoji: '🎫' };
   const open = openTicketOf(g, interaction.user.id);
   if (open && interaction.guild.channels.cache.get(open[0])) return interaction.reply(fail(g, `Du hast schon ein offenes Ticket: <#${open[0]}>`));
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: 64 });
   const topic = interaction.fields.getTextInputValue('topic');
   const no = ++g.ticketCounter;
   let ch;
@@ -103,7 +103,7 @@ async function onCloseButton(interaction, ctx) {
   return interaction.reply({
     embeds: [embed(g, { description: 'Ticket wirklich schließen? Der Kanal wird danach gelöscht, ein Transkript wird gespeichert.', timestamp: false })],
     components: [row(button('ticket:close:yes', 'Ja, schließen', BTN.danger, '🔒'), button('ticket:close:no', 'Abbrechen', BTN.secondary))],
-    ephemeral: true,
+    flags: 64,
   });
 }
 

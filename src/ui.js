@@ -54,7 +54,7 @@ function modal(customId, title, fields) {
   };
 }
 
-const ok = (g, text) => ({ embeds: [embed(g, { description: `✅ ${text}`, color: 0x2ecc71, timestamp: false })], ephemeral: true });
-const fail = (g, text) => ({ embeds: [embed(g, { description: `❌ ${text}`, color: 0xe74c3c, timestamp: false })], ephemeral: true });
+const ok = (g, text) => ({ embeds: [embed(g, { description: `✅ ${text}`, color: 0x2ecc71, timestamp: false })], flags: 64 });
+const fail = (g, text) => ({ embeds: [embed(g, { description: `❌ ${text}`, color: 0xe74c3c, timestamp: false })], flags: 64 });
 
 module.exports = { BTN, embed, button, row, select, modal, ok, fail, emojiObj };

@@ -89,13 +89,14 @@ async function applyTicketTypes(guild, g, layout, ctx) {
   let changed = false;
   for (const [id, patch] of Object.entries(layout.ticketTypes || {})) {
     const t = g.config.ticketTypes.find((x) => x.id === id);
-    if (!t) continue;
+    if (!t) { console.log(`ℹ️ Ticket-Art ${id} nicht gefunden (vorhanden: ${g.config.ticketTypes.map((x) => x.id).join(', ')})`); continue; }
     for (const [k, v] of Object.entries(patch)) if (t[k] !== v) { t[k] = v; changed = true; }
   }
   if (changed) {
     g.config.ticketTypes = g.config.ticketTypes.map((t) => ({ ...t })); // own copy, not the shared default
     ctx.store.save();
-    if (g.panels.tickets) await postPanel(guild, g, 'tickets', g.config.supportChannelId, ctx.tickets.panel(g)).catch(() => {});
+    const m = await postPanel(guild, g, 'tickets', g.config.supportChannelId, ctx.tickets.panel(g)).catch((e) => { console.error('❌ Ticket-Panel nicht aktualisiert:', e.message); return null; });
+    console.log(`🎫 Ticket-Arten aktualisiert${m ? ` – Panel: ${m.url}` : ''}`);
   }
   return changed;
 }

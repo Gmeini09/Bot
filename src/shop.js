@@ -31,7 +31,7 @@ const refreshPanel = (guild, g) => postPanel(guild, g, 'shop', g.config.shopChan
 function cartView(g, userId) {
   const lines = cartLines(g.carts[userId], g.products);
   const cur = g.config.currency;
-  if (!lines.length) return { embeds: [embed(g, { title: '🛒 Dein Warenkorb', description: 'Dein Warenkorb ist leer. Wähle im Shop ein Produkt aus.', timestamp: false })], components: [], ephemeral: true };
+  if (!lines.length) return { embeds: [embed(g, { title: '🛒 Dein Warenkorb', description: 'Dein Warenkorb ist leer. Wähle im Shop ein Produkt aus.', timestamp: false })], components: [], flags: 64 };
   return {
     embeds: [embed(g, {
       title: '🛒 Dein Warenkorb',
@@ -39,7 +39,7 @@ function cartView(g, userId) {
       timestamp: false,
     })],
     components: [row(button('shop:checkout', 'Bestellen', BTN.success, '✅'), button('shop:clear', 'Leeren', BTN.secondary, '🗑️'))],
-    ephemeral: true,
+    flags: 64,
   };
 }
 
@@ -62,7 +62,7 @@ async function onClear(interaction, ctx) {
   delete g.carts[interaction.user.id];
   ctx.store.save();
   const v = cartView(g, interaction.user.id);
-  delete v.ephemeral;
+  delete v.flags;
   return interaction.update(v);
 }
 
@@ -108,7 +108,7 @@ async function onOrder(interaction, ctx) {
   const g = ctx.store.guild(interaction.guildId);
   const lines = cartLines(g.carts[interaction.user.id], g.products);
   if (!lines.length) return interaction.reply(fail(g, 'Dein Warenkorb ist leer.'));
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: 64 });
   const no = ++g.orderCounter;
   let ch;
   try {
@@ -176,7 +176,7 @@ async function onProductCommand(interaction, ctx) {
   const cur = g.config.currency;
   if (sub === 'liste') {
     const all = Object.values(g.products);
-    return interaction.reply({ embeds: [embed(g, { title: '📋 Produkte', description: all.length ? all.map((p) => `\`${p.id}\` ${p.enabled === false ? '🔴' : '🟢'} ${p.emoji || ''} **${p.name}** – ${money(p.price, cur)}`).join('\n') : 'Noch keine Produkte. `/produkt hinzufuegen`' })], ephemeral: true });
+    return interaction.reply({ embeds: [embed(g, { title: '📋 Produkte', description: all.length ? all.map((p) => `\`${p.id}\` ${p.enabled === false ? '🔴' : '🟢'} ${p.emoji || ''} **${p.name}** – ${money(p.price, cur)}`).join('\n') : 'Noch keine Produkte. `/produkt hinzufuegen`' })], flags: 64 });
   }
   if (sub === 'hinzufuegen') {
     if (Object.keys(g.products).length >= 25) return interaction.reply(fail(g, 'Maximal 25 Produkte (Discord-Grenze für das Auswahlmenü).'));

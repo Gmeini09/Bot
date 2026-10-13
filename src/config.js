@@ -27,7 +27,7 @@ async function onCommand(interaction, ctx) {
   const c = g.config;
   const sub = interaction.options.getSubcommand();
   const o = interaction.options;
-  if (sub === 'anzeigen') return interaction.reply({ embeds: [show(g)], ephemeral: true });
+  if (sub === 'anzeigen') return interaction.reply({ embeds: [show(g)], flags: 64 });
   if (sub === 'name') c.name = o.getString('name', true).trim();
   else if (sub === 'farbe') {
     const col = parseColor(o.getString('hex', true));
