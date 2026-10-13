@@ -4,26 +4,41 @@ const { embed, button, row, select, modal, ok, fail, BTN } = require('./ui');
 const { money, parsePrice, cartLines, cartTotal, addToCart, slug, pad, validEmoji, ORDER_STATUS, transcript } = require('./logic');
 const { privateChannel, isStaff, fetchAll, staffPing } = require('./tickets');
 const { postPanel } = require('./setup');
+const fs = require('fs');
+const path = require('path');
+
+// product pictures live on the volume (Discord attachment links expire), sent as files with the panel
+let IMAGE_DIR = null;
+const setImageDir = (dir) => { IMAGE_DIR = dir; fs.mkdirSync(dir, { recursive: true }); };
+const imageFile = (p) => (IMAGE_DIR && p.image && fs.existsSync(path.join(IMAGE_DIR, p.image)) ? path.join(IMAGE_DIR, p.image) : null);
+const IMAGE_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
 
 const enabledProducts = (g) => Object.values(g.products).filter((p) => p.enabled !== false).sort((a, b) => a.createdAt - b.createdAt);
 
 function panel(g) {
   const list = enabledProducts(g);
   const cur = g.config.currency;
+  const line = (p) => `${p.emoji ? `${p.emoji} ` : ''}**${p.name}** – ${money(p.price, cur)}${p.description ? `\n> ${p.description}` : ''}`;
+  const pictured = list.filter((p) => imageFile(p)).slice(0, 9); // 10 embeds per message: header + 9 pictures
+  const textOnly = list.filter((p) => !pictured.includes(p));
   const description = list.length
-    ? list.map((p) => `${p.emoji ? `${p.emoji} ` : ''}**${p.name}** – ${money(p.price, cur)}${p.description ? `\n> ${p.description}` : ''}`).join('\n\n')
+    ? (textOnly.length ? textOnly.map(line).join('\n\n') : '')
     : '*Noch keine Produkte – bald geht es los!*';
   const components = [];
   if (list.length) components.push(select('shop:add', '🛒 Produkt in den Warenkorb legen …', list.slice(0, 25).map((p) => ({ label: `${p.name} – ${money(p.price, cur)}`, value: p.id, description: p.description, emoji: p.emoji }))));
   components.push(row(button('shop:cart', 'Warenkorb', BTN.success, '🛒')));
-  return {
-    embeds: [embed(g, {
-      title: `🛍️ ${g.config.name} – Shop`,
-      description: `${description}\n\n**So bestellst du:** Produkt auswählen → Warenkorb → Bestellen. Danach öffnet sich ein privates Bestell-Ticket mit den Zahlungsinfos.`,
-      timestamp: false,
-    })],
-    components,
-  };
+  const embeds = [embed(g, {
+    title: `🛍️ ${g.config.name} – Shop`,
+    description: `${description ? `${description}\n\n` : ''}**So bestellst du:** Produkt auswählen → Warenkorb → Bestellen. Danach öffnet sich ein privates Bestell-Ticket mit den Zahlungsinfos.`,
+    timestamp: false,
+  })];
+  for (const p of pictured) {
+    embeds.push(embed(g, { title: `${p.emoji ? `${p.emoji} ` : ''}${p.name} – ${money(p.price, cur)}`, description: p.description || undefined, timestamp: false, footer: '' }));
+    embeds[embeds.length - 1].image = { url: `attachment://${p.image}` };
+    delete embeds[embeds.length - 1].footer;
+  }
+  // attachments: [] replaces the old pictures when the panel is edited
+  return { embeds, components, files: pictured.map((p) => ({ attachment: imageFile(p), name: p.image })), attachments: [] };
 }
 
 const refreshPanel = (guild, g) => postPanel(guild, g, 'shop', g.config.shopChannelId, panel(g)).catch(() => null);
@@ -154,14 +169,65 @@ async function onOrderButton(interaction, ctx) {
   await interaction.update({ embeds: [orderEmbed(g, o)], components: orderButtons(o) });
   const st = ORDER_STATUS[next];
   await interaction.channel.send({ embeds: [embed(g, { description: `${st.emoji} Status: **${st.label}** (von <@${interaction.user.id}>)`, timestamp: false })] }).catch(() => {});
+  if (next === 'delivered' && !o.feedback && !o.feedbackMessageId) {
+    const fm = await interaction.channel.send({
+      content: `<@${o.userId}>`,
+      embeds: [embed(g, { title: '⭐ Wie zufrieden bist du?', description: 'Bewerte deine Bestellung mit 1 bis 5 Sternen – das hilft uns und anderen Kunden sehr!', timestamp: false })],
+      components: [feedbackRow(o)], allowedMentions: { users: [o.userId] },
+    }).catch(() => null);
+    if (fm) { o.feedbackMessageId = fm.id; ctx.store.save(); }
+  }
   if (next === 'delivered' && g.config.customerRoleId) {
     const m = await interaction.guild.members.fetch(o.userId).catch(() => null);
     if (m) await m.roles.add(g.config.customerRoleId, `Bestellung #${pad(o.no)} geliefert`).catch(() => {});
   }
   const u = await interaction.client.users.fetch(o.userId).catch(() => null);
-  if (u) await u.send({ embeds: [embed(g, { title: `Bestellung #${pad(o.no)} bei ${g.config.name}`, description: `${st.emoji} Neuer Status: **${st.label}**` })] }).catch(() => {});
+  if (u) await u.send({ embeds: [embed(g, { title: `Bestellung #${pad(o.no)} bei ${g.config.name}`, description: `${st.emoji} Neuer Status: **${st.label}**${next === 'delivered' ? `\n\n⭐ Du kannst deine Bestellung jetzt in <#${o.channelId}> bewerten.` : ''}` })] }).catch(() => {});
   await ctx.log(interaction.guild, { title: `📦 Bestellung #${pad(o.no)}`, description: `${st.emoji} ${st.label} – von <@${interaction.user.id}>` });
   return undefined;
+}
+
+// ── feedback (customer rates a delivered order)
+const STARS = (n) => '⭐'.repeat(n);
+const feedbackRow = (o, done = false) => row(...[1, 2, 3, 4, 5].map((n) => button(`fb:${o.id}:${n}`, String(n), n >= 4 ? BTN.success : BTN.secondary, '⭐', done)));
+
+async function onFeedbackButton(interaction, ctx) {
+  const g = ctx.store.guild(interaction.guildId);
+  const [, id, n] = interaction.customId.split(':');
+  const o = g.orders[id];
+  if (!o) return interaction.reply(fail(g, 'Diese Bestellung gibt es nicht mehr.'));
+  if (o.userId !== interaction.user.id) return interaction.reply(fail(g, 'Nur der Kunde kann diese Bestellung bewerten.'));
+  if (o.feedback) return interaction.reply(fail(g, 'Du hast diese Bestellung schon bewertet – danke!'));
+  return interaction.showModal(modal(`fbm:${id}:${n}`, `Bewertung: ${STARS(Number(n))}`, [
+    { id: 'comment', label: 'Dein Kommentar (optional)', style: 'long', required: false, max: 800, placeholder: 'Was hat dir gefallen? Was können wir besser machen?' },
+  ]));
+}
+
+async function onFeedbackModal(interaction, ctx) {
+  const g = ctx.store.guild(interaction.guildId);
+  const [, id, n] = interaction.customId.split(':');
+  const o = g.orders[id];
+  const stars = Math.max(1, Math.min(5, Number(n) || 0));
+  if (!o || o.userId !== interaction.user.id) return interaction.reply(fail(g, 'Diese Bewertung gehört nicht zu dir.'));
+  if (o.feedback) return interaction.reply(fail(g, 'Du hast diese Bestellung schon bewertet – danke!'));
+  const comment = interaction.fields.getTextInputValue('comment')?.trim() || '';
+  o.feedback = { stars, comment, at: Date.now() };
+  ctx.store.save();
+  const ch = interaction.guild.channels.cache.get(g.config.feedbackChannelId);
+  if (ch) {
+    await ch.send({ embeds: [embed(g, {
+      title: `${STARS(stars)} Neue Bewertung`,
+      description: comment ? `> ${comment.replace(/\n/g, '\n> ')}` : '*Ohne Kommentar*',
+      fields: [{ name: 'Kunde', value: `<@${o.userId}>`, inline: true }, { name: 'Bestellt', value: o.items.map((l) => `${l.emoji ? `${l.emoji} ` : ''}${l.name}${l.qty > 1 ? ` × ${l.qty}` : ''}`).join(', '), inline: true }],
+      thumbnail: interaction.user.displayAvatarURL?.({ size: 64 }),
+    })] }).catch(() => {});
+  }
+  if (o.feedbackMessageId && interaction.channel) {
+    const m = await interaction.channel.messages.fetch(o.feedbackMessageId).catch(() => null);
+    if (m) await m.edit({ embeds: [embed(g, { title: `${STARS(stars)} Danke für deine Bewertung!`, description: comment || 'Ohne Kommentar', timestamp: false })], components: [feedbackRow(o, true)] }).catch(() => {});
+  }
+  await ctx.log(interaction.guild, { title: `⭐ Bewertung #${pad(o.no)}`, description: `${STARS(stars)} von <@${o.userId}>${comment ? `\n${comment.slice(0, 500)}` : ''}`, color: 0xf1c40f });
+  return interaction.reply(ok(g, `Danke für deine ${stars}-Sterne-Bewertung! 💛`));
 }
 
 // ── /produkt
@@ -193,10 +259,43 @@ async function onProductCommand(interaction, ctx) {
   const p = findProduct(g, interaction.options.getString('produkt', true));
   if (!p) return interaction.reply(fail(g, 'Produkt nicht gefunden.'));
   if (sub === 'entfernen') {
+    const img = imageFile(p);
+    if (img) fs.rmSync(img, { force: true });
     delete g.products[p.id];
     ctx.store.save();
     await refreshPanel(interaction.guild, g);
     return interaction.reply(ok(g, `**${p.name}** wurde entfernt.`));
+  }
+  if (sub === 'bild') {
+    const att = interaction.options.getAttachment('bild');
+    const old = imageFile(p);
+    if (!att) {
+      if (old) fs.rmSync(old, { force: true });
+      delete p.image;
+      ctx.store.save();
+      await refreshPanel(interaction.guild, g);
+      return interaction.reply(ok(g, `Bild von **${p.name}** entfernt.`));
+    }
+    const ext = IMAGE_TYPES[String(att.contentType || '').split(';')[0].toLowerCase()];
+    if (!ext) return interaction.reply(fail(g, 'Bitte ein Bild hochladen (PNG, JPG, GIF oder WebP).'));
+    if (att.size > 8 * 1024 * 1024) return interaction.reply(fail(g, 'Das Bild ist größer als 8 MB.'));
+    if (!IMAGE_DIR) return interaction.reply(fail(g, 'Bilder sind auf diesem Bot nicht eingerichtet.'));
+    await interaction.deferReply({ flags: 64 });
+    let buf;
+    try {
+      const res = await fetch(att.url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      buf = Buffer.from(await res.arrayBuffer());
+    } catch (e) {
+      return interaction.editReply(fail(g, `Bild konnte nicht geladen werden: ${e.message}`));
+    }
+    const name = `${p.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`; // new name each time: Discord caches by name
+    fs.writeFileSync(path.join(IMAGE_DIR, name), buf);
+    if (old && old !== path.join(IMAGE_DIR, name)) fs.rmSync(old, { force: true });
+    p.image = name;
+    ctx.store.save();
+    await refreshPanel(interaction.guild, g);
+    return interaction.editReply(ok(g, `Bild für **${p.name}** gespeichert – es steht jetzt im Shop.`));
   }
   // bearbeiten
   const name = interaction.options.getString('name');
@@ -228,4 +327,4 @@ async function onAutocomplete(interaction, ctx) {
   return interaction.respond(list.map((p) => ({ name: `${p.name} (${money(p.price, g.config.currency)})`.slice(0, 100), value: p.id })));
 }
 
-module.exports = { panel, refreshPanel, cartView, onAdd, onCart, onClear, onCheckout, onOrder, onOrderButton, onProductCommand, onAutocomplete, orderEmbed };
+module.exports = { setImageDir, onFeedbackButton, onFeedbackModal, panel, refreshPanel, cartView, onAdd, onCart, onClear, onCheckout, onOrder, onOrderButton, onProductCommand, onAutocomplete, orderEmbed };

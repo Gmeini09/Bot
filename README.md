@@ -19,8 +19,11 @@ Discord-Bot für **XVY Imperium**: Verifizierung mit Captcha, Willkommensnachric
 | Bereich | Befehle |
 |---|---|
 | Einrichtung | `/setup`, `/panel`, `/config anzeigen · kanal · teamrolle · mitgliedrolle · kundenrolle · name · farbe · zahlung · willkommen · regeln · captcha · automod` |
-| Shop | `/produkt hinzufuegen · bearbeiten · entfernen · liste` – Kunden bestellen über das Shop-Panel |
+| Shop | `/produkt hinzufuegen · bearbeiten · bild · entfernen · liste` – Kunden bestellen über das Shop-Panel; nach „Geliefert“ bewerten sie mit 1–5 Sternen (→ Feedback-Kanal) |
 | Tickets | Panel im Support-Kanal; im Ticket: `/ticket hinzufuegen · entfernen · schliessen` |
+| Giveaways | `/giveaway start · beenden · neu-ziehen · liste` – Teilnehmen-Button, Gewinner werden automatisch gezogen |
+| Rollen | `/rollen hinzufuegen · entfernen · panel` – bestehende Rollen per Button selbst wählen (keine Rollen mit Mod-/Admin-Rechten) |
+| Statistik | `/stats` – Bestellungen, Umsatz, Top-Produkte, Bewertungen, Tickets, Giveaways |
 | Moderation | `/warn`, `/warns`, `/unwarn`, `/timeout`, `/untimeout`, `/kick`, `/ban`, `/unban`, `/clear`, `/lock`, `/unlock`, `/slowmode`, `/raidmode` |
 
 ## Automatisch
@@ -33,5 +36,5 @@ Discord-Bot für **XVY Imperium**: Verifizierung mit Captcha, Willkommensnachric
 ## Technik
 
 - Node.js ≥ 20, discord.js 14. Start mit `npm start`, Tests mit `npm test`.
-- Daten liegen in `DATA_DIR`, auf Railway auf dem Volume unter `/data`, in der Datei `xvy-bot.json`.
+- Daten liegen in `DATA_DIR`, auf Railway auf dem Volume unter `/data`: `xvy-bot.json` und Produktbilder in `images/`.
 - Health-Check: `GET /` auf `PORT`.

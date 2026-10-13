@@ -126,7 +126,7 @@ function interaction(world, member, kind, { commandName, sub, opts = {}, customI
     isModalSubmit: () => kind === 'modal', isAutocomplete: () => kind === 'autocomplete',
     options: {
       getSubcommand: () => sub, getString: (n) => opts[n] ?? null, getInteger: (n) => opts[n] ?? null, getBoolean: (n) => opts[n] ?? null,
-      getUser: (n) => opts[n] ?? null, getRole: (n) => opts[n] ?? null, getChannel: (n) => opts[n] ?? null, getFocused: () => opts.focused ?? '',
+      getUser: (n) => opts[n] ?? null, getRole: (n) => opts[n] ?? null, getChannel: (n) => opts[n] ?? null, getAttachment: (n) => opts[n] ?? null, getFocused: () => opts.focused ?? '',
     },
     fields: { getTextInputValue: (id) => fields[id] ?? '' },
     async reply(p) { i.replied = true; calls.push(['reply', p]); },

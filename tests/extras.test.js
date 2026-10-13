@@ -1,0 +1,175 @@
+'use strict';
+// Giveaways, feedback, product pictures, self roles and stats on a simulated server.
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { makeWorld, interaction, lastText } = require('./fake');
+const { Store } = require('../src/store');
+const setup = require('../src/setup');
+const verify = require('../src/verify');
+const tickets = require('../src/tickets');
+const shop = require('../src/shop');
+const giveaway = require('../src/giveaway');
+const roles = require('../src/roles');
+const stats = require('../src/stats');
+
+async function world0(t) {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const world = makeWorld();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xvy-x-'));
+  const store = new Store(dir);
+  shop.setImageDir(path.join(dir, 'images'));
+  const logs = [];
+  const ctx = { client: world.client, store, logs, verify, tickets, shop, async log(gd, e) { logs.push(e); }, async refreshPanels(gd, g) { await setup.postAll(gd, g, ctx); } };
+  const G = world.guild;
+  const g = store.guild(G.id);
+  const mk = (name, type = 0) => G.channels.create({ name, type });
+  const mod = await G.roles.create({ name: '・MOD' }); mod.position = 20;
+  const ch = { shop: await mk('bestellen'), gw: await mk('giveaways'), fb: await mk('feedback'), cat: await mk('Shop', 4), log: await mk('logs'), roles: await mk('rollen') };
+  Object.assign(g.config, { staffRoleIds: [mod.id], shopChannelId: ch.shop.id, giveawayChannelId: ch.gw.id, feedbackChannelId: ch.fb.id, orderCategoryId: ch.cat.id, modLogChannelId: ch.log.id, ticketLogChannelId: ch.log.id });
+  const staff = world.addUser('mod', { roles: [mod], position: 20 });
+  return { world, ctx, g, ch, staff, mod, dir };
+}
+const flush = () => new Promise((r) => setImmediate(r));
+
+test('giveaway: start, join/leave toggle, automatic end with winners, reroll, autocomplete', async (t) => {
+  const { world, ctx, g, ch, staff } = await world0(t);
+  const start = interaction(world, staff, 'command', { commandName: 'giveaway', sub: 'start', opts: { preis: 'Gratis NVE', dauer: '2h', gewinner: 2 }, channel: ch.log });
+  await giveaway.onCommand(start, ctx);
+  const gw = g.giveaways.G1;
+  assert.ok(gw && gw.channelId === ch.gw.id, 'posted in the giveaway channel');
+  const msg = ch.gw.messages.cache.get(gw.messageId);
+  assert.match(JSON.stringify(msg.payload), /Teilnehmen \(0\)/);
+  const bad = interaction(world, staff, 'command', { commandName: 'giveaway', sub: 'start', opts: { preis: 'x', dauer: 'bald' } });
+  await giveaway.onCommand(bad, ctx);
+  assert.match(lastText(bad), /Ungültige Dauer/);
+  const users = ['a', 'b', 'c', 'd'].map((n) => world.addUser(n));
+  for (const u of users) await giveaway.onJoin(interaction(world, u, 'button', { customId: 'gw:G1' }), ctx);
+  const leave = interaction(world, users[3], 'button', { customId: 'gw:G1' });
+  await giveaway.onJoin(leave, ctx);
+  assert.equal(gw.entrants.length, 3, 'second click leaves');
+  assert.match(JSON.stringify(leave.calls[0][1]), /Teilnehmen \(3\)/);
+  // not over yet
+  await giveaway.tick(ctx, Date.now());
+  assert.equal(gw.ended, false);
+  await giveaway.tick(ctx, gw.endsAt + 1);
+  assert.equal(gw.ended, true);
+  assert.equal(gw.winnerIds.length, 2);
+  assert.equal(new Set(gw.winnerIds).size, 2, 'different winners');
+  assert.ok(gw.winnerIds.every((id) => gw.entrants.includes(id)));
+  assert.match(ch.gw.messages.cache.last().content, /Glückwunsch/);
+  const late = interaction(world, users[3], 'button', { customId: 'gw:G1' });
+  await giveaway.onJoin(late, ctx);
+  assert.match(lastText(late), /vorbei/);
+  const first = [...gw.winnerIds];
+  await giveaway.onCommand(interaction(world, staff, 'command', { commandName: 'giveaway', sub: 'neu-ziehen', opts: { giveaway: 'G1' } }), ctx);
+  assert.equal(gw.winnerIds.length, 1, 'only one entrant left who did not win');
+  assert.ok(!first.includes(gw.winnerIds[0]));
+  const ac = interaction(world, staff, 'autocomplete', { commandName: 'giveaway', sub: 'neu-ziehen', opts: { focused: 'nve' } });
+  ac.options.getSubcommand = () => 'neu-ziehen';
+  await giveaway.onAutocomplete(ac, ctx);
+  assert.equal(ac.calls[0][1][0].value, 'G1');
+  // no entrants → no winner, no crash
+  await giveaway.onCommand(interaction(world, staff, 'command', { commandName: 'giveaway', sub: 'start', opts: { preis: 'Leer', dauer: '1m' } }), ctx);
+  await giveaway.onCommand(interaction(world, staff, 'command', { commandName: 'giveaway', sub: 'beenden', opts: { giveaway: 'G2' } }), ctx);
+  assert.deepEqual(g.giveaways.G2.winnerIds, []);
+  assert.match(ch.gw.messages.cache.last().content, /niemand/);
+});
+
+test('feedback: delivered order asks for stars, only the customer rates once, posted to the feedback channel, stats', async (t) => {
+  const { world, ctx, g, ch, staff } = await world0(t);
+  g.products.p1 = { id: 'p1', name: 'NVE', price: 3, emoji: '🌆', enabled: true, createdAt: 1 };
+  const u = world.addUser('kunde');
+  await shop.onAdd(interaction(world, u, 'select', { customId: 'shop:add', values: ['p1'] }), ctx);
+  await shop.onOrder(interaction(world, u, 'modal', { customId: 'shop:order', fields: { notes: '' } }), ctx);
+  const o = Object.values(g.orders)[0];
+  const och = world.guild.channels.cache.get(o.channelId);
+  await shop.onOrderButton(interaction(world, staff, 'button', { customId: 'order:paid', channel: och }), ctx);
+  await shop.onOrderButton(interaction(world, staff, 'button', { customId: 'order:delivered', channel: och }), ctx);
+  const fbMsg = och.messages.cache.get(o.feedbackMessageId);
+  assert.ok(fbMsg, 'rating message posted');
+  assert.equal(fbMsg.payload.components[0].components.length, 5);
+  const other = interaction(world, staff, 'button', { customId: `fb:${o.id}:5`, channel: och });
+  await shop.onFeedbackButton(other, ctx);
+  assert.match(lastText(other), /Nur der Kunde/);
+  const b = interaction(world, u, 'button', { customId: `fb:${o.id}:4`, channel: och });
+  await shop.onFeedbackButton(b, ctx);
+  assert.equal(b.calls[0][1].custom_id, `fbm:${o.id}:4`);
+  await shop.onFeedbackModal(interaction(world, u, 'modal', { customId: `fbm:${o.id}:4`, fields: { comment: 'Sehr schnell geliefert!' }, channel: och }), ctx);
+  assert.deepEqual([o.feedback.stars, o.feedback.comment], [4, 'Sehr schnell geliefert!']);
+  const post = ch.fb.messages.cache.last();
+  assert.match(JSON.stringify(post.payload), /⭐⭐⭐⭐ Neue Bewertung/);
+  assert.match(JSON.stringify(post.payload), /Sehr schnell geliefert/);
+  assert.ok(fbMsg.payload.components[0].components.every((c) => c.disabled), 'buttons disabled afterwards');
+  const twice = interaction(world, u, 'button', { customId: `fb:${o.id}:1`, channel: och });
+  await shop.onFeedbackButton(twice, ctx);
+  assert.match(lastText(twice), /schon bewertet/);
+  // stats
+  const s = stats.summarize(g);
+  assert.deepEqual([s.orders, s.delivered, s.revenue, s.avg, s.customers], [1, 1, 3, 4, 1]);
+  assert.deepEqual(s.top, [['NVE', 1]]);
+  const st = interaction(world, staff, 'command', { commandName: 'stats' });
+  await stats.onCommand(st, ctx);
+  assert.match(lastText(st), /Umsatz/);
+  assert.match(lastText(st), /⭐⭐⭐⭐ 4 \/ 5/);
+});
+
+test('product pictures: upload, shown in the panel as file, replaced, removed', async (t) => {
+  const { world, ctx, g, ch } = await world0(t);
+  g.products.p1 = { id: 'p1', name: 'Thumbnail', price: 0, emoji: '📸', enabled: true, createdAt: 1 };
+  g.products.p2 = { id: 'p2', name: 'NVE', price: 3, emoji: '🌆', enabled: true, createdAt: 2 };
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+  const realFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200, arrayBuffer: async () => png });
+  t.after(() => { global.fetch = realFetch; });
+  const up = (bild) => shop.onProductCommand(interaction(world, world.owner, 'command', { commandName: 'produkt', sub: 'bild', opts: { produkt: 'p1', bild } }), ctx);
+  const wrong = interaction(world, world.owner, 'command', { commandName: 'produkt', sub: 'bild', opts: { produkt: 'p1', bild: { url: 'https://cdn/x.pdf', contentType: 'application/pdf', size: 10 } } });
+  await shop.onProductCommand(wrong, ctx);
+  assert.match(lastText(wrong), /Bild hochladen/);
+  await up({ url: 'https://cdn/a.png', contentType: 'image/png', size: png.length });
+  const first = g.products.p1.image;
+  assert.match(first, /^p1-\d+-[a-z0-9]+\.png$/);
+  const panel = shop.panel(g);
+  assert.equal(panel.embeds.length, 2, 'header + one picture embed');
+  assert.equal(panel.embeds[1].image.url, `attachment://${first}`);
+  assert.equal(panel.files[0].name, first);
+  assert.ok(fs.existsSync(panel.files[0].attachment));
+  assert.match(panel.embeds[0].description, /NVE/, 'products without picture stay in the text');
+  assert.doesNotMatch(panel.embeds[0].description, /Thumbnail/);
+  await up({ url: 'https://cdn/b.png', contentType: 'image/png', size: png.length });
+  assert.ok(!fs.existsSync(panel.files[0].attachment), 'old picture file removed');
+  await up(null);
+  assert.equal(g.products.p1.image, undefined);
+  assert.equal(shop.panel(g).embeds.length, 1);
+});
+
+test('self roles: only harmless roles, toggle with a button, panel', async (t) => {
+  const { world, ctx, g, ch, mod } = await world0(t);
+  const G = world.guild;
+  const news = await G.roles.create({ name: '🔔 Updates' }); news.position = 3; news.permissions = 0n;
+  const admin = await G.roles.create({ name: 'Admin' }); admin.position = 4; admin.permissions = 8n;
+  const run = (sub, opts, channel) => { const i = interaction(world, world.owner, 'command', { commandName: 'rollen', sub, opts, channel }); return roles.onCommand(i, ctx).then(() => i); };
+  assert.match(lastText(await run('hinzufuegen', { rolle: admin })), /Admin-Rechte/);
+  assert.match(lastText(await run('hinzufuegen', { rolle: mod })), /Team-Rollen/);
+  await run('hinzufuegen', { rolle: news, emoji: '🔔', beschreibung: 'Pings bei Updates' });
+  assert.equal(g.selfRoles.length, 1);
+  await run('panel', {}, ch.roles);
+  const msg = ch.roles.messages.cache.get(g.panels.roles);
+  assert.equal(msg.payload.components[0].components[0].custom_id, `role:${news.id}`);
+  const u = world.addUser('member');
+  await roles.onButton(interaction(world, u, 'button', { customId: `role:${news.id}` }), ctx);
+  assert.ok(u.roles.cache.has(news.id));
+  await roles.onButton(interaction(world, u, 'button', { customId: `role:${news.id}` }), ctx);
+  assert.ok(!u.roles.cache.has(news.id), 'second click removes');
+  // a role that later got dangerous rights is refused at click time
+  news.permissions = 8n;
+  const later = interaction(world, u, 'button', { customId: `role:${news.id}` });
+  await roles.onButton(later, ctx);
+  assert.match(lastText(later), /Admin-Rechte/);
+  assert.ok(!u.roles.cache.has(news.id));
+  await run('entfernen', { rolle: news });
+  assert.equal(g.selfRoles.length, 0);
+  assert.equal(msg.payload.components.length, 0, 'panel updated');
+});

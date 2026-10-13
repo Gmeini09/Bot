@@ -126,3 +126,15 @@ test('slash commands follow Discord limits', () => {
   }
   assert.ok(JSON.stringify(COMMANDS).length < 8000 * COMMANDS.length);
 });
+
+test('durations for giveaways', () => {
+  assert.equal(L.parseDuration('30m'), 30 * 60_000);
+  assert.equal(L.parseDuration('2h'), 2 * 3_600_000);
+  assert.equal(L.parseDuration('1d12h'), 36 * 3_600_000);
+  assert.equal(L.parseDuration('1 d 2 h 5 m'), (26 * 60 + 5) * 60_000);
+  assert.equal(L.parseDuration('90'), 90 * 60_000);
+  assert.equal(L.parseDuration('3tage'), 3 * 86_400_000);
+  assert.equal(L.parseDuration('31d'), null);
+  assert.equal(L.parseDuration('0m'), null);
+  assert.equal(L.parseDuration('morgen'), null);
+});

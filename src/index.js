@@ -13,11 +13,15 @@ const shop = require('./shop');
 const moderation = require('./moderation');
 const config = require('./config');
 const adopt = require('./adopt');
+const giveaway = require('./giveaway');
+const roles = require('./roles');
+const stats = require('./stats');
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const DATA_DIR = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '..', 'data');
 
 const store = new Store(DATA_DIR);
+shop.setImageDir(path.join(DATA_DIR, 'images'));
 
 const client = new Client({
   intents: [
@@ -66,6 +70,7 @@ client.once(Events.ClientReady, async (c) => {
     await adopt.applyLayout(guild, ctx).catch((e) => console.error(`❌ Layout für ${guild.name} fehlgeschlagen:`, e));
   }
   store.save();
+  setInterval(() => giveaway.tick(ctx).catch((e) => console.error('giveaway tick', e)), 15_000).unref?.();
   console.log(`🔗 Einladen: https://discord.com/oauth2/authorize?client_id=${c.user.id}&permissions=8&scope=bot%20applications.commands`);
 });
 
@@ -89,6 +94,7 @@ const BUTTONS = {
 const SELECTS = { 'ticket:open': tickets.onSelect, 'shop:add': shop.onAdd };
 const COMMAND_HANDLERS = {
   setup: setup.runSetup, panel: setup.repostPanel, config: config.onCommand, produkt: shop.onProductCommand, ticket: tickets.onCommand,
+  giveaway: giveaway.onCommand, rollen: roles.onCommand, stats: stats.onCommand,
 };
 const MOD = new Set(['warn', 'warns', 'unwarn', 'timeout', 'untimeout', 'kick', 'ban', 'unban', 'clear', 'lock', 'unlock', 'slowmode', 'raidmode']);
 
@@ -96,18 +102,25 @@ async function route(i) {
   if (!i.inGuild()) return null;
   // "ephemeral" (flag 64) only belongs to the first reply – editing a deferred reply must not send it again
   if (i.editReply) { const edit = i.editReply.bind(i); i.editReply = (p) => edit(p && typeof p === 'object' ? { ...p, flags: undefined } : p); }
-  if (i.isAutocomplete()) return i.commandName === 'produkt' ? shop.onAutocomplete(i, ctx) : null;
+  if (i.isAutocomplete()) return i.commandName === 'produkt' ? shop.onAutocomplete(i, ctx) : i.commandName === 'giveaway' ? giveaway.onAutocomplete(i, ctx) : null;
   if (i.isChatInputCommand()) {
     if (COMMAND_HANDLERS[i.commandName]) return COMMAND_HANDLERS[i.commandName](i, ctx);
     if (MOD.has(i.commandName)) return moderation.onCommand(i, ctx);
     return null;
   }
-  if (i.isButton()) return BUTTONS[i.customId]?.(i, ctx);
+  if (i.isButton()) {
+    if (BUTTONS[i.customId]) return BUTTONS[i.customId](i, ctx);
+    if (i.customId.startsWith('gw:')) return giveaway.onJoin(i, ctx);
+    if (i.customId.startsWith('role:')) return roles.onButton(i, ctx);
+    if (i.customId.startsWith('fb:')) return shop.onFeedbackButton(i, ctx);
+    return null;
+  }
   if (i.isStringSelectMenu()) return SELECTS[i.customId]?.(i, ctx);
   if (i.isModalSubmit()) {
     if (i.customId === 'verify:captcha') return verify.onModal(i, ctx);
     if (i.customId.startsWith('ticket:create:')) return tickets.onCreate(i, ctx);
     if (i.customId === 'shop:order') return shop.onOrder(i, ctx);
+    if (i.customId.startsWith('fbm:')) return shop.onFeedbackModal(i, ctx);
   }
   return null;
 }

@@ -1,8 +1,8 @@
 'use strict';
 // Slash commands as raw API JSON (registered per server on start).
-const P = { ADMIN: 1n << 3n, MANAGE_GUILD: 1n << 5n, MANAGE_CHANNELS: 1n << 4n, KICK: 1n << 1n, BAN: 1n << 2n, MANAGE_MESSAGES: 1n << 13n, MODERATE: 1n << 40n };
+const P = { MANAGE_ROLES: 1n << 28n, ADMIN: 1n << 3n, MANAGE_GUILD: 1n << 5n, MANAGE_CHANNELS: 1n << 4n, KICK: 1n << 1n, BAN: 1n << 2n, MANAGE_MESSAGES: 1n << 13n, MODERATE: 1n << 40n };
 const perm = (p) => String(p);
-const T = { SUB: 1, STRING: 3, INTEGER: 4, BOOLEAN: 5, USER: 6, CHANNEL: 7, ROLE: 8, NUMBER: 10 };
+const T = { SUB: 1, STRING: 3, INTEGER: 4, BOOLEAN: 5, USER: 6, CHANNEL: 7, ROLE: 8, NUMBER: 10, ATTACHMENT: 11 };
 const opt = (type, name, description, extra = {}) => ({ type, name, description, ...extra });
 const sub = (name, description, options = []) => ({ type: T.SUB, name, description, options });
 const base = (name, description, permission, options = []) => ({ name, description, type: 1, dm_permission: false, default_member_permissions: perm(permission), options });
@@ -30,6 +30,7 @@ const COMMANDS = [
         { name: 'Shop (Panel)', value: 'shopChannelId' }, { name: 'Tickets (Panel)', value: 'supportChannelId' },
         { name: 'Mod-Log', value: 'modLogChannelId' }, { name: 'Ticket-Log', value: 'ticketLogChannelId' },
         { name: 'Kategorie für Tickets', value: 'ticketCategoryId' }, { name: 'Kategorie für Bestellungen', value: 'orderCategoryId' },
+        { name: 'Giveaways', value: 'giveawayChannelId' }, { name: 'Feedback / Bewertungen', value: 'feedbackChannelId' },
       ] }),
       opt(T.CHANNEL, 'kanal', 'Kanal oder Kategorie', { required: true, channel_types: [0, 4, 5] }),
     ]),
@@ -63,6 +64,7 @@ const COMMANDS = [
       opt(T.BOOLEAN, 'verfuegbar', 'Im Shop bestellbar?'),
     ]),
     sub('entfernen', 'Produkt löschen', [opt(T.STRING, 'produkt', 'Produkt', { required: true, autocomplete: true })]),
+    sub('bild', 'Produktbild hochladen (leer lassen = Bild entfernen)', [opt(T.STRING, 'produkt', 'Produkt', { required: true, autocomplete: true }), opt(T.ATTACHMENT, 'bild', 'Bild (PNG, JPG, GIF, WebP – max. 8 MB)')]),
     sub('liste', 'Alle Produkte'),
   ]),
   base('ticket', 'Ticket verwalten (im Ticket-Kanal)', P.MANAGE_MESSAGES, [
@@ -82,6 +84,24 @@ const COMMANDS = [
   base('lock', 'Kanal sperren', P.MANAGE_CHANNELS, [reason()]),
   base('unlock', 'Kanal entsperren', P.MANAGE_CHANNELS),
   base('slowmode', 'Slowmode setzen', P.MANAGE_CHANNELS, [opt(T.INTEGER, 'sekunden', '0 = aus, max. 21600', { required: true, min_value: 0, max_value: 21600 })]),
+  base('giveaway', 'Giveaways', P.MANAGE_GUILD, [
+    sub('start', 'Neues Giveaway starten', [
+      opt(T.STRING, 'preis', 'Was gibt es zu gewinnen?', { required: true, max_length: 200 }),
+      opt(T.STRING, 'dauer', 'z. B. 30m, 2h, 1d, 1d12h', { required: true, max_length: 12 }),
+      opt(T.INTEGER, 'gewinner', 'Anzahl Gewinner (Standard 1)', { min_value: 1, max_value: 20 }),
+      opt(T.CHANNEL, 'kanal', 'Kanal (Standard: Giveaway-Kanal)', { channel_types: [0, 5] }),
+      opt(T.STRING, 'beschreibung', 'Zusätzlicher Text', { max_length: 500 }),
+    ]),
+    sub('beenden', 'Giveaway jetzt beenden und Gewinner ziehen', [opt(T.STRING, 'giveaway', 'Giveaway', { required: true, autocomplete: true })]),
+    sub('neu-ziehen', 'Neue Gewinner ziehen', [opt(T.STRING, 'giveaway', 'Giveaway', { required: true, autocomplete: true })]),
+    sub('liste', 'Alle Giveaways'),
+  ]),
+  base('rollen', 'Rollen, die sich Mitglieder selbst geben können', P.MANAGE_ROLES, [
+    sub('hinzufuegen', 'Rolle wählbar machen', [opt(T.ROLE, 'rolle', 'Bestehende Rolle', { required: true }), opt(T.STRING, 'emoji', 'Emoji für den Button', { max_length: 64 }), opt(T.STRING, 'beschreibung', 'Kurze Erklärung', { max_length: 100 })]),
+    sub('entfernen', 'Rolle nicht mehr wählbar', [opt(T.ROLE, 'rolle', 'Rolle', { required: true })]),
+    sub('panel', 'Rollen-Panel posten', [opt(T.CHANNEL, 'kanal', 'Kanal (Standard: dieser)', { channel_types: [0, 5] })]),
+  ]),
+  base('stats', 'Statistik: Bestellungen, Umsatz, Bewertungen, Tickets', P.MODERATE),
   base('raidmode', 'Raid-Modus beenden oder starten', P.MODERATE, [opt(T.BOOLEAN, 'an', 'An oder aus', { required: true })]),
 ];
 

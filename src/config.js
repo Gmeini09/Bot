@@ -13,7 +13,7 @@ function show(g) {
     title: `⚙️ Einstellungen – ${c.name}`,
     fields: [
       { name: 'Rollen', value: `Team: ${(c.staffRoleIds || []).map(ro).join(' ') || '–'}\nVerifiziert: ${ro(c.memberRoleId)}\nKunde: ${ro(c.customerRoleId)}`, inline: true },
-      { name: 'Kanäle', value: `Willkommen: ${ch(c.welcomeChannelId)}\nVerifizieren: ${ch(c.verifyChannelId)}\nShop: ${ch(c.shopChannelId)}\nTickets: ${ch(c.supportChannelId)}\nMod-Log: ${ch(c.modLogChannelId)}\nTicket-Log: ${ch(c.ticketLogChannelId)}\nTicket-Kategorie: ${ch(c.ticketCategoryId)}\nBestell-Kategorie: ${ch(c.orderCategoryId)}`, inline: true },
+      { name: 'Kanäle', value: `Willkommen: ${ch(c.welcomeChannelId)}\nVerifizieren: ${ch(c.verifyChannelId)}\nShop: ${ch(c.shopChannelId)}\nTickets: ${ch(c.supportChannelId)}\nMod-Log: ${ch(c.modLogChannelId)}\nTicket-Log: ${ch(c.ticketLogChannelId)}\nTicket-Kategorie: ${ch(c.ticketCategoryId)}\nBestell-Kategorie: ${ch(c.orderCategoryId)}\nGiveaways: ${ch(c.giveawayChannelId)}\nFeedback: ${ch(c.feedbackChannelId)}\nRollen-Panel: ${ch(c.rolesChannelId)}`, inline: true },
       { name: 'Verifizierung', value: `Captcha: ${onOff(c.captcha)}` },
       { name: 'Automod', value: `Gesamt: ${onOff(a.enabled)} · Spam: ${onOff(a.spam)} · Einladungen: ${onOff(a.invites)}\nMax. Erwähnungen: ${a.maxMentions} · Timeout ab ${a.warnTimeoutAt || '–'} Verwarnungen\nMindestalter: ${a.minAccountAgeDays ? `${a.minAccountAgeDays} Tage` : 'aus'} · Raid ab ${a.raidJoins} Beitritten in ${a.raidSeconds} s` },
       { name: 'Zahlung', value: c.paymentInfo },

@@ -21,6 +21,8 @@ const LAYOUTS = {
     staffRoles: ['FOUNDER', 'OWNER'], // matched by name
     newStaffRole: '・MOD 𓇻',
     memberRole: '.gg/xvy',
+    // channels filled in when still empty (applied on every start, never overwrites a choice made with /config kanal)
+    fillChannels: { giveawayChannelId: '1559470988549431316', feedbackChannelId: '1559473176352923681' }, // 🎁┇giveaways, 🤍┇feedback
     // texts of the ticket types (by id) – applied on every start
     ticketTypes: { bewerbung: { description: 'Bewirb dich für XVY' } },
     // products for 🛒┇bestellen – added once each (not again if the owner removes one later)
@@ -105,6 +107,7 @@ async function applyLayout(guild, ctx) {
   const layout = LAYOUTS[guild.id];
   const g = ctx.store.guild(guild.id);
   if (!layout) return false;
+  for (const [key, id] of Object.entries(layout.fillChannels || {})) if (!g.config[key] && guild.channels.cache.get(id)) { g.config[key] = id; ctx.store.save(); }
   if (g.layoutVersion === layout.version) {
     await seedProducts(guild, g, layout, ctx);
     await applyTicketTypes(guild, g, layout, ctx);

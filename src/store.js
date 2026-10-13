@@ -36,6 +36,9 @@ function defaultGuild() {
       ticketTypes: DEFAULT_TICKET_TYPES.map((t) => ({ ...t })),
       shopChannelId: null,
       orderCategoryId: null,
+      giveawayChannelId: null,
+      feedbackChannelId: null,
+      rolesChannelId: null,
       paymentInfo: 'Die Zahlungsinformationen erhältst du im Bestell-Ticket vom Team.',
       currency: 'EUR',
       modLogChannelId: null,
@@ -62,6 +65,9 @@ function defaultGuild() {
     carts: {},
     orders: {},
     orderCounter: 0,
+    giveaways: {},
+    giveawayCounter: 0,
+    selfRoles: [],
   };
 }
 
@@ -75,7 +81,8 @@ function migrate(g) {
   if (!Array.isArray(out.config.staffRoleIds)) out.config.staffRoleIds = [];
   if (out.config.staffRoleId && !out.config.staffRoleIds.includes(out.config.staffRoleId)) out.config.staffRoleIds.push(out.config.staffRoleId);
   delete out.config.staffRoleId;
-  for (const k of ['panels', 'tickets', 'warns', 'products', 'carts', 'orders']) if (!out[k] || typeof out[k] !== 'object') out[k] = {};
+  for (const k of ['panels', 'tickets', 'warns', 'products', 'carts', 'orders', 'giveaways']) if (!out[k] || typeof out[k] !== 'object') out[k] = {};
+  if (!Array.isArray(out.selfRoles)) out.selfRoles = [];
   return out;
 }
 
@@ -101,8 +108,8 @@ class Store {
   guild(id) {
     const cur = this.data.guilds[id];
     if (!cur) this.data.guilds[id] = defaultGuild();
-    else if (!cur.__v || cur.__v < 2) this.data.guilds[id] = migrate(cur);
-    this.data.guilds[id].__v = 2;
+    else if (!cur.__v || cur.__v < 3) this.data.guilds[id] = migrate(cur);
+    this.data.guilds[id].__v = 3;
     return this.data.guilds[id];
   }
 

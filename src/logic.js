@@ -104,6 +104,16 @@ function slug(s) {
 
 const pad = (n, w = 4) => String(n).padStart(w, '0');
 
+/** "30m", "2h", "1d12h", "90" (minutes) → milliseconds; null if invalid or outside 1 minute … 30 days. */
+function parseDuration(s) {
+  const t = String(s || '').trim().toLowerCase().replace(/\s+/g, '');
+  if (/^\d+$/.test(t)) { const ms = Number(t) * 60_000; return ms >= 60_000 && ms <= 30 * 86_400_000 ? ms : null; }
+  const m = /^(?:(\d+)(?:d|t|tage?))?(?:(\d+)(?:h|std))?(?:(\d+)(?:m|min))?$/.exec(t);
+  if (!m || !(m[1] || m[2] || m[3])) return null;
+  const ms = ((Number(m[1] || 0) * 24 + Number(m[2] || 0)) * 60 + Number(m[3] || 0)) * 60_000;
+  return ms >= 60_000 && ms <= 30 * 86_400_000 ? ms : null;
+}
+
 /** Account age in whole days. */
 const accountAgeDays = (createdTimestamp, now = Date.now()) => Math.floor((now - createdTimestamp) / 86_400_000);
 
@@ -122,4 +132,4 @@ const ORDER_STATUS = {
   cancelled: { label: 'Storniert', emoji: '🔴' },
 };
 
-module.exports = { money, fillTemplate, parseColor, parsePrice, cartLines, cartTotal, addToCart, makeCaptcha, hasInvite, SpamTracker, RaidTracker, transcript, slug, pad, accountAgeDays, validEmoji, ORDER_STATUS };
+module.exports = { parseDuration, money, fillTemplate, parseColor, parsePrice, cartLines, cartTotal, addToCart, makeCaptcha, hasInvite, SpamTracker, RaidTracker, transcript, slug, pad, accountAgeDays, validEmoji, ORDER_STATUS };
