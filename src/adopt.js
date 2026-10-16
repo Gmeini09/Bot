@@ -32,6 +32,7 @@ const LAYOUTS = {
       { key: 'thumbnail', name: 'Thumbnail', price: 0, emoji: '📸', description: 'Individuelles Thumbnail' },
       { key: 'soundpack', name: 'Soundpack', price: 0.5, emoji: '🔊', description: 'Waffen-Soundpack für FiveM' },
       { key: 'nve', name: 'NVE', price: 3, emoji: '🌆', description: 'NVE Grafik-Preset für FiveM' },
+      { key: 'xvy-tweaks', name: 'XV¥ Tweaks', price: 10, emoji: '🛠️', description: '' },
     ],
   },
 };
