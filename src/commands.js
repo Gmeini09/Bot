@@ -5,7 +5,7 @@ const perm = (p) => String(p);
 const T = { SUB: 1, STRING: 3, INTEGER: 4, BOOLEAN: 5, USER: 6, CHANNEL: 7, ROLE: 8, NUMBER: 10, ATTACHMENT: 11 };
 const opt = (type, name, description, extra = {}) => ({ type, name, description, ...extra });
 const sub = (name, description, options = []) => ({ type: T.SUB, name, description, options });
-const base = (name, description, permission, options = []) => ({ name, description, type: 1, dm_permission: false, default_member_permissions: perm(permission), options });
+const base = (name, description, permission, options = []) => ({ name, description, type: 1, dm_permission: false, default_member_permissions: permission === null ? null : perm(permission), options });
 
 const user = (req = true) => opt(T.USER, 'nutzer', 'Mitglied', { required: req });
 const reason = (req = false) => opt(T.STRING, 'grund', 'Grund', { required: req, max_length: 400 });
@@ -84,7 +84,8 @@ const COMMANDS = [
   base('lock', 'Kanal sperren', P.MANAGE_CHANNELS, [reason()]),
   base('unlock', 'Kanal entsperren', P.MANAGE_CHANNELS),
   base('slowmode', 'Slowmode setzen', P.MANAGE_CHANNELS, [opt(T.INTEGER, 'sekunden', '0 = aus, max. 21600', { required: true, min_value: 0, max_value: 21600 })]),
-  base('giveaway', 'Giveaways', P.MANAGE_GUILD, [
+  // visible to everyone: Discord cannot gate a command by role, so giveaway.js checks Manage Server, team or the giveaway role
+  base('giveaway', 'Giveaways (Team und Rolle „giveaway perms“)', null, [
     sub('start', 'Neues Giveaway starten', [
       opt(T.STRING, 'preis', 'Was gibt es zu gewinnen?', { required: true, max_length: 200 }),
       opt(T.STRING, 'dauer', 'z. B. 30m, 2h, 1d, 1d12h', { required: true, max_length: 12 }),

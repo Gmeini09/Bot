@@ -37,6 +37,7 @@ function defaultGuild() {
       shopChannelId: null,
       orderCategoryId: null,
       giveawayChannelId: null,
+      giveawayRoleId: null,
       feedbackChannelId: null,
       rolesChannelId: null,
       paymentInfo: 'Die Zahlungsinformationen erhältst du im Bestell-Ticket vom Team.',

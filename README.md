@@ -21,7 +21,7 @@ Discord-Bot für **XVY Kaiserreich**: Verifizierung mit Captcha, Willkommensnach
 | Einrichtung | `/setup`, `/panel`, `/config anzeigen · kanal · teamrolle · mitgliedrolle · kundenrolle · name · farbe · zahlung · willkommen · regeln · captcha · automod` |
 | Shop | `/produkt hinzufuegen · bearbeiten · bild · entfernen · liste` – Kunden bestellen über das Shop-Panel; nach „Geliefert“ bewerten sie mit 1–5 Sternen (→ Feedback-Kanal) |
 | Tickets | Panel im Support-Kanal; im Ticket: `/ticket hinzufuegen · entfernen · schliessen` |
-| Giveaways | `/giveaway start · beenden · neu-ziehen · liste` – Teilnehmen-Button, Gewinner werden automatisch gezogen |
+| Giveaways | `/giveaway start · beenden · neu-ziehen · liste` – Teilnehmen-Button, Gewinner werden automatisch gezogen. Erlaubt für Admins, das Team und die Rolle **giveaway perms** |
 | Rollen | `/rollen hinzufuegen · entfernen · panel` – bestehende Rollen per Button selbst wählen (keine Rollen mit Mod-/Admin-Rechten) |
 | Statistik | `/stats` – Bestellungen, Umsatz, Top-Produkte, Bewertungen, Tickets, Giveaways |
 | Moderation | `/warn`, `/warns`, `/unwarn`, `/timeout`, `/untimeout`, `/kick`, `/ban`, `/unban`, `/clear`, `/lock`, `/unlock`, `/slowmode`, `/raidmode` |

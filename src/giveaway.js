@@ -64,8 +64,15 @@ function find(g, q) {
   return g.giveaways[s] || Object.values(g.giveaways).find((x) => x.prize.toLowerCase() === String(q || '').trim().toLowerCase());
 }
 
+/** Manage Server, the team, or the giveaway role (config.giveawayRoleId). */
+function mayHost(member, g) {
+  const { isStaff } = require('./tickets');
+  return isStaff(member, g) || (!!g.config.giveawayRoleId && !!member?.roles?.cache?.has(g.config.giveawayRoleId));
+}
+
 async function onCommand(interaction, ctx) {
   const g = ctx.store.guild(interaction.guildId);
+  if (!mayHost(interaction.member, g)) return interaction.reply(fail(g, 'Giveaways dürfen nur das Team und Mitglieder mit der Rolle **giveaway perms** starten.'));
   const sub = interaction.options.getSubcommand();
   if (sub === 'liste') {
     const all = Object.values(g.giveaways).sort((a, b) => b.endsAt - a.endsAt).slice(0, 15);
@@ -123,4 +130,4 @@ async function onAutocomplete(interaction, ctx) {
   return interaction.respond(list.map((x) => ({ name: `${x.id} – ${x.prize}`.slice(0, 100), value: x.id })));
 }
 
-module.exports = { view, draw, finish, tick, onCommand, onJoin, onAutocomplete };
+module.exports = { view, draw, finish, tick, onCommand, onJoin, onAutocomplete, mayHost };

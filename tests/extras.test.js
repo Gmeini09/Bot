@@ -173,3 +173,25 @@ test('self roles: only harmless roles, toggle with a button, panel', async (t) =
   assert.equal(g.selfRoles.length, 0);
   assert.equal(msg.payload.components.length, 0, 'panel updated');
 });
+
+test('giveaway perms: role is created once, its members may host, others may not', async (t) => {
+  const { world, ctx, g, ch } = await world0(t);
+  const adopt = require('../src/adopt');
+  const layout = { giveawayRole: 'giveaway perms' };
+  const role = await adopt.ensureGiveawayRole(world.guild, g, layout, ctx);
+  assert.equal(role.name, 'giveaway perms');
+  assert.equal(g.config.giveawayRoleId, role.id);
+  const again = await adopt.ensureGiveawayRole(world.guild, g, layout, ctx);
+  assert.equal(again.id, role.id, 'not created twice');
+  assert.equal(world.guild.roles.cache.filter((r) => r.name === 'giveaway perms').size, 1);
+
+  const host = world.addUser('host', { roles: [role], position: 3 });
+  const pleb = world.addUser('pleb', { position: 2 });
+  const no = interaction(world, pleb, 'command', { commandName: 'giveaway', sub: 'start', opts: { preis: 'X', dauer: '1h' } });
+  await giveaway.onCommand(no, ctx);
+  assert.match(lastText(no), /giveaway perms/);
+  assert.equal(Object.keys(g.giveaways).length, 0);
+  await giveaway.onCommand(interaction(world, host, 'command', { commandName: 'giveaway', sub: 'start', opts: { preis: 'Tweaks', dauer: '1h' } }), ctx);
+  assert.equal(Object.values(g.giveaways)[0].prize, 'Tweaks');
+  assert.equal(Object.values(g.giveaways)[0].channelId, ch.gw.id);
+});

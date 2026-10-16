@@ -27,6 +27,8 @@ const LAYOUTS = {
     fillChannels: { giveawayChannelId: '1559470988549431316', feedbackChannelId: '1559473176352923681' }, // 🎁┇giveaways, 🤍┇feedback
     // texts of the ticket types (by id) – applied on every start
     ticketTypes: { bewerbung: { description: 'Bewirb dich für XVY' } },
+    // role that may run /giveaway – created once if missing (no Discord permissions of its own)
+    giveawayRole: 'giveaway perms',
     // products for 🛒┇bestellen – added once each (not again if the owner removes one later)
     products: [
       { key: 'thumbnail', name: 'Thumbnail', price: 0, emoji: '📸', description: 'Individuelles Thumbnail' },
@@ -117,6 +119,21 @@ async function applyName(guild, g, layout, ctx) {
   return true;
 }
 
+/** Finds or creates the giveaway role and remembers it; never touches a role chosen otherwise. */
+async function ensureGiveawayRole(guild, g, layout, ctx) {
+  if (!layout.giveawayRole) return null;
+  const known = g.config.giveawayRoleId && guild.roles.cache.get(g.config.giveawayRoleId);
+  if (known) return known;
+  await guild.roles.fetch?.().catch(() => {});
+  let role = guild.roles.cache.find((r) => r.name.toLowerCase() === layout.giveawayRole.toLowerCase() && !r.managed);
+  if (!role) {
+    role = await guild.roles.create({ name: layout.giveawayRole, permissions: 0n, reason: 'XVY-Bot: darf /giveaway nutzen' }).catch((e) => { console.error(`❌ Rolle ${layout.giveawayRole}:`, e.message); return null; });
+    if (role) await ctx.log(guild, { title: '🎉 Rolle angelegt', description: `<@&${role.id}> darf jetzt \`/giveaway\` nutzen.`, color: 0xf1c40f });
+  }
+  if (role) { g.config.giveawayRoleId = role.id; ctx.store.save(); console.log(`🎉 Giveaway-Rolle: ${role.name} (${role.id})`); }
+  return role;
+}
+
 async function applyLayout(guild, ctx) {
   const layout = LAYOUTS[guild.id];
   const g = ctx.store.guild(guild.id);
@@ -124,6 +141,7 @@ async function applyLayout(guild, ctx) {
   if (g.layoutVersion === layout.version) await applyName(guild, g, layout, ctx);
   else if (layout.name && (layout.renameFrom || []).includes(g.config.name)) g.config.name = layout.name; // panels are posted below
   for (const [key, id] of Object.entries(layout.fillChannels || {})) if (!g.config[key] && guild.channels.cache.get(id)) { g.config[key] = id; ctx.store.save(); }
+  await ensureGiveawayRole(guild, g, layout, ctx);
   if (g.layoutVersion === layout.version) {
     await seedProducts(guild, g, layout, ctx);
     await applyTicketTypes(guild, g, layout, ctx);
@@ -167,4 +185,4 @@ async function applyLayout(guild, ctx) {
   return true;
 }
 
-module.exports = { applyLayout, applyName, seedProducts, LAYOUTS, OLD_CHANNELS, OLD_ROLES };
+module.exports = { applyLayout, applyName, seedProducts, ensureGiveawayRole, LAYOUTS, OLD_CHANNELS, OLD_ROLES };
