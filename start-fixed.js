@@ -635,6 +635,13 @@ Client.prototype.login = function turboGuardLogin(...args) {
 
 console.log(`✅ Turbo Designs Guard v${TURBO_GUARD_VERSION} geladen`);
 
+// /sptool-version: own SP Tool version per PC vs. the newest release. Never crashes the bot.
+try {
+  require('./sptool-version.js');
+} catch (error) {
+  logGuardError('sptool-version', error);
+}
+
 // SP Tool license system (Discord ID + HWID). Must load before the bot so its
 // HTTP routes (/api/v1) and global /sptool commands hook in. Never crashes the bot.
 try {
