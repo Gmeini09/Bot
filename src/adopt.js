@@ -24,7 +24,7 @@ const LAYOUTS = {
     newStaffRole: '・MOD 𓇻',
     memberRole: '.gg/xvy',
     // channels filled in when still empty (applied on every start, never overwrites a choice made with /config kanal)
-    fillChannels: { giveawayChannelId: '1559470988549431316', feedbackChannelId: '1559473176352923681' }, // 🎁┇giveaways, 🤍┇feedback
+    fillChannels: { giveawayChannelId: '1559470988549431316', feedbackChannelId: '1559473176352923681', memberListChannelId: '1559471469627580447' }, // 🎁┇giveaways, 🤍┇feedback, member list
     // texts of the ticket types (by id) – applied on every start
     ticketTypes: { bewerbung: { description: 'Bewirb dich für XVY' } },
     // role that may run /giveaway – created once if missing (no Discord permissions of its own)

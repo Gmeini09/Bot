@@ -2,6 +2,7 @@
 // /setup posts the panels into the channels chosen with /config kanal. It never creates or deletes
 // channels or roles – the server's own structure stays exactly as the owner built it.
 const { embed, ok, fail } = require('./ui');
+const memberlist = require('./memberlist');
 
 const F = {
   VIEW: 1n << 10n, SEND: 1n << 11n, MANAGE_MESSAGES: 1n << 13n, EMBED: 1n << 14n, ATTACH: 1n << 15n, HISTORY: 1n << 16n,
@@ -43,6 +44,12 @@ async function postAll(guild, g, ctx) {
       lines.push(`❌ ${label} in <#${id}>: ${e.message}`);
     }
   }
+  if (g.config.memberListChannelId) {
+    try {
+      const ids = await memberlist.refresh(guild, g, ctx);
+      lines.push(ids ? `✅ Mitgliederliste: <#${g.config.memberListChannelId}>` : `⚠️ Mitgliederliste: Kanal fehlt – \`/config kanal\``);
+    } catch (e) { lines.push(`❌ Mitgliederliste: ${e.message}`); }
+  }
   return lines;
 }
 
@@ -71,6 +78,17 @@ async function runSetup(interaction, ctx) {
 async function repostPanel(interaction, ctx) {
   const g = ctx.store.guild(interaction.guildId);
   const art = interaction.options.getString('art', true);
+  if (art === 'memberlist') {
+    const chId = g.config.memberListChannelId;
+    if (!chId || !interaction.guild.channels.cache.get(chId)) return interaction.reply(fail(g, 'Für die Mitgliederliste ist kein Kanal gesetzt – `/config kanal`.'));
+    await interaction.deferReply({ flags: 64 });
+    await interaction.guild.members.fetch().catch(() => {});
+    // old messages away, fresh list at the bottom
+    const ch = interaction.guild.channels.cache.get(chId);
+    for (const id of g.panels.memberList || []) await ch.messages.fetch(id).then((m) => m.delete()).catch(() => {});
+    await memberlist.refresh(interaction.guild, g, ctx, { fresh: true });
+    return interaction.editReply(ok(g, `Mitgliederliste gepostet in <#${chId}>.`));
+  }
   const [, cfgKey] = PANELS.find(([k]) => k === art);
   const chId = g.config[cfgKey];
   if (!chId || !interaction.guild.channels.cache.get(chId)) return interaction.reply(fail(g, 'Für dieses Panel ist kein Kanal gesetzt – `/config kanal`.'));

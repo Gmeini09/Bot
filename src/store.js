@@ -40,6 +40,8 @@ function defaultGuild() {
       giveawayRoleId: null,
       feedbackChannelId: null,
       rolesChannelId: null,
+      memberListChannelId: null, // member list: hoisted roles and their members
+      memberListRoleIds: [], // empty = every hoisted role
       paymentInfo: 'Die Zahlungsinformationen erhältst du im Bestell-Ticket vom Team.',
       currency: 'EUR',
       modLogChannelId: null,

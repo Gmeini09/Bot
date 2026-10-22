@@ -14,7 +14,7 @@ const COMMANDS = [
   base('setup', 'Postet die Panels in die eingestellten Kanäle und zeigt die Einrichtung', P.ADMIN),
   base('panel', 'Postet ein Panel neu', P.ADMIN, [
     opt(T.STRING, 'art', 'Welches Panel', { required: true, choices: [
-      { name: 'Verifizierung', value: 'verify' }, { name: 'Tickets', value: 'tickets' }, { name: 'Shop', value: 'shop' },
+      { name: 'Verifizierung', value: 'verify' }, { name: 'Tickets', value: 'tickets' }, { name: 'Shop', value: 'shop' }, { name: 'Mitgliederliste', value: 'memberlist' },
     ] }),
   ]),
   base('config', 'Einstellungen des Bots', P.ADMIN, [
@@ -31,6 +31,7 @@ const COMMANDS = [
         { name: 'Mod-Log', value: 'modLogChannelId' }, { name: 'Ticket-Log', value: 'ticketLogChannelId' },
         { name: 'Kategorie für Tickets', value: 'ticketCategoryId' }, { name: 'Kategorie für Bestellungen', value: 'orderCategoryId' },
         { name: 'Giveaways', value: 'giveawayChannelId' }, { name: 'Feedback / Bewertungen', value: 'feedbackChannelId' },
+        { name: 'Mitgliederliste', value: 'memberListChannelId' },
       ] }),
       opt(T.CHANNEL, 'kanal', 'Kanal oder Kategorie', { required: true, channel_types: [0, 4, 5] }),
     ]),

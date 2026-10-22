@@ -16,6 +16,7 @@ const adopt = require('./adopt');
 const giveaway = require('./giveaway');
 const roles = require('./roles');
 const stats = require('./stats');
+const memberlist = require('./memberlist');
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const DATA_DIR = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '..', 'data');
@@ -71,6 +72,7 @@ client.once(Events.ClientReady, async (c) => {
   }
   for (const guild of c.guilds.cache.values()) {
     await registerCommands(guild);
+    await guild.members.fetch().catch((e) => console.error('❌ Mitglieder nicht geladen:', e.message)); // full list for the member list
     const me = guild.members.me;
     if (me?.nickname && /imperium/i.test(me.nickname)) await me.setNickname(me.nickname.replace(/imperium/i, 'Kaiserreich')).catch((e) => console.error('❌ Spitzname nicht geändert:', e.message));
     store.guild(guild.id);
@@ -154,6 +156,11 @@ client.on(Events.GuildMemberAdd, async (member) => {
     await log(member.guild, { title: '📥 Beigetreten', description: `<@${member.id}> (${member.user.tag}) – Account erstellt <t:${Math.floor(member.user.createdTimestamp / 1000)}:R>\nMitglieder: ${member.guild.memberCount}`, color: 0x2ecc71 });
   } catch (e) { console.error('memberAdd', e); }
 });
+client.on(Events.GuildMemberUpdate, (before, after) => { if (memberlist.relevantChange(before, after)) memberlist.schedule(after.guild, ctx); });
+client.on(Events.GuildRoleCreate, (r) => memberlist.schedule(r.guild, ctx));
+client.on(Events.GuildRoleDelete, (r) => memberlist.schedule(r.guild, ctx));
+client.on(Events.GuildRoleUpdate, (a, b) => { if (a.name !== b.name || a.hoist !== b.hoist || a.position !== b.position || a.color !== b.color) memberlist.schedule(b.guild, ctx); });
+client.on(Events.GuildMemberRemove, (member) => memberlist.schedule(member.guild, ctx));
 client.on(Events.GuildMemberRemove, (member) => log(member.guild, { title: '📤 Verlassen', description: `<@${member.id}> (${member.user?.tag ?? member.id})`, color: 0x95a5a6 }).catch(() => {}));
 
 // ── messages
