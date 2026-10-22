@@ -3,6 +3,7 @@
 // version of /setup created (matched by stored ID *and* its exact original name, so nothing else is touched).
 const { postAll, postPanel } = require('./setup');
 const { embed } = require('./ui');
+const { isEveryoneRole } = require('./memberlist');
 
 const LAYOUTS = {
   // XVY Imerpium
@@ -27,6 +28,8 @@ const LAYOUTS = {
     fillChannels: { giveawayChannelId: '1559470988549431316', feedbackChannelId: '1559473176352923681', memberListChannelId: '1559471469627580447' }, // 🎁┇giveaways, 🤍┇feedback, member list
     // texts of the ticket types (by id) – applied on every start
     ticketTypes: { bewerbung: { description: 'Bewirb dich für XVY' } },
+    // member list in 1559471469627580447: these roles in this order (set on every start unless changed in the code)
+    memberListRoles: ['1553861110866911260', '1553861110866911259', '1559843998296965120', '1559489580212822062', '1559844247429972018', '1559844329638600754', '1559844394885054496', '1559844496861040661', '1559844549256552460'],
     // role that may run /giveaway – created once if missing (no Discord permissions of its own)
     giveawayRole: 'giveaway perms',
     // products for 🛒┇bestellen – added once each (not again if the owner removes one later)
@@ -134,6 +137,19 @@ async function ensureGiveawayRole(guild, g, layout, ctx) {
   return role;
 }
 
+/** Sets the member-list roles and logs which ones are used or skipped. */
+function applyMemberListRoles(guild, g, layout, ctx) {
+  const ids = layout.memberListRoles;
+  if (JSON.stringify(g.config.memberListRoleIds) !== JSON.stringify(ids)) { g.config.memberListRoleIds = [...ids]; ctx.store.save(); }
+  const lines = ids.map((id) => {
+    const r = guild.roles.cache.get(id);
+    if (!r) return `⚠️ ${id}: Rolle nicht gefunden`;
+    const n = guild.members.cache.filter((m) => !m.user?.bot && m.roles.cache.has(id)).size;
+    return `${isEveryoneRole(guild, g, r) ? '⛔ übersprungen (Mitgliederrolle)' : '✅'} ${r.name}: ${n}`;
+  });
+  console.log(`👥 Mitgliederliste – Rollen:\n${lines.join('\n')}`);
+}
+
 async function applyLayout(guild, ctx) {
   const layout = LAYOUTS[guild.id];
   const g = ctx.store.guild(guild.id);
@@ -142,6 +158,7 @@ async function applyLayout(guild, ctx) {
   else if (layout.name && (layout.renameFrom || []).includes(g.config.name)) g.config.name = layout.name; // panels are posted below
   for (const [key, id] of Object.entries(layout.fillChannels || {})) if (!g.config[key] && guild.channels.cache.get(id)) { g.config[key] = id; ctx.store.save(); }
   await ensureGiveawayRole(guild, g, layout, ctx);
+  if (layout.memberListRoles) applyMemberListRoles(guild, g, layout, ctx);
   if (g.layoutVersion === layout.version) {
     await seedProducts(guild, g, layout, ctx);
     await applyTicketTypes(guild, g, layout, ctx);

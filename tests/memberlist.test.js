@@ -50,7 +50,7 @@ test('posts once, then edits in place; a long list is split and the role is repe
   const first = await memberlist.refresh(w.G, w.g, w.ctx);
   assert.equal(first.length, 1);
   assert.match(w.ch.messages.cache.get(first[0]).embeds[0].description, /Noch niemand/);
-  for (let i = 0; i < 250; i++) w.world.addUser(`User${String(i).padStart(3, '0')}`, { roles: [w.member] });
+  for (let i = 0; i < 250; i++) w.world.addUser(`User${String(i).padStart(3, '0')}`, { roles: [[w.member, w.mod, w.founder][i % 3]] }); // no role > half
   const ids = await memberlist.refresh(w.G, w.g, w.ctx);
   assert.ok(ids.length >= 2, 'split into several messages');
   assert.equal(ids[0], first[0], 'first message edited, not reposted');
@@ -93,4 +93,16 @@ test('only role/name changes count as relevant member updates', () => {
   assert.equal(memberlist.relevantChange({ roles: R(['a']), displayName: 'x' }, { roles: R(['a']), displayName: 'x' }), false);
   assert.equal(memberlist.relevantChange({ roles: R(['a']), displayName: 'x' }, { roles: R(['b']), displayName: 'x' }), true);
   assert.equal(memberlist.relevantChange({ roles: R(['a']), displayName: 'x' }, { roles: R(['a']), displayName: 'y' }), true);
+});
+
+test('configured roles keep their order; the verified role and roles most people have are skipped', async () => {
+  const w = await world0();
+  w.g.config.memberRoleId = w.member.id;
+  const big = await w.G.roles.create({ name: 'Alle' });
+  w.world.addUser('Anna', { roles: [w.founder, w.member, big] });
+  w.world.addUser('Ben', { roles: [w.mod, w.member, big] });
+  for (let i = 0; i < 25; i++) w.world.addUser(`U${i}`, { roles: [w.member, big] });
+  w.g.config.memberListRoleIds = [w.mod.id, w.member.id, w.founder.id, big.id, '999'];
+  assert.deepEqual(memberlist.listRoles(w.G, w.g).map((r) => r.name), ['・MOD', 'FOUNDER']);
+  assert.deepEqual(memberlist.sections(w.G, w.g).map((s) => [s.role.name, s.members.length]), [['・MOD', 1], ['FOUNDER', 1]]);
 });

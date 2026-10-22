@@ -77,6 +77,7 @@ client.once(Events.ClientReady, async (c) => {
     if (me?.nickname && /imperium/i.test(me.nickname)) await me.setNickname(me.nickname.replace(/imperium/i, 'Kaiserreich')).catch((e) => console.error('❌ Spitzname nicht geändert:', e.message));
     store.guild(guild.id);
     await adopt.applyLayout(guild, ctx).catch((e) => console.error(`❌ Layout für ${guild.name} fehlgeschlagen:`, e));
+    memberlist.schedule(guild, ctx, 3_000); // list up to date after a restart
   }
   store.save();
   setInterval(() => giveaway.tick(ctx).catch((e) => console.error('giveaway tick', e)), 15_000).unref?.();

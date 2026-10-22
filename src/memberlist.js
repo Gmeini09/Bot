@@ -9,12 +9,21 @@ const MAX_DESC = 3900; // embed description limit is 4096
 const MAX_MESSAGES = 8;
 const DEBOUNCE_MS = 15_000;
 
-/** Roles that get a section: configured ones, otherwise every hoisted, non-bot role – highest first. */
+/** True for roles almost everyone has (the verified/member role) – those would list the whole server. */
+function isEveryoneRole(guild, g, role) {
+  if (role.id === guild.id || role.id === g.config.memberRoleId) return true;
+  const humans = [...guild.members.cache.values()].filter((m) => !m.user?.bot);
+  if (humans.length < 20) return false;
+  return humans.filter((m) => m.roles.cache.has(role.id)).length > humans.length / 2;
+}
+
+/** Roles that get a section: configured ones in the given order, otherwise every hoisted role highest first.
+ *  Never bot roles, the verified role or a role more than half the server has. */
 function listRoles(guild, g) {
   const ids = g.config.memberListRoleIds || [];
-  const all = [...guild.roles.cache.values()].filter((r) => r.id !== guild.id && !r.managed);
-  const roles = ids.length ? all.filter((r) => ids.includes(r.id)) : all.filter((r) => r.hoist);
-  return roles.sort((a, b) => b.position - a.position);
+  const ok = (r) => r && !r.managed && !isEveryoneRole(guild, g, r);
+  if (ids.length) return ids.map((id) => guild.roles.cache.get(id)).filter(ok);
+  return [...guild.roles.cache.values()].filter((r) => r.hoist && ok(r)).sort((a, b) => b.position - a.position);
 }
 
 /** [{ role, members: [member] }] – every human member once, under their highest listed role. */
@@ -117,4 +126,4 @@ const relevantChange = (before, after) => before.partial
   || before.roles.cache.size !== after.roles.cache.size
   || [...after.roles.cache.keys()].some((id) => !before.roles.cache.has(id));
 
-module.exports = { listRoles, sections, blocks, payloads, refresh, schedule, relevantChange };
+module.exports = { isEveryoneRole, listRoles, sections, blocks, payloads, refresh, schedule, relevantChange };
