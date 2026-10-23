@@ -17,6 +17,10 @@ const giveaway = require('./giveaway');
 const roles = require('./roles');
 const stats = require('./stats');
 const memberlist = require('./memberlist');
+const perms = require('./perms');
+const backup = require('./backup');
+const audit = require('./audit');
+const invites = require('./invites');
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const DATA_DIR = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '..', 'data');
@@ -27,7 +31,7 @@ shop.setImageDir(path.join(DATA_DIR, 'images'));
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent, GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.MessageContent, GatewayIntentBits.GuildModeration, GatewayIntentBits.GuildInvites,
   ],
   partials: [Partials.Message, Partials.Channel],
   allowedMentions: { parse: [] },
@@ -78,10 +82,18 @@ client.once(Events.ClientReady, async (c) => {
     store.guild(guild.id);
     await adopt.applyLayout(guild, ctx).catch((e) => console.error(`❌ Layout für ${guild.name} fehlgeschlagen:`, e));
     memberlist.schedule(guild, ctx, 3_000); // list up to date after a restart
+    if (!(await invites.load(guild))) console.error(`⚠️ Einladungen auf ${guild.name} nicht lesbar – Recht „Server verwalten“ fehlt`);
+    const pr = perms.report(guild, store.guild(guild.id));
+    console.log(`🔐 Rechte auf ${guild.name}:\n${pr.lines.join('\n').replace(/<#(\d+)>/g, '#$1')}`);
+    if (!pr.ok) await log(guild, { title: '🔐 Bot-Rechte prüfen', description: `${pr.lines.join('\n')}\n\nAlles prüfen: \`/rechte\``, color: 0xe67e22 });
   }
   store.save();
   setInterval(() => giveaway.tick(ctx).catch((e) => console.error('giveaway tick', e)), 15_000).unref?.();
-  console.log(`🔗 Einladen: https://discord.com/oauth2/authorize?client_id=${c.user.id}&permissions=8&scope=bot%20applications.commands`);
+  setInterval(() => tickets.tick(ctx).catch((e) => console.error('ticket tick', e)), 5 * 60_000).unref?.();
+  const snap = () => { try { const f = backup.snapshot(store); if (f) console.log(`💾 Sicherung: ${f}`); } catch (e) { console.error('❌ Sicherung:', e.message); } };
+  snap();
+  setInterval(snap, 3_600_000).unref?.();
+  console.log(`🔗 Einladen (ohne Admin): ${perms.inviteUrl(c.user.id)}`);
 });
 
 client.on(Events.GuildCreate, (guild) => registerCommands(guild));
@@ -102,9 +114,21 @@ const BUTTONS = {
   'order:close': shop.onOrderButton,
 };
 const SELECTS = { 'ticket:open': tickets.onSelect, 'shop:add': shop.onAdd };
+
+/** /rechte – what the bot is missing, and the invite link without Administrator. */
+async function onPermsCommand(i) {
+  const g = store.guild(i.guildId);
+  const r = perms.report(i.guild, g);
+  return i.reply({ embeds: [embed(g, {
+    title: r.ok ? '🔐 Rechte – alles in Ordnung' : '🔐 Rechte prüfen',
+    description: `${r.lines.join('\n')}\n\n**Benötigt:** ${Object.values(perms.NAMES).join(', ')}\n\n[Bot mit genau diesen Rechten einladen](${perms.inviteUrl(i.client.user.id)})`,
+    color: r.ok ? 0x2ecc71 : 0xe67e22,
+  })], flags: 64 });
+}
 const COMMAND_HANDLERS = {
   setup: setup.runSetup, panel: setup.repostPanel, config: config.onCommand, produkt: shop.onProductCommand, ticket: tickets.onCommand,
   giveaway: giveaway.onCommand, rollen: roles.onCommand, stats: stats.onCommand,
+  rabatt: shop.onDiscountCommand, invites: invites.onCommand, backup: backup.onCommand, rechte: onPermsCommand,
 };
 const MOD = new Set(['warn', 'warns', 'unwarn', 'timeout', 'untimeout', 'kick', 'ban', 'unban', 'clear', 'lock', 'unlock', 'slowmode', 'raidmode']);
 
@@ -112,7 +136,7 @@ async function route(i) {
   if (!i.inGuild()) return null;
   // "ephemeral" (flag 64) only belongs to the first reply – editing a deferred reply must not send it again
   if (i.editReply) { const edit = i.editReply.bind(i); i.editReply = (p) => edit(p && typeof p === 'object' ? { ...p, flags: undefined } : p); }
-  if (i.isAutocomplete()) return i.commandName === 'produkt' ? shop.onAutocomplete(i, ctx) : i.commandName === 'giveaway' ? (giveaway.mayHost(i.member, ctx.store.guild(i.guildId)) ? giveaway.onAutocomplete(i, ctx) : i.respond([]))  : null;
+  if (i.isAutocomplete()) return i.commandName === 'rabatt' ? shop.onDiscountAutocomplete(i, ctx) : i.commandName === 'produkt' ? shop.onAutocomplete(i, ctx) : i.commandName === 'giveaway' ? (giveaway.mayHost(i.member, ctx.store.guild(i.guildId)) ? giveaway.onAutocomplete(i, ctx) : i.respond([]))  : null;
   if (i.isChatInputCommand()) {
     if (COMMAND_HANDLERS[i.commandName]) return COMMAND_HANDLERS[i.commandName](i, ctx);
     if (MOD.has(i.commandName)) return moderation.onCommand(i, ctx);
@@ -123,6 +147,7 @@ async function route(i) {
     if (i.customId.startsWith('gw:')) return giveaway.onJoin(i, ctx);
     if (i.customId.startsWith('role:')) return roles.onButton(i, ctx);
     if (i.customId.startsWith('fb:')) return shop.onFeedbackButton(i, ctx);
+    if (i.customId.startsWith('restock:')) return shop.onRestock(i, ctx);
     return null;
   }
   if (i.isStringSelectMenu()) return SELECTS[i.customId]?.(i, ctx);
@@ -152,20 +177,38 @@ client.on(Events.InteractionCreate, async (i) => {
 // ── members
 client.on(Events.GuildMemberAdd, async (member) => {
   try {
+    const inv = await invites.onJoin(member, ctx).catch((e) => { console.error('invites', e); return null; });
     if (await moderation.onJoin(member, ctx)) return;
-    await verify.welcome(member, ctx);
-    await log(member.guild, { title: '📥 Beigetreten', description: `<@${member.id}> (${member.user.tag}) – Account erstellt <t:${Math.floor(member.user.createdTimestamp / 1000)}:R>\nMitglieder: ${member.guild.memberCount}`, color: 0x2ecc71 });
+    await verify.welcome(member, ctx, inv);
+    await log(member.guild, { title: '📥 Beigetreten', description: `<@${member.id}> (${member.user.tag}) – Account erstellt <t:${Math.floor(member.user.createdTimestamp / 1000)}:R>\n${invites.joinText(inv)}\nMitglieder: ${member.guild.memberCount}`, color: 0x2ecc71 });
   } catch (e) { console.error('memberAdd', e); }
 });
-client.on(Events.GuildMemberUpdate, (before, after) => { if (memberlist.relevantChange(before, after)) memberlist.schedule(after.guild, ctx); });
-client.on(Events.GuildRoleCreate, (r) => memberlist.schedule(r.guild, ctx));
-client.on(Events.GuildRoleDelete, (r) => memberlist.schedule(r.guild, ctx));
-client.on(Events.GuildRoleUpdate, (a, b) => { if (a.name !== b.name || a.hoist !== b.hoist || a.position !== b.position || a.color !== b.color) memberlist.schedule(b.guild, ctx); });
-client.on(Events.GuildMemberRemove, (member) => memberlist.schedule(member.guild, ctx));
-client.on(Events.GuildMemberRemove, (member) => log(member.guild, { title: '📤 Verlassen', description: `<@${member.id}> (${member.user?.tag ?? member.id})`, color: 0x95a5a6 }).catch(() => {}));
+const safe = (name, p) => Promise.resolve(p).catch((e) => console.error(name, e));
+client.on(Events.GuildMemberUpdate, (before, after) => {
+  if (memberlist.relevantChange(before, after)) memberlist.schedule(after.guild, ctx);
+  safe('audit member', audit.onMemberUpdate(before, after, ctx));
+});
+client.on(Events.GuildRoleCreate, (r) => { memberlist.schedule(r.guild, ctx); safe('audit role', audit.onRole(r, true, ctx)); });
+client.on(Events.GuildRoleDelete, (r) => { memberlist.schedule(r.guild, ctx); safe('audit role', audit.onRole(r, false, ctx)); });
+client.on(Events.GuildRoleUpdate, (a, b) => {
+  if (a.name !== b.name || a.hoist !== b.hoist || a.position !== b.position || a.color !== b.color) memberlist.schedule(b.guild, ctx);
+  safe('audit role', audit.onRoleUpdate(a, b, ctx));
+});
+client.on(Events.ChannelCreate, (c) => safe('audit channel', audit.onChannel(c, true, ctx)));
+client.on(Events.ChannelDelete, (c) => safe('audit channel', audit.onChannel(c, false, ctx)));
+client.on(Events.InviteCreate, (inv) => invites.onCreate(inv));
+client.on(Events.InviteDelete, (inv) => invites.onDelete(inv));
+client.on(Events.GuildMemberRemove, (member) => {
+  memberlist.schedule(member.guild, ctx);
+  const inviter = invites.onLeave(member, ctx);
+  log(member.guild, { title: '📤 Verlassen', description: `<@${member.id}> (${member.user?.tag ?? member.id})${inviter ? `\nEingeladen von <@${inviter}>` : ''}`, color: 0x95a5a6 }).catch(() => {});
+});
 
 // ── messages
-client.on(Events.MessageCreate, (m) => moderation.onMessage(m, ctx).catch((e) => console.error('automod', e)));
+client.on(Events.MessageCreate, (m) => {
+  tickets.onMessage(m, ctx);
+  moderation.onMessage(m, ctx).catch((e) => console.error('automod', e));
+});
 client.on(Events.MessageDelete, async (m) => {
   if (!m.guild || m.author?.bot || !m.content) return;
   const g = store.guild(m.guild.id);

@@ -14,7 +14,8 @@ function show(g) {
     fields: [
       { name: 'Rollen', value: `Team: ${(c.staffRoleIds || []).map(ro).join(' ') || '–'}\nVerifiziert: ${ro(c.memberRoleId)}\nKunde: ${ro(c.customerRoleId)}`, inline: true },
       { name: 'Kanäle', value: `Willkommen: ${ch(c.welcomeChannelId)}\nVerifizieren: ${ch(c.verifyChannelId)}\nShop: ${ch(c.shopChannelId)}\nTickets: ${ch(c.supportChannelId)}\nMod-Log: ${ch(c.modLogChannelId)}\nTicket-Log: ${ch(c.ticketLogChannelId)}\nTicket-Kategorie: ${ch(c.ticketCategoryId)}\nBestell-Kategorie: ${ch(c.orderCategoryId)}\nGiveaways: ${ch(c.giveawayChannelId)}\nFeedback: ${ch(c.feedbackChannelId)}\nRollen-Panel: ${ch(c.rolesChannelId)}\nMitgliederliste: ${ch(c.memberListChannelId)}`, inline: true },
-      { name: 'Verifizierung', value: `Captcha: ${onOff(c.captcha)}` },
+      { name: 'Verifizierung', value: `Captcha: ${onOff(c.captcha)} · Willkommensbild: ${onOff(c.welcomeCard)}` },
+      { name: 'Tickets', value: c.ticketAutoClose?.enabled ? `Auto-Schließen: 🟢 Erinnerung nach ${c.ticketAutoClose.remindHours} h, geschlossen ${c.ticketAutoClose.closeHours} h später` : 'Auto-Schließen: 🔴 aus' },
       { name: 'Automod', value: `Gesamt: ${onOff(a.enabled)} · Spam: ${onOff(a.spam)} · Einladungen: ${onOff(a.invites)}\nMax. Erwähnungen: ${a.maxMentions} · Timeout ab ${a.warnTimeoutAt || '–'} Verwarnungen\nMindestalter: ${a.minAccountAgeDays ? `${a.minAccountAgeDays} Tage` : 'aus'} · Raid ab ${a.raidJoins} Beitritten in ${a.raidSeconds} s` },
       { name: 'Zahlung', value: c.paymentInfo },
       { name: 'Willkommenstext', value: c.welcomeText },
@@ -52,6 +53,13 @@ async function onCommand(interaction, ctx) {
   else if (sub === 'willkommen') c.welcomeText = o.getString('text', true).replace(/\\n/g, '\n');
   else if (sub === 'regeln') c.rulesText = o.getString('text', true).replace(/\\n/g, '\n');
   else if (sub === 'captcha') c.captcha = o.getBoolean('an', true);
+  else if (sub === 'willkommensbild') c.welcomeCard = o.getBoolean('an', true);
+  else if (sub === 'tickets') {
+    const t = c.ticketAutoClose;
+    if (o.getBoolean('aktiv') !== null) t.enabled = o.getBoolean('aktiv');
+    if (o.getInteger('erinnerung_stunden') !== null) t.remindHours = o.getInteger('erinnerung_stunden');
+    if (o.getInteger('schliessen_stunden') !== null) t.closeHours = o.getInteger('schliessen_stunden');
+  }
   else if (sub === 'automod') {
     const a = c.automod;
     const map = { aktiv: ['enabled', 'Boolean'], spam: ['spam', 'Boolean'], einladungen: ['invites', 'Boolean'], max_erwaehnungen: ['maxMentions', 'Integer'], verwarnungen_timeout: ['warnTimeoutAt', 'Integer'], mindestalter_tage: ['minAccountAgeDays', 'Integer'], raid_joins: ['raidJoins', 'Integer'] };

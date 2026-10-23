@@ -2,6 +2,7 @@
 // Verification (button + optional captcha) and welcome messages.
 const { embed, button, row, modal, ok, fail, BTN } = require('./ui');
 const { makeCaptcha, fillTemplate } = require('./logic');
+const card = require('./card');
 
 const pending = new Map(); // `${guild}:${user}` → { answer, at }
 
@@ -53,18 +54,26 @@ async function onModal(interaction, ctx) {
   return grant(interaction, g);
 }
 
-async function welcome(member, ctx) {
+async function welcome(member, ctx, invite = null) {
   const g = ctx.store.guild(member.guild.id);
   const ch = member.guild.channels.cache.get(g.config.welcomeChannelId);
   if (!ch) return;
+  const count = member.guild.memberCount;
   const text = fillTemplate(g.config.welcomeText, {
-    user: `<@${member.id}>`, server: g.config.name, verify: g.config.verifyChannelId ? `<#${g.config.verifyChannelId}>` : 'dem Verifizierungs-Kanal', count: member.guild.memberCount,
+    user: `<@${member.id}>`, server: g.config.name, verify: g.config.verifyChannelId ? `<#${g.config.verifyChannelId}>` : 'dem Verifizierungs-Kanal', count,
+    inviter: invite?.inviterId ? `<@${invite.inviterId}>` : 'jemandem',
   });
-  await ch.send({
-    content: `<@${member.id}>`,
-    embeds: [embed(g, { title: '👋 Neues Mitglied', description: text, thumbnail: member.user.displayAvatarURL?.({ size: 128 }), footer: `${g.config.name} • Mitglied #${member.guild.memberCount}` })],
-    allowedMentions: { users: [member.id] },
-  }).catch(() => {});
+  const e = embed(g, { title: '👋 Neues Mitglied', description: text, footer: `${g.config.name} • Mitglied #${count}` });
+  let files = [];
+  if (g.config.welcomeCard) {
+    const png = await card.render({
+      name: card.drawableName(member.displayName ?? member.user.globalName, member.user.username), count, server: g.config.name, color: g.config.color,
+      avatar: await card.avatarOf(member),
+    }).catch((err) => { console.error('Willkommensbild:', err.message); return null; });
+    if (png) { files = [{ attachment: png, name: 'willkommen.png' }]; e.image = { url: 'attachment://willkommen.png' }; }
+  }
+  if (!files.length) e.thumbnail = { url: member.user.displayAvatarURL?.({ size: 128 }) };
+  await ch.send({ content: `<@${member.id}>`, embeds: [e], files, allowedMentions: { users: [member.id] } }).catch(() => {});
 }
 
 module.exports = { panel, onButton, onModal, welcome, pending };

@@ -119,7 +119,7 @@ test('slash commands follow Discord limits', () => {
     assert.match(c.name, NAME);
     assert.ok(!names.has(c.name), `duplicate ${c.name}`); names.add(c.name);
     assert.ok(c.description.length >= 1 && c.description.length <= 100, `${c.name} description length ${c.description.length}`);
-    if (c.name === 'giveaway') assert.equal(c.default_member_permissions, null); else assert.match(c.default_member_permissions, /^\d+$/);
+    if (['giveaway', 'invites'].includes(c.name)) assert.equal(c.default_member_permissions, null); else assert.match(c.default_member_permissions, /^\d+$/);
     const subs = (c.options || []).filter((o) => o.type === 1);
     if (subs.length) assert.equal(subs.length, c.options.length, `${c.name}: mixes subcommands and options`);
     checkOptions(c.options || [], c.name);

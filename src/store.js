@@ -42,6 +42,8 @@ function defaultGuild() {
       rolesChannelId: null,
       memberListChannelId: null, // member list: hoisted roles and their members
       memberListRoleIds: [], // empty = every hoisted role
+      ticketAutoClose: { enabled: true, remindHours: 48, closeHours: 24 }, // no reply → reminder, then closed
+      welcomeCard: true, // welcome message with a picture (avatar, name, member number)
       paymentInfo: 'Die Zahlungsinformationen erhältst du im Bestell-Ticket vom Team.',
       currency: 'EUR',
       modLogChannelId: null,
@@ -71,6 +73,8 @@ function defaultGuild() {
     giveaways: {},
     giveawayCounter: 0,
     selfRoles: [],
+    discounts: {}, // CODE → { type: 'percent'|'amount', value, expiresAt, maxUses, uses, usedBy }
+    invites: { members: {}, stats: {} }, // who invited whom
   };
 }
 
@@ -80,12 +84,16 @@ function migrate(g) {
   const out = { ...d, ...g };
   out.config = { ...d.config, ...(g.config || {}) };
   out.config.automod = { ...d.config.automod, ...((g.config || {}).automod || {}) };
+  out.config.ticketAutoClose = { ...d.config.ticketAutoClose, ...((g.config || {}).ticketAutoClose || {}) };
   if (!Array.isArray(out.config.ticketTypes) || !out.config.ticketTypes.length) out.config.ticketTypes = DEFAULT_TICKET_TYPES;
   if (!Array.isArray(out.config.staffRoleIds)) out.config.staffRoleIds = [];
   if (out.config.staffRoleId && !out.config.staffRoleIds.includes(out.config.staffRoleId)) out.config.staffRoleIds.push(out.config.staffRoleId);
   delete out.config.staffRoleId;
-  for (const k of ['panels', 'tickets', 'warns', 'products', 'carts', 'orders', 'giveaways']) if (!out[k] || typeof out[k] !== 'object') out[k] = {};
+  for (const k of ['panels', 'tickets', 'warns', 'products', 'carts', 'orders', 'giveaways', 'discounts']) if (!out[k] || typeof out[k] !== 'object') out[k] = {};
   if (!Array.isArray(out.selfRoles)) out.selfRoles = [];
+  if (!out.invites || typeof out.invites !== 'object') out.invites = { members: {}, stats: {} };
+  out.invites.members ||= {};
+  out.invites.stats ||= {};
   return out;
 }
 
@@ -111,8 +119,8 @@ class Store {
   guild(id) {
     const cur = this.data.guilds[id];
     if (!cur) this.data.guilds[id] = defaultGuild();
-    else if (!cur.__v || cur.__v < 3) this.data.guilds[id] = migrate(cur);
-    this.data.guilds[id].__v = 3;
+    else if (!cur.__v || cur.__v < 4) this.data.guilds[id] = migrate(cur);
+    this.data.guilds[id].__v = 4;
     return this.data.guilds[id];
   }
 

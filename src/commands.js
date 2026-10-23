@@ -39,6 +39,12 @@ const COMMANDS = [
     sub('willkommen', 'Willkommenstext ({user}, {server}, {verify}, {count})', [opt(T.STRING, 'text', 'Text', { required: true, max_length: 900 })]),
     sub('regeln', 'Regeltext im Verifizierungs-Panel (\\n = neue Zeile)', [opt(T.STRING, 'text', 'Regeln', { required: true, max_length: 3500 })]),
     sub('captcha', 'Rechenaufgabe bei der Verifizierung', [opt(T.BOOLEAN, 'an', 'Captcha an oder aus', { required: true })]),
+    sub('willkommensbild', 'Bild mit Avatar und Mitgliedsnummer bei der Begrüßung', [opt(T.BOOLEAN, 'an', 'Bild an oder aus', { required: true })]),
+    sub('tickets', 'Tickets ohne Antwort automatisch schließen', [
+      opt(T.BOOLEAN, 'aktiv', 'An oder aus'),
+      opt(T.INTEGER, 'erinnerung_stunden', 'Nach so vielen Stunden ohne Nachricht erinnern (Standard 48)', { min_value: 1, max_value: 720 }),
+      opt(T.INTEGER, 'schliessen_stunden', 'So viele Stunden nach der Erinnerung schließen (Standard 24)', { min_value: 1, max_value: 720 }),
+    ]),
     sub('automod', 'Automatischer Schutz', [
       opt(T.BOOLEAN, 'aktiv', 'Automod insgesamt an/aus'),
       opt(T.BOOLEAN, 'spam', 'Spam & wiederholte Nachrichten'),
@@ -65,6 +71,7 @@ const COMMANDS = [
       opt(T.BOOLEAN, 'verfuegbar', 'Im Shop bestellbar?'),
     ]),
     sub('entfernen', 'Produkt löschen', [opt(T.STRING, 'produkt', 'Produkt', { required: true, autocomplete: true })]),
+    sub('bestand', 'Wie viele verfügbar sind (leer = unbegrenzt) – Wartende werden benachrichtigt', [opt(T.STRING, 'produkt', 'Produkt', { required: true, autocomplete: true }), opt(T.INTEGER, 'anzahl', 'Stückzahl (0 = ausverkauft, leer = unbegrenzt)', { min_value: 0, max_value: 100000 })]),
     sub('bild', 'Produktbild hochladen (leer lassen = Bild entfernen)', [opt(T.STRING, 'produkt', 'Produkt', { required: true, autocomplete: true }), opt(T.ATTACHMENT, 'bild', 'Bild (PNG, JPG, GIF, WebP – max. 8 MB)')]),
     sub('liste', 'Alle Produkte'),
   ]),
@@ -104,6 +111,22 @@ const COMMANDS = [
     sub('panel', 'Rollen-Panel posten', [opt(T.CHANNEL, 'kanal', 'Kanal (Standard: dieser)', { channel_types: [0, 5] })]),
   ]),
   base('stats', 'Statistik: Bestellungen, Umsatz, Bewertungen, Tickets', P.MODERATE),
+  base('rabatt', 'Rabattcodes für den Shop', P.MANAGE_GUILD, [
+    sub('erstellen', 'Neuer Rabattcode', [
+      opt(T.STRING, 'code', 'z. B. XVY10', { required: true, max_length: 30 }),
+      opt(T.STRING, 'rabatt', '10% oder 5 (Euro)', { required: true, max_length: 10 }),
+      opt(T.INTEGER, 'tage', 'Gültig für so viele Tage (leer = unbegrenzt)', { min_value: 1, max_value: 365 }),
+      opt(T.INTEGER, 'max_nutzungen', 'Insgesamt so oft einlösbar (leer = unbegrenzt)', { min_value: 1, max_value: 10000 }),
+    ]),
+    sub('loeschen', 'Rabattcode löschen', [opt(T.STRING, 'code', 'Code', { required: true, autocomplete: true })]),
+    sub('liste', 'Alle Rabattcodes'),
+  ]),
+  base('invites', 'Einladungen', null, [
+    sub('anzeigen', 'Wie viele Leute jemand eingeladen hat', [user(false)]),
+    sub('rangliste', 'Wer hat die meisten eingeladen?'),
+  ]),
+  base('backup', 'Aktuelle Bot-Daten als Datei (nur Owner/Admins)', P.ADMIN),
+  base('rechte', 'Prüft, ob dem Bot Rechte fehlen', P.ADMIN),
   base('raidmode', 'Raid-Modus beenden oder starten', P.MODERATE, [opt(T.BOOLEAN, 'an', 'An oder aus', { required: true })]),
 ];
 

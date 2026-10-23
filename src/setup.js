@@ -3,6 +3,7 @@
 // channels or roles – the server's own structure stays exactly as the owner built it.
 const { embed, ok, fail } = require('./ui');
 const memberlist = require('./memberlist');
+const perms = require('./perms');
 
 const F = {
   VIEW: 1n << 10n, SEND: 1n << 11n, MANAGE_MESSAGES: 1n << 13n, EMBED: 1n << 14n, ATTACH: 1n << 15n, HISTORY: 1n << 16n,
@@ -65,6 +66,8 @@ async function runSetup(interaction, ctx) {
     title: '⚙️ Panels',
     description: [
       ...lines,
+      '',
+      ...perms.report(guild, g).lines,
       '',
       `Team: ${(c.staffRoleIds || []).map((id) => `<@&${id}>`).join(' ') || '–'} · Verifiziert: ${c.memberRoleId ? `<@&${c.memberRoleId}>` : '–'}`,
       `Willkommen: ${ch(c.welcomeChannelId)} · Logs: ${ch(c.modLogChannelId)} · Ticket-Kategorie: ${ch(c.ticketCategoryId)}`,

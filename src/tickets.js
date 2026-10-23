@@ -68,7 +68,7 @@ async function onCreate(interaction, ctx) {
   } catch (e) {
     return interaction.editReply(fail(g, `Ticket konnte nicht erstellt werden: ${e.message}`));
   }
-  g.tickets[ch.id] = { no, userId: interaction.user.id, type: type.id, topic: topic.slice(0, 1000), openedAt: Date.now(), claimedBy: null };
+  g.tickets[ch.id] = { no, userId: interaction.user.id, type: type.id, topic: topic.slice(0, 1000), openedAt: Date.now(), claimedBy: null, lastActivity: Date.now(), remindedAt: null };
   ctx.store.save();
   const ping = staffPing(g, interaction.guild);
   await ch.send({
@@ -175,4 +175,53 @@ async function onCommand(interaction, ctx) {
   return interaction.reply({ embeds: [embed(g, { description: `➖ <@${u.id}> wurde aus dem Ticket entfernt.`, timestamp: false })] });
 }
 
-module.exports = { panel, onSelect, onCreate, onClaim, onCloseButton, onCloseConfirm, onCommand, closeTicket, privateChannel, isStaff, staffIds, staffPing, fetchAll };
+// ── auto close: no message for remindHours → reminder; still nothing for closeHours → closed with transcript
+const HOUR = 3_600_000;
+
+/** A message in a ticket channel keeps it open. */
+function onMessage(message, ctx) {
+  if (!message.guild || message.author?.bot) return false;
+  const t = ctx.store.guild(message.guild.id).tickets[message.channelId];
+  if (!t) return false;
+  t.lastActivity = Date.now();
+  t.remindedAt = null;
+  ctx.store.save();
+  return true;
+}
+
+/** What to do with one ticket now: 'remind' | 'close' | null (pure, for tests). */
+function autoCloseAction(t, cfg, now) {
+  if (!cfg?.enabled) return null;
+  const last = t.lastActivity ?? t.openedAt ?? now;
+  if (t.remindedAt) return now - t.remindedAt >= cfg.closeHours * HOUR ? 'close' : null;
+  return now - last >= cfg.remindHours * HOUR ? 'remind' : null;
+}
+
+async function tick(ctx, now = Date.now()) {
+  for (const guild of ctx.client.guilds.cache.values()) {
+    const g = ctx.store.guild(guild.id);
+    const cfg = g.config.ticketAutoClose;
+    for (const [channelId, t] of Object.entries(g.tickets)) {
+      if (t.lastActivity == null) { t.lastActivity = now; ctx.store.save(); continue; } // tickets from before this feature start fresh
+      const action = autoCloseAction(t, cfg, now);
+      if (!action) continue;
+      const ch = guild.channels.cache.get(channelId);
+      if (!ch) { delete g.tickets[channelId]; ctx.store.save(); continue; }
+      if (action === 'remind') {
+        t.remindedAt = now;
+        ctx.store.save();
+        await ch.send({
+          content: `<@${t.userId}>`,
+          embeds: [embed(g, { title: '⏰ Ist dein Anliegen noch offen?', description: `In diesem Ticket wurde seit ${cfg.remindHours} Stunden nichts geschrieben.
+Wenn niemand antwortet, wird es <t:${Math.floor((now + cfg.closeHours * HOUR) / 1000)}:R> automatisch geschlossen. Schreib einfach etwas, damit es offen bleibt.`, timestamp: false })],
+          allowedMentions: { users: [t.userId] },
+        }).catch(() => {});
+      } else {
+        await closeTicket(ch, ctx, ctx.client.user.id, `Automatisch geschlossen – ${cfg.remindHours + cfg.closeHours} Stunden ohne Antwort`);
+        await ctx.log(guild, { title: '🔒 Ticket automatisch geschlossen', description: `#${pad(t.no)} von <@${t.userId}> – keine Antwort`, color: 0x95a5a6 });
+      }
+    }
+  }
+}
+
+module.exports = { onMessage, autoCloseAction, tick, panel, onSelect, onCreate, onClaim, onCloseButton, onCloseConfirm, onCommand, closeTicket, privateChannel, isStaff, staffIds, staffPing, fetchAll };

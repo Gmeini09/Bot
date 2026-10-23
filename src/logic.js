@@ -125,6 +125,38 @@ function validEmoji(e) {
   return /^\p{Extended_Pictographic}(️|‍\p{Extended_Pictographic}|\p{Emoji_Modifier})*$/u.test(s) || /^[0-9#*]️?⃣$/.test(s);
 }
 
+/** "10%" → percent 10; "5", "5€", "4,50" → amount; null if invalid. */
+function parseDiscount(s) {
+  const t = String(s ?? '').trim();
+  const pm = /^(\d{1,2}(?:[.,]\d{1,2})?|100)\s*%$/.exec(t);
+  if (pm) { const v = Number(pm[1].replace(',', '.')); return v > 0 && v <= 100 ? { type: 'percent', value: v } : null; }
+  const v = parsePrice(t);
+  return v && v > 0 ? { type: 'amount', value: v } : null;
+}
+
+const normCode = (s) => String(s || '').trim().toUpperCase();
+
+/** Why a code can't be used, or null. */
+function discountError(d, userId, now = Date.now()) {
+  if (!d) return 'Diesen Rabattcode gibt es nicht.';
+  if (d.expiresAt && now > d.expiresAt) return 'Dieser Rabattcode ist abgelaufen.';
+  if (d.maxUses && (d.uses || 0) >= d.maxUses) return 'Dieser Rabattcode ist schon aufgebraucht.';
+  if ((d.usedBy || []).includes(userId)) return 'Du hast diesen Rabattcode schon benutzt.';
+  return null;
+}
+
+/** Discount on a total: { amount, total } (never below 0). */
+function applyDiscount(total, d) {
+  const raw = d.type === 'percent' ? total * d.value / 100 : d.value;
+  const amount = Math.round(Math.min(total, raw) * 100) / 100;
+  return { amount, total: Math.round((total - amount) * 100) / 100 };
+}
+
+const discountLabel = (d, currency = 'EUR') => (d.type === 'percent' ? `${String(d.value).replace('.', ',')} %` : money(d.value, currency));
+
+/** Stock: null/undefined = unlimited. */
+const inStock = (p) => p.stock == null || p.stock > 0;
+
 const ORDER_STATUS = {
   open: { label: 'Offen – wartet auf Zahlung', emoji: '🟡' },
   paid: { label: 'Bezahlt – in Bearbeitung', emoji: '🔵' },
@@ -132,4 +164,4 @@ const ORDER_STATUS = {
   cancelled: { label: 'Storniert', emoji: '🔴' },
 };
 
-module.exports = { parseDuration, money, fillTemplate, parseColor, parsePrice, cartLines, cartTotal, addToCart, makeCaptcha, hasInvite, SpamTracker, RaidTracker, transcript, slug, pad, accountAgeDays, validEmoji, ORDER_STATUS };
+module.exports = { parseDiscount, normCode, discountError, applyDiscount, discountLabel, inStock, parseDuration, money, fillTemplate, parseColor, parsePrice, cartLines, cartTotal, addToCart, makeCaptcha, hasInvite, SpamTracker, RaidTracker, transcript, slug, pad, accountAgeDays, validEmoji, ORDER_STATUS };
