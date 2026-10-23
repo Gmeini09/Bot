@@ -5,7 +5,7 @@ const path = require('path');
 const { Client, GatewayIntentBits, Partials, Events, AuditLogEvent } = require('discord.js');
 const { Store } = require('./store');
 const { COMMANDS } = require('./commands');
-const { embed, fail } = require('./ui');
+const { embed, fail, button, row, BTN } = require('./ui');
 const setup = require('./setup');
 const verify = require('./verify');
 const tickets = require('./tickets');
@@ -112,6 +112,7 @@ const BUTTONS = {
   'order:delivered': shop.onOrderButton,
   'order:cancel': shop.onOrderButton,
   'order:close': shop.onOrderButton,
+  'perms:fix': (i) => onPermsFix(i),
 };
 const SELECTS = { 'ticket:open': tickets.onSelect, 'shop:add': shop.onAdd };
 
@@ -123,7 +124,20 @@ async function onPermsCommand(i) {
     title: r.ok ? '🔐 Rechte – alles in Ordnung' : '🔐 Rechte prüfen',
     description: `${r.lines.join('\n')}\n\n**Benötigt:** ${Object.values(perms.NAMES).join(', ')}\n\n[Bot mit genau diesen Rechten einladen](${perms.inviteUrl(i.client.user.id)})`,
     color: r.ok ? 0x2ecc71 : 0xe67e22,
-  })], flags: 64 });
+  })], components: r.channels.length ? [row(button('perms:fix', 'Bot in diesen Kanälen freischalten', BTN.success, '🔧'))] : [], flags: 64 });
+}
+
+/** 🔧 button: the bot allows itself in the blocked channels (owner/admins only). */
+async function onPermsFix(i) {
+  const g = store.guild(i.guildId);
+  if (i.user.id !== i.guild.ownerId && !i.member.permissions.has(1n << 3n)) return i.reply(fail(g, 'Nur der Server-Owner oder Admins.'));
+  await i.deferUpdate?.();
+  const lines = await perms.fix(i.guild, g);
+  const r = perms.report(i.guild, g);
+  await log(i.guild, { title: '🔧 Bot-Zugriff auf Kanäle', description: `${lines.join('\n')}\n**Von:** <@${i.user.id}>`.slice(0, 4000), color: 0x2ecc71 });
+  if (r.ok) await refreshPanels(i.guild, g);
+  const payload = { embeds: [embed(g, { title: r.ok ? '🔐 Rechte – alles in Ordnung' : '🔐 Rechte – noch nicht alles', description: [...lines, '', ...r.lines].join('\n').slice(0, 4000), color: r.ok ? 0x2ecc71 : 0xe67e22 })], components: [] };
+  return i.deferUpdate ? i.editReply(payload) : i.update(payload);
 }
 const COMMAND_HANDLERS = {
   setup: setup.runSetup, panel: setup.repostPanel, config: config.onCommand, produkt: shop.onProductCommand, ticket: tickets.onCommand,

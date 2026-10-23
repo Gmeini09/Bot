@@ -46,11 +46,11 @@ function check(guild, g) {
     const ch = id && guild.channels.cache.get(id);
     if (!ch || typeof ch.permissionsFor !== 'function') continue;
     const cb = bitsOf(ch.permissionsFor(me));
-    const miss = need.filter((k) => !has(cb, P[k])).map((k) => NAMES[k]);
-    if (!miss.length) continue;
-    const cur = byId.get(id) || { label: [], id, missing: [] };
+    const keys = need.filter((k) => !has(cb, P[k]));
+    if (!keys.length) continue;
+    const cur = byId.get(id) || { label: [], id, missing: [], keys: [] };
     cur.label.push(label);
-    for (const m of miss) if (!cur.missing.includes(m)) cur.missing.push(m);
+    for (const k of keys) if (!cur.keys.includes(k)) { cur.keys.push(k); cur.missing.push(NAMES[k]); }
     byId.set(id, cur);
   }
   const channels = [...byId.values()].map((c) => ({ ...c, label: c.label.join(', ') }));
@@ -68,4 +68,25 @@ function report(guild, g) {
   return { ...r, lines: out, ok: !r.admin && !r.missing.length && !r.channels.length };
 }
 
-module.exports = { P, NAMES, REQUIRED, inviteUrl, check, report };
+// discord.js names for channel overwrites
+const FLAG = { VIEW: 'ViewChannel', SEND: 'SendMessages', EMBED: 'EmbedLinks', HISTORY: 'ReadMessageHistory', ATTACH: 'AttachFiles', MANAGE_CHANNELS: 'ManageChannels', MANAGE_MESSAGES: 'ManageMessages' };
+
+/** Lets the bot itself into every channel where an overwrite blocks it (an allow just for the bot – nobody else changes).
+ *  Returns lines for the reply. */
+async function fix(guild, g) {
+  const me = guild.members.me;
+  const out = [];
+  for (const c of check(guild, g).channels) {
+    const ch = guild.channels.cache.get(c.id);
+    const allow = Object.fromEntries(c.keys.map((k) => [FLAG[k], true]));
+    try {
+      await ch.permissionOverwrites.edit(me.id, allow, { type: 1, reason: 'XVY-Bot: braucht Zugriff ohne Administrator' });
+      out.push(`✅ <#${c.id}>: ${c.missing.join(', ')}`);
+    } catch (e) {
+      out.push(`❌ <#${c.id}>: ${e.message} – bitte von Hand: Kanal bearbeiten → Berechtigungen → Bot hinzufügen → ${c.missing.join(', ')} erlauben`);
+    }
+  }
+  return out;
+}
+
+module.exports = { P, NAMES, REQUIRED, inviteUrl, check, report, fix };

@@ -306,3 +306,23 @@ test('welcome: picture with name and member number, plain embed when switched of
   assert.equal(plain.files.length, 0);
   assert.match(plain.embeds[0].description, new RegExp(`eingeladen von <@${world.owner.id}>`));
 });
+
+test('rights: fix lets the bot into blocked channels with an allow just for itself', async (t) => {
+  const { world, g, ch } = await world0(t);
+  const me = world.guild.members.me;
+  me.permissions = { bitfield: perms.REQUIRED };
+  const blocked = new Set([ch.welcome.id, ch.cat.id]);
+  for (const c of world.guild.channels.cache.values()) c.permissionsFor = () => ({ bitfield: blocked.has(c.id) ? perms.P.VIEW : perms.REQUIRED });
+  const r = perms.check(world.guild, g);
+  assert.deepEqual(r.channels.map((c) => c.id).sort(), [ch.welcome.id, ch.cat.id].sort());
+  const lines = await perms.fix(world.guild, g);
+  assert.equal(lines.length, 2);
+  const w = ch.welcome.permissionOverwrites.edits[0];
+  assert.equal(w.target, me.id);
+  assert.deepEqual(w.perms, { SendMessages: true, EmbedLinks: true, ReadMessageHistory: true, AttachFiles: true });
+  assert.equal(w.opts.type, 1);
+  assert.deepEqual(ch.cat.permissionOverwrites.edits[0].perms, { ManageChannels: true });
+  ch.shop.permissionOverwrites.edit = async () => { throw new Error('Missing Access'); };
+  blocked.add(ch.shop.id);
+  assert.match((await perms.fix(world.guild, g)).find((l) => l.includes(ch.shop.id)), /Missing Access – bitte von Hand/);
+});
