@@ -21,6 +21,7 @@ const perms = require('./perms');
 const backup = require('./backup');
 const audit = require('./audit');
 const invites = require('./invites');
+const aiChat = require('./ai-chat');
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const DATA_DIR = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '..', 'data');
@@ -222,6 +223,7 @@ client.on(Events.GuildMemberRemove, (member) => {
 client.on(Events.MessageCreate, (m) => {
   tickets.onMessage(m, ctx);
   moderation.onMessage(m, ctx).catch((e) => console.error('automod', e));
+  aiChat.onMessage(m);
 });
 client.on(Events.MessageDelete, async (m) => {
   if (!m.guild || m.author?.bot || !m.content) return;
