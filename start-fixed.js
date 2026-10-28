@@ -650,6 +650,13 @@ try {
   logGuardError('sptool-license', error);
 }
 
+// KI-Chat: answers every message in the AI_CHANNEL_IDS channels with Claude. Never crashes the bot.
+try {
+  require('./ai-chat.js').install();
+} catch (error) {
+  logGuardError('ai-chat', error);
+}
+
 // Read-only public shop and thumbnail feed for turbodesigns.net.
 require('./website-feed.js').install();
 
