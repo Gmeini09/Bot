@@ -237,7 +237,7 @@ function attach(client) {
   client.__aiChat = true;
   client.on('messageCreate', onMessage);
   require('events').EventEmitter.prototype.prependListener.call(client, 'interactionCreate', onInteraction);
-  for (const ev of new Set(['clientReady', 'ready'])) client.once(ev, () => { void register(client); });
+  client.once(require('discord.js').Events.ClientReady, () => { void register(client); });
   if (client.isReady?.()) void register(client);
   const list = [...channelIds()];
   if (configured()) console.log(`🤖 KI-Chat eingerichtet für ${list.length} Kanal/Kanäle: ${list.join(', ')}`);
