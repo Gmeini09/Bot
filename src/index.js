@@ -37,6 +37,7 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel],
   allowedMentions: { parse: [] },
 });
+aiChat.attach(client); // KI-Chat in AI_CHANNEL_IDS and /ki
 
 /** Sends an embed to the mod log channel. */
 async function log(guild, { title, description, color, ping }) {
@@ -223,7 +224,6 @@ client.on(Events.GuildMemberRemove, (member) => {
 client.on(Events.MessageCreate, (m) => {
   tickets.onMessage(m, ctx);
   moderation.onMessage(m, ctx).catch((e) => console.error('automod', e));
-  aiChat.onMessage(m);
 });
 client.on(Events.MessageDelete, async (m) => {
   if (!m.guild || m.author?.bot || !m.content) return;
