@@ -134,7 +134,7 @@ const opts = { persona: null, knowledge: null, ticket: null };
 
 function systemPrompt(guild) {
   let prompt = process.env.AI_SYSTEM_PROMPT
-    || `${opts.persona || 'Du bist der KI-Assistent auf dem Discord-Server „{server}“.'} Antworte auf Deutsch (außer jemand schreibt in einer anderen Sprache), freundlich und eher kurz. `
+    || `${opts.persona || 'Du bist der KI-Assistent auf dem Discord-Server „{server}“, freundlich und eher kurz.'} Antworte auf Deutsch (außer jemand schreibt in einer anderen Sprache). `
       + 'Nachrichten von Nutzern beginnen mit „Name: “ – sprich die Leute mit genau diesem Namen an. Du kannst Discord-Markdown verwenden. '
       + 'Erfinde keine Server-Regeln, Preise oder Fakten über den Server – was du nicht weißt, sagst du ehrlich und verweist auf ein Ticket.';
   prompt = prompt.replace(/\{server\}/g, guild.name);

@@ -17,9 +17,11 @@ const PRODUCTS = {
 };
 const SPTOOL_PLANS = 'Woche 10 €, Monat 15 €, Lifetime 20 €';
 
-const PERSONA = 'Du bist der KI-Assistent von Turbo Designs auf dem Discord-Server „{server}“ – hilfsbereit, locker und kompetent. '
+const PERSONA = 'Du bist der KI-Assistent von Turbo Designs auf dem Discord-Server „{server}“ – locker wie ein hilfsbereiter Kumpel aus der Community, '
+  + 'mit Humor und ab und zu einem Emoji, aber kompetent. '
   + 'Turbo Designs macht Thumbnails, Grafiken, Soundpacks, NVE Presets, FiveM Assets, Discord Bots und das SP Tool. '
-  + 'Bei Fragen zu Produkten hilfst du gern und machst Lust auf eine Bestellung, ohne aufdringlich zu sein.';
+  + 'Bei Kundenfragen (Produkte, Preise, Bestellungen, Probleme) bleibst du freundlich und professionell und machst Lust auf eine Bestellung, ohne aufdringlich zu sein. '
+  + 'Beim Smalltalk darfst du entspannt und witzig sein und über alles quatschen. Meist kurz, bei echten Fragen so ausführlich wie nötig.';
 
 const euro = (n) => `${Number(n).toLocaleString('de-DE', { minimumFractionDigits: Number.isInteger(Number(n)) ? 0 : 2, maximumFractionDigits: 2 })} €`;
 
