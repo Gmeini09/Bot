@@ -273,6 +273,100 @@ test('images of the message are sent to the KI; an image alone is enough', async
   assert.deepEqual(last.content[1], { type: 'text', text: 'u3: Vorher\nmax: [Anhang]' });
 });
 
+test('/ki wissen: add, list, delete; facts go into the system prompt and survive a restart', async () => {
+  const g = fakeGuild();
+  const cmd = (sub, opt = {}) => {
+    const i = fakeCommand(g, sub, OWNER);
+    i.options.getSubcommandGroup = () => 'wissen';
+    i.options.getString = () => opt.text;
+    i.options.getInteger = () => opt.n;
+    return i;
+  };
+  const add = cmd('neu', { text: '  Events   sind jeden Freitag um 20 Uhr ' });
+  await ai.onInteraction(add);
+  assert.match(add.replies[0].content, /Gemerkt \(#1\): Events sind jeden Freitag um 20 Uhr$/);
+  await ai.onInteraction(cmd('neu', { text: 'Bewerbungen laufen über Tickets' }));
+  assert.match(ai.systemPrompt(g), /Vom Owner festgelegt.*\n- Events sind jeden Freitag um 20 Uhr\n- Bewerbungen laufen über Tickets/s);
+
+  ai._reset(); // restart: read back from ai-chat.json
+  const list = cmd('liste');
+  await ai.onInteraction(list);
+  assert.match(list.replies[0].content, /\(2\/50\):\*\*\n\*\*1\.\*\* Events.*\n\*\*2\.\*\* Bewerbungen/);
+
+  const del = cmd('loeschen', { n: 1 });
+  await ai.onInteraction(del);
+  assert.match(del.replies[0].content, /Gelöscht: Events/);
+  const bad = cmd('loeschen', { n: 5 });
+  await ai.onInteraction(bad);
+  assert.match(bad.replies[0].content, /gibt es nicht/);
+  assert.doesNotMatch(ai.systemPrompt(g), /Events/);
+
+  const denied = cmd('neu', { text: 'x' });
+  denied.user = denied.member = { id: '2' };
+  await ai.onInteraction(denied);
+  assert.match(denied.replies[0].content, /Nur der Owner/);
+});
+
+test('ticket marker: cut off the answer, summary kept', () => {
+  assert.deepEqual(ai.ticketMarker('Das klärt das Team.\n[TICKET: Zahlung über PayPal kam nicht an.]'), { text: 'Das klärt das Team.', summary: 'Zahlung über PayPal kam nicht an.' });
+  assert.deepEqual(ai.ticketMarker('Klar! [TICKET]'), { text: 'Klar!', summary: '' });
+  assert.deepEqual(ai.ticketMarker('Normale Antwort'), { text: 'Normale Antwort', summary: null });
+});
+
+function ticketFetch(answer) {
+  global.fetch = async (url, init) => {
+    calls.push(JSON.parse(init.body));
+    return { ok: true, json: async () => ({ content: [{ type: 'text', text: answer }] }) };
+  };
+}
+
+test('ticket handoff (open): button under the answer, only the asker gets the pre-filled form', async () => {
+  const opened = [];
+  ai.configure({ ticket: { open: (i, summary) => opened.push({ user: i.user.id, summary }) } });
+  ticketFetch('Das muss sich das Team ansehen.\n[TICKET: Meine Bestellung #12 ist nicht angekommen.]');
+  const g = fakeGuild();
+  await ai.onMessage(fakeMessage(g, '100', 'wo bleibt meine bestellung'));
+  assert.match(calls[0].system, /\[TICKET: Zusammenfassung/);
+  const reply = g.sent[0];
+  assert.equal(reply.content, 'Das muss sich das Team ansehen.');
+  assert.equal(reply.components[0].components[0].custom_id, 'ai:ticket:2');
+  assert.equal(reply.components[0].components[0].label, 'Ticket öffnen');
+
+  const click = (userId) => ({ customId: 'ai:ticket:2', user: { id: userId }, replies: [], isButton: () => true, isChatInputCommand: () => false, reply: async function (p) { this.replies.push(p); } });
+  const other = click('5');
+  await ai.onInteraction(other);
+  assert.match(other.replies[0].content, /gehört zu <@2>/);
+  assert.equal(opened.length, 0);
+  await ai.onInteraction(click('2'));
+  assert.deepEqual(opened, [{ user: '2', summary: 'Meine Bestellung #12 ist nicht angekommen.' }]);
+});
+
+test('ticket handoff (customId): the bot\'s own button; the summary lands in the new ticket', async () => {
+  ai.configure({ ticket: { customId: 'ticket_create:support', match: (ch, uid) => String(ch.topic || '').startsWith(`ticket-owner:${uid}|`) } });
+  ticketFetch('Da hilft dir das Team.\n[TICKET: Rückerstattung für das Soundpack]');
+  const g = fakeGuild();
+  await ai.onMessage(fakeMessage(g, '100', 'ich will mein geld zurück'));
+  assert.equal(g.sent[0].components[0].components[0].custom_id, 'ticket_create:support');
+
+  const sent = [];
+  const channel = (topic) => ({ topic, send: async (p) => sent.push(p) });
+  await ai.onChannelCreate(channel('ticket-owner:5|type:support'));
+  await ai.onChannelCreate(channel('irgendwas'));
+  assert.equal(sent.length, 0);
+  await ai.onChannelCreate(channel('ticket-owner:2|type:support|created:1'));
+  assert.match(sent[0].content, /Zusammenfassung aus dem KI-Chat\*\* \(<@2>\):\n> Rückerstattung für das Soundpack/);
+  await ai.onChannelCreate(channel('ticket-owner:2|type:support|created:2'));
+  assert.equal(sent.length, 1); // only once
+});
+
+test('no ticket setup: no instruction, no button', async () => {
+  ticketFetch('Antwort\n[TICKET: x]');
+  const g = fakeGuild();
+  await ai.onMessage(fakeMessage(g, '100', 'frage'));
+  assert.doesNotMatch(calls[0].system, /TICKET/);
+  assert.equal(g.sent[0].components, undefined);
+});
+
 test('other commands are left alone', async () => {
   const i = { ...fakeCommand(fakeGuild(), 'an', OWNER), commandName: 'setup' };
   await ai.onInteraction(i);

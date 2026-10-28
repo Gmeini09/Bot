@@ -5,7 +5,7 @@ const path = require('path');
 const { Client, GatewayIntentBits, Partials, Events, AuditLogEvent } = require('discord.js');
 const { Store } = require('./store');
 const { COMMANDS } = require('./commands');
-const { embed, fail, button, row, BTN } = require('./ui');
+const { embed, fail, button, row, BTN, modal } = require('./ui');
 const setup = require('./setup');
 const verify = require('./verify');
 const tickets = require('./tickets');
@@ -53,6 +53,12 @@ aiChat.attach(client, {
       c.verifyChannelId ? `Neue Mitglieder verifizieren sich in <#${c.verifyChannelId}>.` : '',
       `Regeln:\n${c.rulesText}`,
     ].filter(Boolean).join('\n\n');
+  },
+  // "Ticket öffnen" under an answer: the normal support-ticket form, already filled with the KI's summary
+  ticket: {
+    open: (i, summary) => i.showModal(modal('ticket:create:support', 'Support-Ticket', [
+      { id: 'topic', label: 'Worum geht es?', style: 'long', max: 1000, value: summary, placeholder: 'Beschreib dein Anliegen kurz' },
+    ])),
   },
 });
 
