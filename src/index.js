@@ -22,6 +22,7 @@ const backup = require('./backup');
 const audit = require('./audit');
 const invites = require('./invites');
 const aiChat = require('./ai-chat');
+const { money } = require('./logic');
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const DATA_DIR = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '..', 'data');
@@ -37,7 +38,23 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel],
   allowedMentions: { parse: [] },
 });
-aiChat.attach(client); // KI-Chat in AI_CHANNEL_IDS and /ki
+// KI-Chat in AI_CHANNEL_IDS and /ki – knows the shop, how to order and the rules (read fresh for every answer)
+aiChat.attach(client, {
+  persona: 'Du bist der KI-Assistent des Discord-Servers „{server}“ – ein freundlicher Hofberater des Kaiserreichs mit etwas Witz.',
+  knowledge: (guild) => {
+    const g = store.guild(guild.id), c = g.config;
+    const products = Object.values(g.products).filter((p) => p.enabled !== false)
+      .map((p) => `- ${p.name}: ${money(p.price, c.currency)}${p.stock == null ? '' : p.stock <= 0 ? ' (ausverkauft)' : ` (noch ${p.stock})`}${p.description ? ` – ${p.description}` : ''}`);
+    return [
+      `Shop${c.shopChannelId ? ` in <#${c.shopChannelId}>` : ''}: ${products.length ? `\n${products.join('\n')}` : 'gerade keine Produkte.'}`,
+      'Bestellen: im Shop Produkt wählen → Warenkorb → Bestellen (Rabattcode dort eingeben). Danach öffnet sich ein privates Bestell-Ticket.',
+      `Zahlung: ${c.paymentInfo}`,
+      c.supportChannelId ? `Support und Fragen ans Team: Ticket in <#${c.supportChannelId}>.` : '',
+      c.verifyChannelId ? `Neue Mitglieder verifizieren sich in <#${c.verifyChannelId}>.` : '',
+      `Regeln:\n${c.rulesText}`,
+    ].filter(Boolean).join('\n\n');
+  },
+});
 
 /** Sends an embed to the mod log channel. */
 async function log(guild, { title, description, color, ping }) {

@@ -235,6 +235,44 @@ test('/ki stats: answers and tokens today and this month, top users', async () =
   assert.deepEqual(ai.usageSum('g1', ai.dayKey()).users, { 2: 1 });
 });
 
+test('persona and live knowledge go into the system prompt; AI_SYSTEM_PROMPT replaces the persona', () => {
+  let price = '9,99 €';
+  ai.configure({ persona: 'Du bist der Hofberater von „{server}“.', knowledge: () => `- Krone: ${price}` });
+  let p = ai.systemPrompt({ id: 'g1', name: 'XVY' });
+  assert.match(p, /^Du bist der Hofberater von „XVY“\. Antworte auf Deutsch/);
+  assert.match(p, /Aktuelle Infos über den Server.*\n- Krone: 9,99 €$/s);
+  price = '5 €';
+  assert.match(ai.systemPrompt({ id: 'g1', name: 'XVY' }), /Krone: 5 €/); // read fresh every time
+  ai.configure({ knowledge: () => { throw new Error('kaputt'); } });
+  assert.doesNotMatch(ai.systemPrompt({ id: 'g1', name: 'XVY' }), /Aktuelle Infos/); // a broken source never blocks the answer
+  process.env.AI_SYSTEM_PROMPT = 'Eigener Text für {server}.';
+  assert.equal(ai.systemPrompt({ id: 'g1', name: 'XVY' }), 'Eigener Text für XVY.');
+});
+
+test('images of the message are sent to the KI; an image alone is enough', async () => {
+  const fetches = [];
+  global.fetch = async (url, init) => {
+    if (url !== 'https://api.anthropic.com/v1/messages') {
+      fetches.push(url);
+      return { ok: true, arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer };
+    }
+    calls.push(JSON.parse(init.body));
+    return { ok: true, json: async () => ({ content: [{ type: 'text', text: 'Ein Fehler im Screenshot.' }] }) };
+  };
+  const g = fakeGuild();
+  const m = fakeMessage(g, '100', '');
+  m.attachments = new Map([
+    ['a', { url: 'https://cdn.discordapp.com/x.png', contentType: 'image/png', size: 3 }],
+    ['b', { url: 'https://cdn.discordapp.com/y.zip', contentType: 'application/zip', size: 3 }],
+    ['c', { url: 'https://cdn.discordapp.com/big.jpg', contentType: 'image/jpeg', size: 9 * 1024 * 1024 }],
+  ]);
+  await ai.onMessage(m);
+  assert.deepEqual(fetches, ['https://cdn.discordapp.com/x.png']);
+  const last = calls[0].messages[calls[0].messages.length - 1];
+  assert.deepEqual(last.content[0], { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AQID' } });
+  assert.deepEqual(last.content[1], { type: 'text', text: 'u3: Vorher\nmax: [Anhang]' });
+});
+
 test('other commands are left alone', async () => {
   const i = { ...fakeCommand(fakeGuild(), 'an', OWNER), commandName: 'setup' };
   await ai.onInteraction(i);

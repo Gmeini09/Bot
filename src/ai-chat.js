@@ -100,10 +100,41 @@ const pauseLeft = (guildId) => Math.max(0, (paused.get(guildId)?.until || 0) - D
 const isOwner = (member, guild) => member?.id === guild.ownerId
   || new Set([...ids(process.env.AI_OWNER_IDS), ...ids(process.env.MASTER_USER_IDS)]).has(member?.id);
 
+// Set by the bot through attach()/install(): persona = who the KI is ({server} = server name),
+// knowledge(guild) = current facts (shop, prices, how to order) – read fresh for every answer.
+const opts = { persona: null, knowledge: null };
+
 function systemPrompt(guild) {
-  if (process.env.AI_SYSTEM_PROMPT) return process.env.AI_SYSTEM_PROMPT.replace(/\{server\}/g, guild.name);
-  return `Du bist der KI-Assistent auf dem Discord-Server „${guild.name}“. Antworte auf Deutsch (außer jemand schreibt in einer anderen Sprache), freundlich und eher kurz. `
-    + 'Nachrichten von Nutzern beginnen mit „Name: “ – sprich die Leute mit genau diesem Namen an. Du kannst Discord-Markdown verwenden. Erfinde keine Server-Regeln, Preise oder Fakten über den Server.';
+  let prompt = process.env.AI_SYSTEM_PROMPT
+    || `${opts.persona || 'Du bist der KI-Assistent auf dem Discord-Server „{server}“.'} Antworte auf Deutsch (außer jemand schreibt in einer anderen Sprache), freundlich und eher kurz. `
+      + 'Nachrichten von Nutzern beginnen mit „Name: “ – sprich die Leute mit genau diesem Namen an. Du kannst Discord-Markdown verwenden. '
+      + 'Erfinde keine Server-Regeln, Preise oder Fakten über den Server – was du nicht weißt, sagst du ehrlich und verweist auf ein Ticket.';
+  prompt = prompt.replace(/\{server\}/g, guild.name);
+  let knowledge = '';
+  try { knowledge = String(opts.knowledge?.(guild) || '').trim(); } catch (e) { console.error('❌ KI-Chat Wissen:', e.message); }
+  if (knowledge) prompt += `\n\nAktuelle Infos über den Server (verlässlich – nutze für Produkte, Preise und Abläufe nur diese):\n${knowledge.slice(0, 6000)}`;
+  return prompt;
+}
+
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGES = 3;
+const imageAttachments = (m) => [...(m.attachments?.values?.() || [])]
+  .filter((a) => IMAGE_TYPES.has(String(a.contentType || '').split(';')[0]) && (a.size || 0) <= MAX_IMAGE_BYTES).slice(0, MAX_IMAGES);
+
+/** Images of the message as API blocks (downloaded here, so the API never needs Discord's CDN). */
+async function imageBlocks(message) {
+  const out = [];
+  for (const a of imageAttachments(message)) {
+    try {
+      const res = await fetch(a.url, { signal: AbortSignal.timeout(15_000) });
+      if (!res.ok) continue;
+      const data = Buffer.from(await res.arrayBuffer());
+      if (data.length > MAX_IMAGE_BYTES) continue;
+      out.push({ type: 'image', source: { type: 'base64', media_type: String(a.contentType).split(';')[0], data: data.toString('base64') } });
+    } catch { /* image not readable – answer without it */ }
+  }
+  return out;
 }
 
 /** Discord messages (oldest first) → API messages: alternating roles, starting with "user".
@@ -190,9 +221,9 @@ async function onMessage(message) {
     if (!message.guild || message.author?.bot || message.webhookId || !configured()) return;
     if (!channelIds().has(message.channelId)) return;
     const content = String(message.content || '').trim();
-    if (!content || !isOn(message.guild.id) || pauseLeft(message.guild.id)) return;
+    if ((!content && !imageAttachments(message).length) || !isOn(message.guild.id) || pauseLeft(message.guild.id)) return;
     if (!isOwner(message.member || message.author, message.guild)) {
-      const reason = spamReason(`${message.guild.id}:${message.author.id}`, content);
+      const reason = spamReason(`${message.guild.id}:${message.author.id}`, content || `[Bild ${message.id}]`);
       if (reason) return await punish(message, reason);
       const limit = dailyLimit(message.guild.id);
       if (limit && usedToday(message.guild.id, message.author.id) >= limit) {
@@ -216,7 +247,11 @@ async function onMessage(message) {
         const limit = Math.min(Math.max(Number(process.env.AI_HISTORY) || 12, 1), 50);
         const fetched = await message.channel.messages.fetch({ limit, before: message.id }).catch(() => null);
         const history = [...(fetched?.values() || [])].reverse().filter((m) => !m.author.bot || m.author.id === message.client.user.id);
-        const { text: answer, usage } = await ask(systemPrompt(message.guild), toApiMessages([...history, message], message.client.user.id, namesOf(message.guild.id)));
+        const messages = toApiMessages([...history, message], message.client.user.id, namesOf(message.guild.id));
+        const images = await imageBlocks(message);
+        const last = messages[messages.length - 1];
+        if (images.length && last?.role === 'user') last.content = [...images, { type: 'text', text: last.content }];
+        const { text: answer, usage } = await ask(systemPrompt(message.guild), messages);
         recordUsage(message.guild.id, message.author.id, usage);
         const parts = splitReply(answer || '🤔 Dazu fällt mir gerade nichts ein.');
         for (const [n, part] of parts.entries()) {
@@ -327,8 +362,15 @@ async function register(client) {
   } catch (e) { client.__aiChatRegistered = false; console.error('❌ /ki nicht registriert:', e?.message || e); }
 }
 
-/** Hooks the KI-Chat into a discord.js client (once). */
-function attach(client) {
+/** Who the KI is and what it knows about the server (see opts). */
+function configure({ persona, knowledge } = {}) {
+  if (persona !== undefined) opts.persona = persona;
+  if (knowledge !== undefined) opts.knowledge = knowledge;
+}
+
+/** Hooks the KI-Chat into a discord.js client (once). options: see configure(). */
+function attach(client, options) {
+  configure(options);
   if (client.__aiChat) return;
   client.__aiChat = true;
   client.on('messageCreate', onMessage);
@@ -342,7 +384,8 @@ function attach(client) {
 
 /** For bots that create their client elsewhere: attaches to every client that logs in,
  *  and keeps the bot's other command routers away from /ki. */
-function install() {
+function install(options) {
+  configure(options);
   const { Client } = require('discord.js');
   if (Client.prototype.__aiChatLogin) return;
   Client.prototype.__aiChatLogin = true;
@@ -360,4 +403,4 @@ function install() {
   };
 }
 
-module.exports = { attach, install, onMessage, onInteraction, toApiMessages, splitReply, spamReason, dayKey, recordUsage, usageSum, COMMAND, _reset: () => { state = null; recent.clear(); lastAsk.clear(); limitNoticed.clear(); for (const p of paused.values()) clearTimeout(p.timer); paused.clear(); } };
+module.exports = { attach, install, configure, systemPrompt, onMessage, onInteraction, toApiMessages, splitReply, spamReason, dayKey, recordUsage, usageSum, COMMAND, _reset: () => { state = null; opts.persona = null; opts.knowledge = null; recent.clear(); lastAsk.clear(); limitNoticed.clear(); for (const p of paused.values()) clearTimeout(p.timer); paused.clear(); } };
