@@ -652,7 +652,7 @@ try {
 
 // KI-Chat: answers every message in the AI_CHANNEL_IDS channels with Claude. Never crashes the bot.
 try {
-  require('./ai-chat.js').install();
+  require('./ai-chat.js').install({ persona: require('./ai-knowledge.js').PERSONA, knowledge: require('./ai-knowledge.js').knowledge });
 } catch (error) {
   logGuardError('ai-chat', error);
 }
