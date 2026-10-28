@@ -4,7 +4,9 @@
 // optional AI_MODEL, AI_SYSTEM_PROMPT, AI_HISTORY (messages of context, default 12),
 // AI_OWNER_IDS (user IDs allowed to use /ki besides the server owner and MASTER_USER_IDS).
 // /ki an|aus|status|name|limit|stats – owners only (name: what the KI calls someone; limit: answers per person and day,
-// default AI_DAILY_LIMIT or 30; stats: messages and tokens today/this month). Spammers get a timeout and the KI pauses for 5 minutes with an announcement.
+// default AI_DAILY_LIMIT or 30; stats: messages and tokens today/this month; wissen: facts the owner teaches the KI).
+// Spammers get a timeout and the KI pauses for 5 minutes with an announcement.
+// When the team is needed, the KI ends its answer with [TICKET: summary] → a "Ticket öffnen" button (see opts.ticket).
 // Self-contained: no extra package (uses fetch), off while key or channels are missing, never throws.
 const fs = require('fs');
 const path = require('path');
@@ -28,6 +30,9 @@ const busy = new Set(); // channelIds with a request in flight
 const recent = new Map(); // `${guildId}:${userId}` → [{ at, text }] for spam detection
 const paused = new Map(); // guildId → { until, reason, timer }
 const limitNoticed = new Set(); // `${day}:${guildId}:${userId}` – told once per day that the limit is reached
+const ticketSummaries = new Map(); // userId → { text, at } – the KI's summary for the ticket that user may open
+const MAX_FACTS = 50;
+const TICKET_TTL_MS = 60 * 60_000;
 
 // ── on/off per server, kept on the volume so it survives restarts
 const stateFile = () => path.join(process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(process.cwd(), 'data'), 'ai-chat.json');
@@ -37,6 +42,7 @@ function loadState() {
   try { state = JSON.parse(fs.readFileSync(stateFile(), 'utf8')); } catch { state = {}; }
   state.disabled = state.disabled || {};
   state.names = state.names || {};
+  state.facts = state.facts || {};
   state.limits = state.limits || {};
   state.usage = state.usage || {};
   return state;
@@ -61,6 +67,24 @@ function setName(guildId, userId, name) {
   if (name) names[userId] = name; else delete names[userId];
   if (!Object.keys(names).length) delete state.names[guildId];
   saveState();
+}
+// ── facts the owner teaches with /ki wissen: facts[guildId] = [{ text, by, at }]
+const factsOf = (guildId) => loadState().facts[guildId] || [];
+function addFact(guildId, text, by) {
+  loadState();
+  const list = state.facts[guildId] = state.facts[guildId] || [];
+  if (list.length >= MAX_FACTS) return false;
+  list.push({ text, by, at: Date.now() });
+  saveState();
+  return true;
+}
+function removeFact(guildId, n) {
+  const list = factsOf(guildId);
+  if (n < 1 || n > list.length) return null;
+  const [gone] = list.splice(n - 1, 1);
+  if (!list.length) delete state.facts[guildId];
+  saveState();
+  return gone;
 }
 // ── daily limit and usage: usage[guildId][YYYY-MM-DD] = { msgs, in, out, users: { userId: answers } }
 const dayKey = (now = Date.now()) => new Intl.DateTimeFormat('sv-SE', { timeZone: TZ }).format(new Date(now));
@@ -101,8 +125,12 @@ const isOwner = (member, guild) => member?.id === guild.ownerId
   || new Set([...ids(process.env.AI_OWNER_IDS), ...ids(process.env.MASTER_USER_IDS)]).has(member?.id);
 
 // Set by the bot through attach()/install(): persona = who the KI is ({server} = server name),
-// knowledge(guild) = current facts (shop, prices, how to order) – read fresh for every answer.
-const opts = { persona: null, knowledge: null };
+// knowledge(guild) = current facts (shop, prices, how to order) – read fresh for every answer,
+// ticket = how the "Ticket öffnen" button opens the bot's own ticket:
+//   { open(interaction, summary) } – the KI's button calls it, or
+//   { customId, match(channel, userId) } – the button is the bot's own ticket button; the summary is posted
+//   into the next channel match() recognises as that user's new ticket.
+const opts = { persona: null, knowledge: null, ticket: null };
 
 function systemPrompt(guild) {
   let prompt = process.env.AI_SYSTEM_PROMPT
@@ -112,7 +140,14 @@ function systemPrompt(guild) {
   prompt = prompt.replace(/\{server\}/g, guild.name);
   let knowledge = '';
   try { knowledge = String(opts.knowledge?.(guild) || '').trim(); } catch (e) { console.error('❌ KI-Chat Wissen:', e.message); }
+  const facts = factsOf(guild.id).map((f) => `- ${f.text}`).join('\n');
+  if (facts) prompt += `\n\nVom Owner festgelegt (immer richtig, geht allem anderen vor):\n${facts}`;
   if (knowledge) prompt += `\n\nAktuelle Infos über den Server (verlässlich – nutze für Produkte, Preise und Abläufe nur diese):\n${knowledge.slice(0, 6000)}`;
+  if (opts.ticket) {
+    prompt += '\n\nWenn das Team gebraucht wird – Reklamation, Problem mit Zahlung, Bestellung oder Lieferung, etwas Persönliches zu einem Konto, '
+      + 'oder du kannst die Frage nicht sicher beantworten –, sag kurz, dass das Team hilft, und beende deine Antwort mit einer eigenen Zeile '
+      + '„[TICKET: Zusammenfassung des Anliegens in 1–3 Sätzen, aus Sicht der Person]“. Dann erscheint ein Button zum Ticket. Sonst nie.';
+  }
   return prompt;
 }
 
@@ -204,6 +239,46 @@ async function punish(message, reason) {
   }).catch(() => {});
 }
 
+/** Splits "[TICKET: summary]" off the end of the KI's answer; summary is null when there is none. */
+function ticketMarker(answer) {
+  const text = String(answer || '');
+  const m = text.match(/\s*\[TICKET(?::\s*([^\]]*))?\]\s*$/i);
+  if (!m) return { text, summary: null };
+  return { text: text.slice(0, m.index).trim(), summary: (m[1] || '').trim() };
+}
+
+/** The "Ticket öffnen" button under an answer; remembers the summary for the asker. */
+function ticketButton(message, summary) {
+  ticketSummaries.set(message.author.id, { text: summary.slice(0, 1000), at: Date.now() });
+  const customId = opts.ticket.open ? `ai:ticket:${message.author.id}` : opts.ticket.customId;
+  return { type: 1, components: [{ type: 2, style: 1, label: 'Ticket öffnen', emoji: { name: '🎫' }, custom_id: customId }] };
+}
+
+function takeSummary(userId) {
+  const s = ticketSummaries.get(userId);
+  ticketSummaries.delete(userId);
+  return s && Date.now() - s.at < TICKET_TTL_MS ? s.text : '';
+}
+
+async function onTicketButton(i) {
+  const askerId = i.customId.split(':')[2];
+  if (i.user.id !== askerId) return i.reply({ content: `🎫 Dieser Button gehört zu <@${askerId}>. Für dein eigenes Anliegen öffne ein Ticket über das Ticket-Panel.`, flags: EPHEMERAL, allowedMentions: { parse: [] } });
+  return opts.ticket.open(i, takeSummary(askerId));
+}
+
+/** customId mode: the bot's own button made a ticket channel – post the KI's summary there. */
+async function onChannelCreate(channel) {
+  if (!opts.ticket?.match || !ticketSummaries.size) return;
+  for (const userId of ticketSummaries.keys()) {
+    let mine = false;
+    try { mine = opts.ticket.match(channel, userId); } catch { /* not a ticket */ }
+    if (!mine) continue;
+    const text = takeSummary(userId);
+    if (text) await channel.send({ content: `📝 **Zusammenfassung aus dem KI-Chat** (<@${userId}>):\n> ${text.replace(/\n/g, '\n> ')}`, allowedMentions: { parse: [] } }).catch(() => {});
+    return;
+  }
+}
+
 async function ask(system, messages) { // → { text, usage }
   const res = await fetch(API_URL, {
     method: 'POST',
@@ -253,9 +328,12 @@ async function onMessage(message) {
         if (images.length && last?.role === 'user') last.content = [...images, { type: 'text', text: last.content }];
         const { text: answer, usage } = await ask(systemPrompt(message.guild), messages);
         recordUsage(message.guild.id, message.author.id, usage);
-        const parts = splitReply(answer || '🤔 Dazu fällt mir gerade nichts ein.');
+        const { text, summary } = ticketMarker(answer);
+        const parts = splitReply(text || '🤔 Dazu fällt mir gerade nichts ein.');
+        const ticketRow = summary !== null && opts.ticket ? ticketButton(message, summary || content) : null;
         for (const [n, part] of parts.entries()) {
           const payload = { content: part, allowedMentions: { parse: [], repliedUser: n === 0 } };
+          if (ticketRow && n === parts.length - 1) payload.components = [ticketRow];
           await (n === 0 ? message.reply(payload) : message.channel.send(payload));
         }
       } finally { clearInterval(typing); }
@@ -281,9 +359,19 @@ const COMMAND = {
       { type: 4, name: 'anzahl', description: 'z. B. 30', required: true, min_value: 0, max_value: 1000 },
     ] },
     { type: 1, name: 'stats', description: 'Nachrichten und Tokens heute und diesen Monat' },
+    { type: 2, name: 'wissen', description: 'Dinge, die die KI über den Server wissen soll', options: [
+      { type: 1, name: 'neu', description: 'Der KI etwas beibringen', options: [
+        { type: 3, name: 'text', description: 'z. B. Events sind jeden Freitag um 20 Uhr', required: true, max_length: 500 },
+      ] },
+      { type: 1, name: 'liste', description: 'Alles, was du der KI beigebracht hast' },
+      { type: 1, name: 'loeschen', description: 'Einen Eintrag löschen', options: [
+        { type: 4, name: 'nummer', description: 'Nummer aus /ki wissen liste', required: true, min_value: 1, max_value: MAX_FACTS },
+      ] },
+    ] },
   ],
 };
-const isOurs = (i) => Boolean(i?.isChatInputCommand?.() && i.commandName === COMMAND.name);
+const isTicketButton = (i) => Boolean(i?.isButton?.() && String(i.customId || '').startsWith('ai:ticket:'));
+const isOurs = (i) => Boolean((i?.isChatInputCommand?.() && i.commandName === COMMAND.name) || isTicketButton(i));
 
 function guildChannels(guild) {
   return [...channelIds()].map((id) => guild.channels.cache.get(id)).filter(Boolean);
@@ -294,6 +382,19 @@ async function onCommand(i) {
   if (!isOwner(i.member || i.user, i.guild)) return i.reply({ content: '⛔ Nur der Owner darf die KI steuern.', flags: EPHEMERAL });
   const sub = i.options.getSubcommand();
   const g = i.guild;
+  if (i.options.getSubcommandGroup?.(false) === 'wissen') {
+    if (sub === 'neu') {
+      const text = String(i.options.getString('text', true)).replace(/\s+/g, ' ').trim().slice(0, 500);
+      if (!addFact(g.id, text, i.user.id)) return i.reply({ content: `❌ Höchstens ${MAX_FACTS} Einträge – lösch erst einen mit \`/ki wissen loeschen\`.`, flags: EPHEMERAL });
+      return i.reply({ content: `🧠 Gemerkt (#${factsOf(g.id).length}): ${text}`, flags: EPHEMERAL, allowedMentions: { parse: [] } });
+    }
+    if (sub === 'loeschen') {
+      const gone = removeFact(g.id, i.options.getInteger('nummer', true));
+      return i.reply({ content: gone ? `🗑️ Gelöscht: ${gone.text}` : '❌ Diese Nummer gibt es nicht – siehe `/ki wissen liste`.', flags: EPHEMERAL, allowedMentions: { parse: [] } });
+    }
+    const list = factsOf(g.id).map((f, n) => `**${n + 1}.** ${f.text}`);
+    return i.reply({ content: list.length ? `🧠 **Das weiß die KI (${list.length}/${MAX_FACTS}):**\n${list.join('\n')}`.slice(0, 2000) : '🧠 Noch nichts – bring der KI etwas bei mit `/ki wissen neu`.', flags: EPHEMERAL, allowedMentions: { parse: [] } });
+  }
   if (sub === 'status') {
     const left = pauseLeft(g.id);
     const lines = [
@@ -302,6 +403,7 @@ async function onCommand(i) {
       `**Modell:** ${process.env.AI_MODEL || 'claude-sonnet-5-5'}`,
       `**Tageslimit:** ${dailyLimit(g.id) ? `${dailyLimit(g.id)} Antworten pro Person` : 'unbegrenzt'} (Owner ausgenommen)`,
       `**Namen:** ${Object.entries(namesOf(g.id)).slice(0, 25).map(([id, n]) => `<@${id}> → ${n}`).join(', ') || '–'}`,
+      `**Wissen:** ${factsOf(g.id).length} Einträge (\`/ki wissen liste\`) · **Ticket-Button:** ${opts.ticket ? 'an' : 'aus'}`,
     ];
     return i.reply({ content: lines.join('\n'), flags: EPHEMERAL });
   }
@@ -345,7 +447,7 @@ async function onCommand(i) {
 
 async function onInteraction(i) {
   if (!isOurs(i)) return;
-  try { await onCommand(i); } catch (e) {
+  try { await (isTicketButton(i) ? onTicketButton(i) : onCommand(i)); } catch (e) {
     console.error('❌ /ki:', e);
     const p = { content: `❌ Fehler: ${String(e?.message || e).slice(0, 300)}`, flags: EPHEMERAL };
     await (i.deferred || i.replied ? i.followUp(p) : i.reply(p)).catch(() => {});
@@ -363,9 +465,10 @@ async function register(client) {
 }
 
 /** Who the KI is and what it knows about the server (see opts). */
-function configure({ persona, knowledge } = {}) {
+function configure({ persona, knowledge, ticket } = {}) {
   if (persona !== undefined) opts.persona = persona;
   if (knowledge !== undefined) opts.knowledge = knowledge;
+  if (ticket !== undefined) opts.ticket = ticket;
 }
 
 /** Hooks the KI-Chat into a discord.js client (once). options: see configure(). */
@@ -374,6 +477,7 @@ function attach(client, options) {
   if (client.__aiChat) return;
   client.__aiChat = true;
   client.on('messageCreate', onMessage);
+  client.on('channelCreate', (ch) => { onChannelCreate(ch).catch(() => {}); });
   require('events').EventEmitter.prototype.prependListener.call(client, 'interactionCreate', onInteraction);
   client.once(require('discord.js').Events.ClientReady, () => { void register(client); });
   if (client.isReady?.()) void register(client);
@@ -403,4 +507,4 @@ function install(options) {
   };
 }
 
-module.exports = { attach, install, configure, systemPrompt, onMessage, onInteraction, toApiMessages, splitReply, spamReason, dayKey, recordUsage, usageSum, COMMAND, _reset: () => { state = null; opts.persona = null; opts.knowledge = null; recent.clear(); lastAsk.clear(); limitNoticed.clear(); for (const p of paused.values()) clearTimeout(p.timer); paused.clear(); } };
+module.exports = { attach, install, configure, systemPrompt, onMessage, onInteraction, onChannelCreate, ticketMarker, toApiMessages, splitReply, spamReason, dayKey, recordUsage, usageSum, COMMAND, _reset: () => { state = null; opts.persona = null; opts.knowledge = null; opts.ticket = null; recent.clear(); lastAsk.clear(); limitNoticed.clear(); ticketSummaries.clear(); for (const p of paused.values()) clearTimeout(p.timer); paused.clear(); } };

@@ -46,4 +46,8 @@ function knowledge(guild) {
   ].join('\n\n');
 }
 
-module.exports = { PERSONA, knowledge };
+// "Ticket öffnen" under an answer = the bot's own support-ticket button (index.js, ticket_create:*);
+// the KI's summary is then posted into the new ticket, recognised by its topic.
+const TICKET = { customId: 'ticket_create:support', match: (channel, userId) => String(channel.topic || '').startsWith(`ticket-owner:${userId}|`) };
+
+module.exports = { PERSONA, knowledge, TICKET };
