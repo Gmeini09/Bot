@@ -191,6 +191,50 @@ test('/ki name: the KI calls someone by the set name, kept on disk, removable', 
   assert.match(calls[1].messages[0].content, /max: Hallo nochmal$/);
 });
 
+test('daily limit: told once, then silent; the owner has no limit; /ki limit changes it', async () => {
+  const g = fakeGuild();
+  const limit = fakeCommand(g, 'limit', OWNER);
+  limit.options.getInteger = () => 2;
+  await ai.onInteraction(limit);
+  assert.match(limit.replies[0].content, /2 KI-Antworten/);
+
+  ai.recordUsage('g1', '2', { input_tokens: 10, output_tokens: 5 });
+  ai.recordUsage('g1', '2', { input_tokens: 10, output_tokens: 5 });
+  await ai.onMessage(fakeMessage(g, '100', 'noch eine Frage'));
+  assert.equal(calls.length, 0);
+  assert.match(g.sent[0].content, /Tageslimit von \*\*2 KI-Antworten\*\* erreicht/);
+  await ai.onMessage(fakeMessage(g, '100', 'und noch eine'));
+  assert.equal(g.sent.length, 1); // no second notice
+
+  await ai.onMessage(fakeMessage(g, '100', 'ich darf', OWNER));
+  assert.equal(calls.length, 1);
+
+  const off = fakeCommand(g, 'limit', OWNER);
+  off.options.getInteger = () => 0;
+  await ai.onInteraction(off);
+  await ai.onMessage(fakeMessage(g, '100', 'jetzt wieder', '2'));
+  assert.equal(calls.length, 2);
+});
+
+test('/ki stats: answers and tokens today and this month, top users', async () => {
+  global.fetch = async (url, init) => {
+    calls.push(JSON.parse(init.body));
+    return { ok: true, json: async () => ({ content: [{ type: 'text', text: 'Antwort' }], usage: { input_tokens: 1200, output_tokens: 300 } }) };
+  };
+  const g = fakeGuild();
+  await ai.onMessage(fakeMessage(g, '100', 'Hallo'));
+  const day = Date.now() - 86_400_000 * 3;
+  if (ai.dayKey(day).slice(0, 7) === ai.dayKey().slice(0, 7)) ai.recordUsage('g1', '5', { input_tokens: 100, output_tokens: 50 }, day);
+
+  const stats = fakeCommand(g, 'stats', OWNER);
+  await ai.onInteraction(stats);
+  const text = stats.replies[0].content;
+  assert.match(text, /\*\*Heute:\*\* 1 Antworten · 1\.200 Tokens rein · 300 Tokens raus · 1 Personen\n1\. <@2> – 1/);
+  assert.match(text, /\*\*Dieser Monat:\*\*/);
+  assert.match(text, /Tageslimit:\*\* 30/);
+  assert.deepEqual(ai.usageSum('g1', ai.dayKey()).users, { 2: 1 });
+});
+
 test('other commands are left alone', async () => {
   const i = { ...fakeCommand(fakeGuild(), 'an', OWNER), commandName: 'setup' };
   await ai.onInteraction(i);
