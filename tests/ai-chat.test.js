@@ -160,6 +160,37 @@ test('/ki: only the owner (or AI_OWNER_IDS) may switch it; off is remembered and
   assert.equal(calls.length, 1);
 });
 
+test('/ki name: the KI calls someone by the set name, kept on disk, removable', async () => {
+  const g = fakeGuild();
+  const cmd = (userId, name) => {
+    const i = fakeCommand(g, 'name', OWNER);
+    i.options.getUser = () => ({ id: userId });
+    i.options.getString = () => name;
+    return i;
+  };
+  const denied = cmd('2', 'Boss');
+  denied.user = denied.member = { id: '2' };
+  await ai.onInteraction(denied);
+  assert.match(denied.replies[0].content, /Nur der Owner/);
+
+  const set = cmd('2', 'Der\nKaiser: ');
+  await ai.onInteraction(set);
+  assert.match(set.replies[0].content, /nennt <@2> ab jetzt \*\*Der Kaiser\*\*/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(process.env.DATA_DIR, 'ai-chat.json'), 'utf8')).names, { g1: { 2: 'Der Kaiser' } });
+
+  await ai.onMessage(fakeMessage(g, '100', 'Hallo'));
+  assert.equal(calls[0].messages[0].content, 'u3: Vorher\nDer Kaiser: Hallo');
+
+  const status = fakeCommand(g, 'status', OWNER);
+  await ai.onInteraction(status);
+  assert.match(status.replies[0].content, /<@2> → Der Kaiser/);
+
+  await ai.onInteraction(cmd('2', null));
+  await new Promise((r) => setTimeout(r, 3100)); // cooldown
+  await ai.onMessage(fakeMessage(g, '100', 'Hallo nochmal'));
+  assert.match(calls[1].messages[0].content, /max: Hallo nochmal$/);
+});
+
 test('other commands are left alone', async () => {
   const i = { ...fakeCommand(fakeGuild(), 'an', OWNER), commandName: 'setup' };
   await ai.onInteraction(i);
