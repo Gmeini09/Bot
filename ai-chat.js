@@ -3,7 +3,7 @@
 // Variables (Railway): ANTHROPIC_API_KEY, AI_CHANNEL_IDS (comma-separated channel IDs),
 // optional AI_MODEL, AI_SYSTEM_PROMPT, AI_HISTORY (messages of context, default 12),
 // AI_OWNER_IDS (user IDs allowed to use /ki besides the server owner and MASTER_USER_IDS).
-// /ki an|aus|status – owners only. Spammers get a timeout and the KI pauses for 5 minutes with an announcement.
+// /ki an|aus|status|name – owners only (name: what the KI calls someone). Spammers get a timeout and the KI pauses for 5 minutes with an announcement.
 // Self-contained: no extra package (uses fetch), off while key or channels are missing, never throws.
 const fs = require('fs');
 const path = require('path');
@@ -32,6 +32,7 @@ function loadState() {
   if (state) return state;
   try { state = JSON.parse(fs.readFileSync(stateFile(), 'utf8')); } catch { state = {}; }
   state.disabled = state.disabled || {};
+  state.names = state.names || {};
   return state;
 }
 function saveState() {
@@ -47,6 +48,14 @@ function setOn(guildId, on) {
   if (on) delete state.disabled[guildId]; else state.disabled[guildId] = true;
   saveState();
 }
+const namesOf = (guildId) => loadState().names[guildId] || {};
+function setName(guildId, userId, name) {
+  loadState();
+  const names = state.names[guildId] = state.names[guildId] || {};
+  if (name) names[userId] = name; else delete names[userId];
+  if (!Object.keys(names).length) delete state.names[guildId];
+  saveState();
+}
 const pauseLeft = (guildId) => Math.max(0, (paused.get(guildId)?.until || 0) - Date.now());
 
 const isOwner = (member, guild) => member?.id === guild.ownerId
@@ -55,11 +64,12 @@ const isOwner = (member, guild) => member?.id === guild.ownerId
 function systemPrompt(guild) {
   if (process.env.AI_SYSTEM_PROMPT) return process.env.AI_SYSTEM_PROMPT.replace(/\{server\}/g, guild.name);
   return `Du bist der KI-Assistent auf dem Discord-Server „${guild.name}“. Antworte auf Deutsch (außer jemand schreibt in einer anderen Sprache), freundlich und eher kurz. `
-    + 'Nachrichten von Nutzern beginnen mit „Name: “. Du kannst Discord-Markdown verwenden. Erfinde keine Server-Regeln, Preise oder Fakten über den Server.';
+    + 'Nachrichten von Nutzern beginnen mit „Name: “ – sprich die Leute mit genau diesem Namen an. Du kannst Discord-Markdown verwenden. Erfinde keine Server-Regeln, Preise oder Fakten über den Server.';
 }
 
-/** Discord messages (oldest first) → API messages: alternating roles, starting with "user". */
-function toApiMessages(msgs, botId) {
+/** Discord messages (oldest first) → API messages: alternating roles, starting with "user".
+ *  names: userId → name set with /ki name (wins over the server nickname). */
+function toApiMessages(msgs, botId, names = {}) {
   const out = [];
   for (const m of msgs) {
     let text = String(m.content || '').trim() || (m.attachments?.size ? '[Anhang]' : '');
@@ -67,7 +77,7 @@ function toApiMessages(msgs, botId) {
     if (text.length > MAX_INPUT) text = `${text.slice(0, MAX_INPUT)} […gekürzt]`;
     const role = m.author.id === botId ? 'assistant' : 'user';
     if (role === 'assistant' && !out.length) continue; // the API wants "user" first
-    const line = role === 'user' ? `${m.member?.displayName || m.author.globalName || m.author.username}: ${text}` : text;
+    const line = role === 'user' ? `${names[m.author.id] || m.member?.displayName || m.author.globalName || m.author.username}: ${text}` : text;
     const prev = out[out.length - 1];
     if (prev?.role === role) prev.content += `\n${line}`;
     else out.push({ role, content: line });
@@ -160,7 +170,7 @@ async function onMessage(message) {
         const limit = Math.min(Math.max(Number(process.env.AI_HISTORY) || 12, 1), 50);
         const fetched = await message.channel.messages.fetch({ limit, before: message.id }).catch(() => null);
         const history = [...(fetched?.values() || [])].reverse().filter((m) => !m.author.bot || m.author.id === message.client.user.id);
-        const answer = await ask(systemPrompt(message.guild), toApiMessages([...history, message], message.client.user.id));
+        const answer = await ask(systemPrompt(message.guild), toApiMessages([...history, message], message.client.user.id, namesOf(message.guild.id)));
         const parts = splitReply(answer || '🤔 Dazu fällt mir gerade nichts ein.');
         for (const [n, part] of parts.entries()) {
           const payload = { content: part, allowedMentions: { parse: [], repliedUser: n === 0 } };
@@ -180,7 +190,11 @@ const COMMAND = {
   options: [
     { type: 1, name: 'an', description: 'KI-Chat einschalten' },
     { type: 1, name: 'aus', description: 'KI-Chat ausschalten' },
-    { type: 1, name: 'status', description: 'Zeigt, ob die KI an ist' },
+    { type: 1, name: 'status', description: 'Zeigt, ob die KI an ist, und alle festgelegten Namen' },
+    { type: 1, name: 'name', description: 'Legt fest, wie die KI jemanden nennt', options: [
+      { type: 6, name: 'person', description: 'Wer', required: true },
+      { type: 3, name: 'name', description: 'So nennt die KI die Person (leer = wieder den Server-Namen)', max_length: 40 },
+    ] },
   ],
 };
 const isOurs = (i) => Boolean(i?.isChatInputCommand?.() && i.commandName === COMMAND.name);
@@ -200,8 +214,15 @@ async function onCommand(i) {
       `**Status:** ${!configured() ? '⚠️ nicht eingerichtet (ANTHROPIC_API_KEY / AI_CHANNEL_IDS fehlt)' : !isOn(g.id) ? '🔴 aus' : left ? `⏸️ pausiert – noch ${Math.ceil(left / 60_000)} Min. (${paused.get(g.id).reason})` : '🟢 an'}`,
       `**Kanäle:** ${guildChannels(g).map((c) => `<#${c.id}>`).join(', ') || '–'}`,
       `**Modell:** ${process.env.AI_MODEL || 'claude-sonnet-5-5'}`,
+      `**Namen:** ${Object.entries(namesOf(g.id)).slice(0, 25).map(([id, n]) => `<@${id}> → ${n}`).join(', ') || '–'}`,
     ];
     return i.reply({ content: lines.join('\n'), flags: EPHEMERAL });
+  }
+  if (sub === 'name') {
+    const person = i.options.getUser('person', true);
+    const name = String(i.options.getString('name') || '').replace(/[\r\n:]+/g, ' ').trim().slice(0, 40);
+    setName(g.id, person.id, name);
+    return i.reply({ content: name ? `✏️ Die KI nennt <@${person.id}> ab jetzt **${name}**.` : `✏️ Die KI nennt <@${person.id}> wieder beim Server-Namen.`, flags: EPHEMERAL, allowedMentions: { parse: [] } });
   }
   const on = sub === 'an';
   setOn(g.id, on);
