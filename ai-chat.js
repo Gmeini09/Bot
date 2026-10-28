@@ -3,7 +3,8 @@
 // Variables (Railway): ANTHROPIC_API_KEY, AI_CHANNEL_IDS (comma-separated channel IDs),
 // optional AI_MODEL, AI_SYSTEM_PROMPT, AI_HISTORY (messages of context, default 12),
 // AI_OWNER_IDS (user IDs allowed to use /ki besides the server owner and MASTER_USER_IDS).
-// /ki an|aus|status|name – owners only (name: what the KI calls someone). Spammers get a timeout and the KI pauses for 5 minutes with an announcement.
+// /ki an|aus|status|name|limit|stats – owners only (name: what the KI calls someone; limit: answers per person and day,
+// default AI_DAILY_LIMIT or 30; stats: messages and tokens today/this month). Spammers get a timeout and the KI pauses for 5 minutes with an announcement.
 // Self-contained: no extra package (uses fetch), off while key or channels are missing, never throws.
 const fs = require('fs');
 const path = require('path');
@@ -16,6 +17,8 @@ const PAUSE_MS = 5 * 60_000;
 const SPAM_TIMEOUT_MS = 10 * 60_000;
 const SPAM = { window: 60_000, maxMessages: 6, repeatWindow: 120_000, maxRepeats: 3, longChars: 1200, maxLong: 3 };
 const EPHEMERAL = 64;
+const KEEP_DAYS = 62; // usage history kept in ai-chat.json
+const TZ = 'Europe/Vienna';
 
 const ids = (v) => String(v || '').split(/[\s,;]+/).filter(Boolean);
 const channelIds = () => new Set(ids(process.env.AI_CHANNEL_IDS));
@@ -24,6 +27,7 @@ const lastAsk = new Map(); // userId → timestamp, keeps a single user from spa
 const busy = new Set(); // channelIds with a request in flight
 const recent = new Map(); // `${guildId}:${userId}` → [{ at, text }] for spam detection
 const paused = new Map(); // guildId → { until, reason, timer }
+const limitNoticed = new Set(); // `${day}:${guildId}:${userId}` – told once per day that the limit is reached
 
 // ── on/off per server, kept on the volume so it survives restarts
 const stateFile = () => path.join(process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(process.cwd(), 'data'), 'ai-chat.json');
@@ -33,6 +37,8 @@ function loadState() {
   try { state = JSON.parse(fs.readFileSync(stateFile(), 'utf8')); } catch { state = {}; }
   state.disabled = state.disabled || {};
   state.names = state.names || {};
+  state.limits = state.limits || {};
+  state.usage = state.usage || {};
   return state;
 }
 function saveState() {
@@ -56,6 +62,39 @@ function setName(guildId, userId, name) {
   if (!Object.keys(names).length) delete state.names[guildId];
   saveState();
 }
+// ── daily limit and usage: usage[guildId][YYYY-MM-DD] = { msgs, in, out, users: { userId: answers } }
+const dayKey = (now = Date.now()) => new Intl.DateTimeFormat('sv-SE', { timeZone: TZ }).format(new Date(now));
+function dailyLimit(guildId) {
+  const set = loadState().limits[guildId];
+  if (set !== undefined) return set;
+  const env = Number(process.env.AI_DAILY_LIMIT);
+  return Number.isFinite(env) && env >= 0 ? env : 30;
+}
+function setLimit(guildId, n) { loadState().limits[guildId] = n; saveState(); }
+const usedToday = (guildId, userId, now) => loadState().usage[guildId]?.[dayKey(now)]?.users?.[userId] || 0;
+function recordUsage(guildId, userId, usage, now = Date.now()) {
+  loadState();
+  const days = state.usage[guildId] = state.usage[guildId] || {};
+  const d = days[dayKey(now)] = days[dayKey(now)] || { msgs: 0, in: 0, out: 0, users: {} };
+  d.msgs += 1;
+  d.in += usage?.input_tokens || 0;
+  d.out += usage?.output_tokens || 0;
+  d.users[userId] = (d.users[userId] || 0) + 1;
+  const oldest = dayKey(now - KEEP_DAYS * 86_400_000);
+  for (const k of Object.keys(days)) if (k < oldest) delete days[k];
+  saveState();
+}
+/** Sum of all days whose key starts with prefix ("2026-10-28" = one day, "2026-10" = the month). */
+function usageSum(guildId, prefix) {
+  const sum = { msgs: 0, in: 0, out: 0, users: {} };
+  for (const [k, d] of Object.entries(loadState().usage[guildId] || {})) {
+    if (!k.startsWith(prefix)) continue;
+    sum.msgs += d.msgs; sum.in += d.in; sum.out += d.out;
+    for (const [u, n] of Object.entries(d.users)) sum.users[u] = (sum.users[u] || 0) + n;
+  }
+  return sum;
+}
+
 const pauseLeft = (guildId) => Math.max(0, (paused.get(guildId)?.until || 0) - Date.now());
 
 const isOwner = (member, guild) => member?.id === guild.ownerId
@@ -134,7 +173,7 @@ async function punish(message, reason) {
   }).catch(() => {});
 }
 
-async function ask(system, messages) {
+async function ask(system, messages) { // → { text, usage }
   const res = await fetch(API_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY.trim(), 'anthropic-version': '2023-06-01' },
@@ -143,7 +182,7 @@ async function ask(system, messages) {
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(`Claude API ${res.status}: ${body?.error?.message || res.statusText}`);
-  return (body.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+  return { text: (body.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim(), usage: body.usage };
 }
 
 async function onMessage(message) {
@@ -155,6 +194,13 @@ async function onMessage(message) {
     if (!isOwner(message.member || message.author, message.guild)) {
       const reason = spamReason(`${message.guild.id}:${message.author.id}`, content);
       if (reason) return await punish(message, reason);
+      const limit = dailyLimit(message.guild.id);
+      if (limit && usedToday(message.guild.id, message.author.id) >= limit) {
+        const key = `${dayKey()}:${message.guild.id}:${message.author.id}`;
+        if (limitNoticed.has(key)) return;
+        limitNoticed.add(key);
+        return await message.reply({ content: `📵 Du hast dein Tageslimit von **${limit} KI-Antworten** erreicht. Morgen geht's weiter!`, allowedMentions: { parse: [] } });
+      }
     }
     const now = Date.now();
     if (now - (lastAsk.get(message.author.id) || 0) < COOLDOWN_MS || busy.has(message.channelId)) {
@@ -170,7 +216,8 @@ async function onMessage(message) {
         const limit = Math.min(Math.max(Number(process.env.AI_HISTORY) || 12, 1), 50);
         const fetched = await message.channel.messages.fetch({ limit, before: message.id }).catch(() => null);
         const history = [...(fetched?.values() || [])].reverse().filter((m) => !m.author.bot || m.author.id === message.client.user.id);
-        const answer = await ask(systemPrompt(message.guild), toApiMessages([...history, message], message.client.user.id, namesOf(message.guild.id)));
+        const { text: answer, usage } = await ask(systemPrompt(message.guild), toApiMessages([...history, message], message.client.user.id, namesOf(message.guild.id)));
+        recordUsage(message.guild.id, message.author.id, usage);
         const parts = splitReply(answer || '🤔 Dazu fällt mir gerade nichts ein.');
         for (const [n, part] of parts.entries()) {
           const payload = { content: part, allowedMentions: { parse: [], repliedUser: n === 0 } };
@@ -195,6 +242,10 @@ const COMMAND = {
       { type: 6, name: 'person', description: 'Wer', required: true },
       { type: 3, name: 'name', description: 'So nennt die KI die Person (leer = wieder den Server-Namen)', max_length: 40 },
     ] },
+    { type: 1, name: 'limit', description: 'KI-Antworten pro Person und Tag (0 = unbegrenzt)', options: [
+      { type: 4, name: 'anzahl', description: 'z. B. 30', required: true, min_value: 0, max_value: 1000 },
+    ] },
+    { type: 1, name: 'stats', description: 'Nachrichten und Tokens heute und diesen Monat' },
   ],
 };
 const isOurs = (i) => Boolean(i?.isChatInputCommand?.() && i.commandName === COMMAND.name);
@@ -214,9 +265,33 @@ async function onCommand(i) {
       `**Status:** ${!configured() ? '⚠️ nicht eingerichtet (ANTHROPIC_API_KEY / AI_CHANNEL_IDS fehlt)' : !isOn(g.id) ? '🔴 aus' : left ? `⏸️ pausiert – noch ${Math.ceil(left / 60_000)} Min. (${paused.get(g.id).reason})` : '🟢 an'}`,
       `**Kanäle:** ${guildChannels(g).map((c) => `<#${c.id}>`).join(', ') || '–'}`,
       `**Modell:** ${process.env.AI_MODEL || 'claude-sonnet-5-5'}`,
+      `**Tageslimit:** ${dailyLimit(g.id) ? `${dailyLimit(g.id)} Antworten pro Person` : 'unbegrenzt'} (Owner ausgenommen)`,
       `**Namen:** ${Object.entries(namesOf(g.id)).slice(0, 25).map(([id, n]) => `<@${id}> → ${n}`).join(', ') || '–'}`,
     ];
     return i.reply({ content: lines.join('\n'), flags: EPHEMERAL });
+  }
+  if (sub === 'limit') {
+    const n = i.options.getInteger('anzahl', true);
+    setLimit(g.id, n);
+    return i.reply({ content: n ? `📵 Tageslimit: **${n} KI-Antworten** pro Person (du bist ausgenommen).` : '📵 Tageslimit aus – unbegrenzt.', flags: EPHEMERAL });
+  }
+  if (sub === 'stats') {
+    const fmt = (n) => n.toLocaleString('de-DE');
+    const block = (title, u) => {
+      const top = Object.entries(u.users).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id, n], k) => `${k + 1}. <@${id}> – ${n}`).join('\n') || '–';
+      return `**${title}:** ${fmt(u.msgs)} Antworten · ${fmt(u.in)} Tokens rein · ${fmt(u.out)} Tokens raus · ${Object.keys(u.users).length} Personen\n${top}`;
+    };
+    const today = dayKey();
+    const limit = dailyLimit(g.id);
+    const atLimit = limit ? Object.values(usageSum(g.id, today).users).filter((n) => n >= limit).length : 0;
+    const lines = [
+      '📊 **KI-Statistik**',
+      block('Heute', usageSum(g.id, today)),
+      block('Dieser Monat', usageSum(g.id, today.slice(0, 7))),
+      `**Tageslimit:** ${limit || 'unbegrenzt'}${limit ? ` · heute erreicht von ${atLimit} Person(en)` : ''}`,
+      '_Die genauen Kosten siehst du in der Claude Console unter Ausgaben._',
+    ];
+    return i.reply({ content: lines.join('\n\n').slice(0, 2000), flags: EPHEMERAL, allowedMentions: { parse: [] } });
   }
   if (sub === 'name') {
     const person = i.options.getUser('person', true);
@@ -285,4 +360,4 @@ function install() {
   };
 }
 
-module.exports = { attach, install, onMessage, onInteraction, toApiMessages, splitReply, spamReason, COMMAND, _reset: () => { state = null; recent.clear(); lastAsk.clear(); for (const p of paused.values()) clearTimeout(p.timer); paused.clear(); } };
+module.exports = { attach, install, onMessage, onInteraction, toApiMessages, splitReply, spamReason, dayKey, recordUsage, usageSum, COMMAND, _reset: () => { state = null; recent.clear(); lastAsk.clear(); limitNoticed.clear(); for (const p of paused.values()) clearTimeout(p.timer); paused.clear(); } };
