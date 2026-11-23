@@ -11,6 +11,7 @@ const {
   EmbedBuilder,
   Events,
   FileUploadBuilder,
+  GuildChannelManager,
   LabelBuilder,
   ModalBuilder,
   PermissionFlagsBits,
@@ -109,7 +110,7 @@ function isSellingInteraction(interaction) {
       if (interaction.commandName === 'sell' || interaction.commandName === 'paypal') return true;
       return interaction.commandName === 'setup'
         && interaction.options.getSubcommandGroup(false) === 'server'
-        && interaction.options.getSubcommand(false) === 'selling';
+        && ['selling', 'bot-channels-loeschen'].includes(interaction.options.getSubcommand(false));
     }
     if (interaction.isButton?.() || interaction.isModalSubmit?.()) {
       return String(interaction.customId || '').startsWith('selling_');
@@ -249,6 +250,43 @@ let sellingStoreCache = null;
 const sellingStorageDir = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || __dirname;
 if (!fs.existsSync(sellingStorageDir)) fs.mkdirSync(sellingStorageDir, { recursive: true });
 const sellingDataPath = path.join(sellingStorageDir, 'selling-data.json');
+
+// ---- Channels, die der Bot selbst erstellt -------------------------------
+// Jeder guild.channels.create() des Bots (alle Module) wird pro Server gemerkt,
+// damit /setup server bot-channels-loeschen genau diese wieder entfernen kann.
+const botCreatedChannelsPath = path.join(sellingStorageDir, 'bot-created-channels.json');
+function readBotCreatedChannels() {
+  try { return JSON.parse(fs.readFileSync(botCreatedChannelsPath, 'utf8')) || {}; } catch (_) { return {}; }
+}
+function writeBotCreatedChannels(map) {
+  try { fs.writeFileSync(botCreatedChannelsPath, JSON.stringify(map)); } catch (error) { console.error('❌ Bot-Channel-Liste konnte nicht gespeichert werden:', error.message); }
+}
+function rememberBotChannel(guildId, channelId) {
+  if (!guildId || !channelId) return;
+  const map = readBotCreatedChannels();
+  const list = new Set(map[guildId] || []);
+  list.add(channelId);
+  map[guildId] = [...list];
+  writeBotCreatedChannels(map);
+}
+function forgetBotChannels(guildId, ids) {
+  const map = readBotCreatedChannels();
+  const gone = new Set(ids);
+  map[guildId] = (map[guildId] || []).filter(id => !gone.has(id));
+  writeBotCreatedChannels(map);
+}
+const originalChannelCreate = GuildChannelManager.prototype.create;
+GuildChannelManager.prototype.create = async function trackedChannelCreate(...args) {
+  const channel = await originalChannelCreate.apply(this, args);
+  try { rememberBotChannel(this.guild?.id, channel?.id); } catch (_) {}
+  return channel;
+};
+
+// Der Selling-Server wird nur gebaut/repariert, wenn auf diesem Server
+// /setup server selling ausgeführt wurde. Ohne Setup baut der Bot nichts.
+function isSellingSetUp(data) {
+  return Boolean(data?.config?.sellingSetupAt);
+}
 
 const SELLING_DB_ROW_ID = 'turbo-designs-global';
 let sellingPgPool = null;
@@ -686,6 +724,7 @@ function persistSellingStructure(guildId, structure, reset = false) {
   const data = ensureGuildShopData(store, guildId);
   data.config.channelIds = Object.fromEntries(Object.entries(structure.channels || {}).map(([key, channel]) => [key, channel.id]));
   data.config.roleIds = Object.fromEntries(Object.entries(structure.roleMap || {}).map(([key, role]) => [key, role.id]));
+  data.config.sellingSetupAt = Date.now();
   saveSellingStore(store);
   return data;
 }
@@ -1819,6 +1858,9 @@ function addSellingSetupCommand(body) {
     serverGroup.options = Array.isArray(serverGroup.options) ? serverGroup.options : [];
     if (!serverGroup.options.some(option => option?.type === 1 && option?.name === 'selling')) {
       serverGroup.options.push({ type: 1, name: 'selling', description: 'Erstellt einen kompletten professionellen Verkaufsserver.' });
+    }
+    if (!serverGroup.options.some(option => option?.type === 1 && option?.name === 'bot-channels-loeschen')) {
+      serverGroup.options.push({ type: 1, name: 'bot-channels-loeschen', description: 'Löscht alle Channels, die der Bot selbst erstellt hat.' });
     }
     return patched;
   });
@@ -4425,6 +4467,7 @@ Bitte prüfe bei unbekannten Änderungen die Audit-Logs.`).catch(() => {});
 async function handleSellingMemberJoin(member) {
   if (!member || member.user.bot) return;
   const { data } = getGuildShopData(member.guild.id);
+  if (!isSellingSetUp(data)) return;
 
   // Neue Mitglieder bekommen weiterhin automatisch die Unverified-Rolle.
   const unverifiedId = data.config.roleIds.unverified;
@@ -5127,7 +5170,7 @@ function dataRoleIdMatches(guildId, roleKey, roleId) {
 function scheduleSellingSelfHeal(guild, reason = 'Strukturänderung erkannt') {
   if (!guild || sellingResetGuilds.has(guild.id)) return;
   const { data } = getGuildShopData(guild.id);
-  if (data.config?.selfHealEnabled === false) return;
+  if (!isSellingSetUp(data) || data.config?.selfHealEnabled === false) return;
   const old = sellingSelfHealTimers.get(guild.id);
   if (old) clearTimeout(old);
   const timer = setTimeout(async () => {
@@ -5147,6 +5190,7 @@ function scheduleSellingSelfHeal(guild, reason = 'Strukturänderung erkannt') {
 }
 
 async function sellingHealthCheck(guild,data,selfHeal=false){
+  if(!isSellingSetUp(data)) selfHeal=false;
   const requiredChannels=['📜・regelwerk','✅・verifizierung','👥・teamliste','🛒・bestellen','🎫・support-ticket','📊・shop-dashboard','📋・logs','🛡️・security-logs','🤖・automation-log'];
   const missingChannels=requiredChannels.filter(name=>!findSellingTextChannel(guild,name));
   const missingRoles=['owner','management','support','verified'].filter(key=>!findSellingRole(guild,key));
@@ -5199,7 +5243,7 @@ async function backupSellingStore(){
 async function runSellingAutomationForGuild(guild){
   if (sellingResetGuilds.has(guild.id)) return;
   const { store, data } = getGuildShopData(guild.id);
-  if (!data.automation.enabled) return;
+  if (!isSellingSetUp(data) || !data.automation.enabled) return;
 
   const now = Date.now();
   data.automation.lastTickAt = now;
@@ -6421,12 +6465,115 @@ async function runSellingSetup(interaction) {
   }
 }
 
+// Channels, die der Bot erstellt hat: eigene Liste + Audit-Log (Discord: 45 Tage).
+async function findBotCreatedChannels(guild) {
+  const ids = new Set(readBotCreatedChannels()[guild.id] || []);
+  let before;
+  for (let page = 0; page < 20; page++) {
+    const logs = await guild.fetchAuditLogs({ type: AuditLogEvent.ChannelCreate, user: guild.client.user, limit: 100, before }).catch(() => null);
+    if (!logs?.entries?.size) break;
+    for (const entry of logs.entries.values()) if (entry.targetId) ids.add(entry.targetId);
+    if (logs.entries.size < 100) break;
+    before = logs.entries.last().id;
+  }
+  await guild.channels.fetch().catch(() => null);
+  return [...ids].map(id => guild.channels.cache.get(id)).filter(Boolean);
+}
+
+async function runDeleteBotChannels(interaction) {
+  const { guild } = interaction;
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+    await interaction.reply({ content: '❌ Dafür brauchst du **Administrator**.', ephemeral: true });
+    return;
+  }
+  await interaction.deferReply({ ephemeral: true });
+
+  const channels = await findBotCreatedChannels(guild);
+  if (!channels.length) {
+    await interaction.editReply('✅ Ich habe keine Channels gefunden, die ich selbst erstellt habe. Es gibt nichts zu löschen.');
+    return;
+  }
+  const mine = new Set(channels.map(channel => channel.id));
+  const categories = channels.filter(channel => channel.type === ChannelType.GuildCategory);
+  const others = channels.filter(channel => channel.type !== ChannelType.GuildCategory);
+  // Kategorien mit eigenen (nicht vom Bot erstellten) Channels bleiben stehen.
+  const keptCategories = categories.filter(category => guild.channels.cache.some(channel => channel.parentId === category.id && !mine.has(channel.id)));
+  const kept = new Set(keptCategories.map(category => category.id));
+  const toDelete = [...others, ...categories.filter(category => !kept.has(category.id))];
+
+  const preview = toDelete.map(channel => channel.type === ChannelType.GuildCategory ? `📁 ${channel.name}` : `# ${channel.name}`);
+  const embed = new EmbedBuilder()
+    .setColor(0xED4245)
+    .setTitle(`🗑️ ${toDelete.length} Bot-Channel(s) löschen?`)
+    .setDescription([
+      'Diese Channels habe ich selbst erstellt:',
+      '```',
+      preview.slice(0, 40).join('\n').slice(0, 3000),
+      toDelete.length > 40 ? `… und ${toDelete.length - 40} weitere` : '',
+      '```',
+      keptCategories.length ? `📁 Bleiben (enthalten eigene Channels): ${keptCategories.map(c => `**${c.name}**`).join(', ')}` : '',
+      'Channels, die ihr selbst erstellt habt, bleiben. Rollen werden nicht gelöscht.',
+      'Danach baut der Bot hier erst wieder etwas, wenn ihr `/setup server selling` ausführt.',
+      '**Das lässt sich nicht rückgängig machen.**',
+    ].filter(Boolean).join('\n'));
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('botchannels_confirm').setLabel('Ja, löschen').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('botchannels_cancel').setLabel('Abbrechen').setStyle(ButtonStyle.Secondary),
+  );
+  const message = await interaction.editReply({ embeds: [embed], components: [row] });
+
+  let choice;
+  try {
+    choice = await message.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 60_000 });
+  } catch (_) {
+    await interaction.editReply({ content: '⏱️ Zeit abgelaufen – nichts gelöscht.', embeds: [], components: [] }).catch(() => {});
+    return;
+  }
+  if (choice.customId !== 'botchannels_confirm') {
+    await choice.update({ content: 'Abgebrochen – nichts gelöscht.', embeds: [], components: [] }).catch(() => {});
+    return;
+  }
+  await choice.update({ content: '🗑️ Lösche Bot-Channels …', embeds: [], components: [] }).catch(() => {});
+
+  // Selling-Setup für diesen Server aufheben, damit Self-Heal nichts neu baut.
+  sellingResetGuilds.add(guild.id);
+  try {
+    const store = loadSellingStore();
+    const data = ensureGuildShopData(store, guild.id);
+    data.config.sellingSetupAt = null;
+    data.config.channelIds = {};
+    saveSellingStore(store);
+
+    const deleted = [];
+    let failed = 0;
+    for (const channel of toDelete) {
+      const ok = channel.deletable && await channel.delete(`Bot-Channels löschen durch ${interaction.user.tag}`).then(() => true).catch(() => false);
+      if (ok) deleted.push(channel.id); else failed++;
+    }
+    forgetBotChannels(guild.id, deleted);
+    const text = `✅ **${deleted.length}** Bot-Channel(s) gelöscht${failed ? `, ${failed} konnten nicht gelöscht werden` : ''}${kept.size ? `, ${kept.size} Kategorie(n) mit eigenen Channels behalten` : ''}.\nMit \`/setup server selling\` baut der Bot den Server wieder auf.`;
+    console.log(`🗑️ ${guild.name}: ${deleted.length} Bot-Channels gelöscht (${failed} fehlgeschlagen).`);
+    // Wurde der Befehl in einem gelöschten Channel ausgeführt, gibt es die Antwort nicht mehr → DM.
+    await interaction.editReply({ content: text }).catch(() => interaction.user.send(text).catch(() => {}));
+  } finally {
+    setTimeout(() => sellingResetGuilds.delete(guild.id), 3000);
+  }
+}
+
 async function handleSellingInteraction(interaction) {
   if (interaction.isChatInputCommand?.()
     && interaction.commandName === 'setup'
     && interaction.options.getSubcommandGroup(false) === 'server'
     && interaction.options.getSubcommand(false) === 'selling') {
     await runSellingSetup(interaction);
+    return true;
+  }
+
+  if (interaction.isChatInputCommand?.()
+    && interaction.commandName === 'setup'
+    && interaction.options.getSubcommandGroup(false) === 'server'
+    && interaction.options.getSubcommand(false) === 'bot-channels-loeschen') {
+    await runDeleteBotChannels(interaction);
     return true;
   }
 
@@ -6658,6 +6805,7 @@ Client.prototype.login = function patchedLogin(...args) {
     this.on(Events.GuildMemberAdd, async member => {
       await handleSellingMemberJoin(member).catch(error => console.error('❌ Verify Join Fehler:', error));
       const { store, data } = getGuildShopData(member.guild.id);
+      if (!isSellingSetUp(data)) return;
       await refreshTeamList(member.guild, data).catch(() => {});
       saveSellingStore(store);
     });
@@ -6669,9 +6817,27 @@ Client.prototype.login = function patchedLogin(...args) {
 
     this.once(Events.ClientReady, async () => {
       await initSellingPostgres();
+      // Einmalig: Server, die schon vor dieser Version eingerichtet waren, gelten
+      // als eingerichtet. XV¥ Kaiserreich wurde am 23.11. nur automatisch gebaut.
+      {
+        const store = loadSellingStore();
+        if (!store.setupFlagMigrated) {
+          for (const [id, g] of Object.entries(store.guilds || {})) {
+            if (id === '1553861110866911253' || !g?.config) continue;
+            if (!g.config.sellingSetupAt && Object.keys(g.config.channelIds || {}).length) g.config.sellingSetupAt = 'legacy';
+          }
+          store.setupFlagMigrated = true;
+          saveSellingStore(store);
+          console.log('✅ Selling-Setup-Markierung für bestehende Server übernommen.');
+        }
+      }
       for (const guild of this.guilds.cache.values()) {
         try {
           const { store, data } = getGuildShopData(guild.id);
+          if (!isSellingSetUp(data)) {
+            console.log(`ℹ️ ${guild.name} (${guild.id}): kein /setup server selling – Bot baut dort nichts.`);
+            continue;
+          }
           const startupAudit = await sellingPermissionAudit(guild, data);
           if (data.config?.selfHealEnabled !== false && (startupAudit.issues.length || startupAudit.warnings.length)) {
             await sellingHealthCheck(guild, data, true);
